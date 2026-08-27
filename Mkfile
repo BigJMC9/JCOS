@@ -16,8 +16,8 @@ LOADER_CFLAGS = --target=x86_64-pc-win32-coff -std=c11 -ffreestanding -fno-stack
 
 KERNEL_CFLAGS = --target=x86_64-unknown-none-elf -std=c11 -ffreestanding -fno-stack-protector -fno-builtin -fpie -fno-plt -fvisibility=hidden -mno-red-zone -mno-sse -mno-sse2 -fno-asynchronous-unwind-tables -fno-unwind-tables -Wall -Wextra -Werror -O2
 
-KERNEL_HEADERS = kernel\acpi.h kernel\arch.h kernel\framebuffer.h kernel\interrupt_controller.h kernel\interrupts.h kernel\lib.h kernel\pmm.h kernel\ps2.h kernel\serial.h kernel\shell.h kernel\terminal.h kernel\types.h include\boot_info.h
-KERNEL_C_OBJECTS = $(BUILD)\kernel_acpi.o $(BUILD)\kernel_framebuffer.o $(BUILD)\kernel_interrupt_controller.o $(BUILD)\kernel_interrupts.o $(BUILD)\kernel_kernel.o $(BUILD)\kernel_lib.o $(BUILD)\kernel_pmm.o $(BUILD)\kernel_ps2.o $(BUILD)\kernel_serial.o $(BUILD)\kernel_shell.o $(BUILD)\kernel_terminal.o
+KERNEL_HEADERS = KERNEL_HEADERS = kernel\acpi.h kernel\arch.h kernel\framebuffer.h kernel\font8x8.h kernel\interrupt_controller.h kernel\interrupts.h kernel\lib.h kernel\pmm.h kernel\ps2.h kernel\serial.h kernel\shell.h kernel\terminal.h kernel\types.h include\boot_info.h
+KERNEL_C_OBJECTS = KERNEL_C_OBJECTS = $(BUILD)\kernel_acpi.o $(BUILD)\kernel_framebuffer.o $(BUILD)\kernel_font8x8.o $(BUILD)\kernel_interrupt_controller.o $(BUILD)\kernel_interrupts.o $(BUILD)\kernel_kernel.o $(BUILD)\kernel_lib.o $(BUILD)\kernel_pmm.o $(BUILD)\kernel_ps2.o $(BUILD)\kernel_serial.o $(BUILD)\kernel_shell.o $(BUILD)\kernel_terminal.o
 
 all: check-image-tools $(IMAGE)
 
@@ -61,6 +61,10 @@ $(BUILD)\kernel_acpi.o: kernel\acpi.c $(KERNEL_HEADERS)
 $(BUILD)\kernel_framebuffer.o: kernel\framebuffer.c $(KERNEL_HEADERS)
 	@if not exist "$(BUILD)" mkdir "$(BUILD)"
 	$(CLANG) $(KERNEL_CFLAGS) -c kernel\framebuffer.c -o "$@"
+
+$(BUILD)\kernel_font8x8.o: kernel\font8x8.c $(KERNEL_HEADERS)
+	@if not exist "$(BUILD)" mkdir "$(BUILD)"
+	$(CLANG) $(KERNEL_CFLAGS) -c kernel\font8x8.c -o "$@"
 
 $(BUILD)\kernel_interrupt_controller.o: kernel\interrupt_controller.c $(KERNEL_HEADERS)
 	@if not exist "$(BUILD)" mkdir "$(BUILD)"
