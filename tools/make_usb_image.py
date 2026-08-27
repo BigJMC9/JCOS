@@ -92,13 +92,16 @@ def gpt_header(current_lba: int, backup_lba: int, array_lba: int,
     return bytes(h)
 
 
-def build(efi_path: Path, kernel_path: Path, output_path: Path) -> None:
+def build(efi_path: Path, kernel_path: Path, rootfs_path: Path, output_path: Path) -> None:
     efi = efi_path.read_bytes()
     kernel = kernel_path.read_bytes()
+    rootfs = rootfs_path.read_bytes()
     if not efi.startswith(b"MZ"):
         raise SystemExit(f"{efi_path} is not a PE/COFF EFI executable")
     if not kernel.startswith(b"\x7fELF"):
         raise SystemExit(f"{kernel_path} is not an ELF executable")
+    if not rootfs:
+        raise SystemExit(f"{rootfs_path} is empty")
 
     image = bytearray(TOTAL_SECTORS * SECTOR)
 
@@ -187,6 +190,7 @@ def build(efi_path: Path, kernel_path: Path, output_path: Path) -> None:
 
     efi_first, efi_count = reserve(efi)
     kernel_first, kernel_count = reserve(kernel)
+    rootfs_first, rootfs_count = reserve(rootfs)
     if next_cluster >= cluster_count + 2:
         raise SystemExit("files do not fit in the FAT32 image")
 
@@ -205,6 +209,7 @@ def build(efi_path: Path, kernel_path: Path, output_path: Path) -> None:
     set_fat(4, 0x0FFFFFFF)
     chain(efi_first, efi_count)
     chain(kernel_first, kernel_count)
+    chain(rootfs_first, rootfs_count)
 
     fat1 = PART_START + RESERVED
     fat2 = fat1 + fat_sectors
@@ -212,7 +217,8 @@ def build(efi_path: Path, kernel_path: Path, output_path: Path) -> None:
     image[fat2 * SECTOR:(fat2 + fat_sectors) * SECTOR] = fat
 
     root = (short_entry(b"EFI        ", 0x10, 3) +
-            short_entry(b"KERNEL  ELF", 0x20, kernel_first, len(kernel)))
+            short_entry(b"KERNEL  ELF", 0x20, kernel_first, len(kernel)) +
+            short_entry(b"ROOTFS  TAR", 0x20, rootfs_first, len(rootfs)))
     efi_dir = dot_entry(False, 3) + dot_entry(True, 2) + short_entry(b"BOOT       ", 0x10, 4)
     boot_dir = (dot_entry(False, 4) + dot_entry(True, 3) +
                 short_entry(b"BOOTX64 EFI", 0x20, efi_first, len(efi)))
@@ -229,6 +235,7 @@ def build(efi_path: Path, kernel_path: Path, output_path: Path) -> None:
 
     write_file(efi_first, efi_count, efi)
     write_file(kernel_first, kernel_count, kernel)
+    write_file(rootfs_first, rootfs_count, rootfs)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_bytes(image)
@@ -236,12 +243,13 @@ def build(efi_path: Path, kernel_path: Path, output_path: Path) -> None:
     print(f"ESP: LBA {PART_START}..{PART_END}, FAT32")
     print(f"EFI/BOOT/BOOTX64.EFI: {len(efi)} bytes")
     print(f"KERNEL.ELF: {len(kernel)} bytes")
+    print(f"ROOTFS.TAR: {len(rootfs)} bytes")
 
 
 def main() -> None:
-    if len(sys.argv) != 4:
-        raise SystemExit(f"usage: {sys.argv[0]} BOOTX64.EFI KERNEL.ELF output.img")
-    build(Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3]))
+    if len(sys.argv) != 5:
+        raise SystemExit(f"usage: {sys.argv[0]} BOOTX64.EFI KERNEL.ELF ROOTFS.TAR output.img")
+    build(Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3]), Path(sys.argv[4]))
 
 if __name__ == "__main__":
     main()

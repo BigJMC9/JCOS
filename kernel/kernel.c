@@ -9,6 +9,8 @@
 #include "serial.h"
 #include "shell.h"
 #include "terminal.h"
+#include "vfs.h"
+#include "tar.h"
 
 void kernel_main(BootInfo *boot) {
     arch_cli();
@@ -32,6 +34,17 @@ void kernel_main(BootInfo *boot) {
 
     idt_init();
     bool pmm_ok = pmm_init(boot);
+    
+    vfs_init();
+    bool rootfs_ok = false;
+
+    if (boot->initrd_base && boot->initrd_size) {
+        rootfs_ok = tar_mount(
+            (const void *)(u64)boot->initrd_base,
+            boot->initrd_size
+        );
+    }
+
     bool acpi_ok = acpi_init(boot->acpi_rsdp);
     const AcpiInfo *acpi = acpi_get();
     bool controller_ok = interrupt_controller_init(acpi);
@@ -43,6 +56,8 @@ void kernel_main(BootInfo *boot) {
     terminal_write("  IRQ: "); terminal_writeln(controller_ok ? interrupt_controller_name() : "FAILED");
     terminal_write("PS/2: "); terminal_write(keyboard_ok ? "DETECTED" : "NOT DETECTED");
     terminal_write("  COM1: "); terminal_writeln(serial_available() ? "READY" : "NOT DETECTED");
+    terminal_write("ROOTFS: ");
+    terminal_writeln(rootfs_ok ? "READY" : "FAILED");
     terminal_writeln("TYPE help AND PRESS ENTER.");
     terminal_putchar('\n');
 

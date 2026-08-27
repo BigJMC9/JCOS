@@ -8,16 +8,28 @@
 #include "ps2.h"
 #include "serial.h"
 #include "terminal.h"
+#include "vfs.h"
 
 #define INPUT_CAPACITY 128U
+
+
+static VfsNode *g_cwd;
 
 static const BootInfo *g_boot;
 static char g_input[INPUT_CAPACITY];
 static u32 g_length;
 
 static void prompt(void) {
+    char path[VFS_PATH_MAX];
     terminal_set_color(terminal_accent_color());
-    terminal_write("JA> ");
+    terminal_write("JA:");
+
+    if (vfs_get_path(g_cwd, path, sizeof(path)))
+        terminal_write(path);
+    else
+        terminal_write("?");
+
+    terminal_write("> ");
     terminal_set_color(terminal_default_color());
 }
 
@@ -39,6 +51,10 @@ static void command_help(void) {
     terminal_writeln("  help        show this list");
     terminal_writeln("  about       describe this kernel");
     terminal_writeln("  clear       clear framebuffer and serial terminal");
+    terminal_writeln("  ls          list files in current directory");
+    terminal_writeln("  cd PATH     change current directory");
+    terminal_writeln("  pwd         print current directory");
+    terminal_writeln("  cat FILE    print a file");
     terminal_writeln("  memory      show UEFI memory-map and allocator state");
     terminal_writeln("  alloc       allocate one physical 4 KiB page");
     terminal_writeln("  cpu         show CPUID information");
@@ -172,9 +188,76 @@ static NORETURN void command_reboot(void) {
     arch_triple_fault();
 }
 
+static void command_pwd(void) {
+    char path[VFS_PATH_MAX];
+
+    if (!vfs_get_path(g_cwd, path, sizeof(path))) {
+        terminal_writeln("pwd: unable to determine path");
+        return;
+    }
+
+    terminal_writeln(path);
+}
+
+static void command_ls(void) {
+    if (!g_cwd) return;
+
+    for (VfsNode *node = g_cwd->first_child; node; node = node->next_sibling) {
+        terminal_write(node->name);
+        if (node->type == VFS_DIRECTORY) terminal_putchar('/');
+        terminal_putchar('\n');
+    }
+}
+
+static void command_cd(const char *path) {
+    if (!path || !*path) { g_cwd = vfs_root(); return; }
+
+    VfsNode *node = vfs_resolve(g_cwd, path);
+
+    if (!node) {
+        terminal_set_color(terminal_error_color());
+        terminal_writeln("cd: path not found");
+        terminal_set_color(terminal_default_color());
+        return;
+    }
+
+    if (node->type != VFS_DIRECTORY) {
+        terminal_set_color(terminal_error_color());
+        terminal_writeln("cd: not a directory");
+        terminal_set_color(terminal_default_color());
+        return;
+    }
+
+    g_cwd = node;
+}
+
+static void command_cat(const char *path) {
+    VfsNode *node = vfs_resolve(g_cwd, path);
+
+    if (!node) { terminal_writeln("cat: file not found"); return;}
+    if (node->type != VFS_FILE) { terminal_writeln("cat: not a file"); return;}
+
+    for (u64 i = 0; i < node->size; ++i)
+        terminal_putchar((char)node->data[i]);
+
+    if (node->size && node->data[node->size - 1] != '\n') {
+        terminal_putchar('\n');
+    }
+}
+
 static void execute(char *line) {
     char *command = trim(line);
     if (!*command) return;
+    char *args = command;
+
+    while (*args && !k_ascii_space(*args)) ++args;
+    if (*args) {
+        *args++ = 0; 
+        args = trim(args); 
+    } else { 
+        args = ""; 
+    }
+
     if (k_strieq(command, "help")) command_help();
     else if (k_strieq(command, "about")) command_about();
     else if (k_strieq(command, "clear")) terminal_clear();
@@ -185,6 +268,10 @@ static void execute(char *line) {
     else if (k_strieq(command, "acpi")) command_acpi();
     else if (k_strieq(command, "fault")) __asm__ volatile ("ud2");
     else if (k_strieq(command, "reboot")) command_reboot();
+    else if (k_strieq(command, "pwd")) command_pwd();
+    else if (k_strieq(command, "ls")) command_ls();
+    else if (k_strieq(command, "cd")) command_cd(args);
+    else if (k_strieq(command, "cat")) command_cat(args);
     else {
         terminal_set_color(terminal_error_color());
         terminal_write("UNKNOWN COMMAND: "); terminal_writeln(command);
@@ -206,6 +293,7 @@ static int next_input(void) {
 NORETURN void shell_run(const BootInfo *boot) {
     g_boot = boot;
     g_length = 0;
+    g_cwd = vfs_root();
     prompt();
     for (;;) {
         int input = next_input();

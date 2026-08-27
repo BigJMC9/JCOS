@@ -14,6 +14,13 @@ static CHAR16 MSG_EXIT[]  = {'E','x','i','t','i','n','g',' ','U','E','F','I',' '
 static CHAR16 MSG_NO_ACPI[] = {'W','a','r','n','i','n','g',':',' ','A','C','P','I',' ','R','S','D','P',' ','n','o','t',' ','f','o','u','n','d','.','\r','\n',0};
 static CHAR16 MSG_FAIL[]  = {'B','o','o','t',' ','f','a','i','l','e','d',':',' ',0};
 static CHAR16 KERNEL_PATH[] = {'\\','K','E','R','N','E','L','.','E','L','F',0};
+static CHAR16 ROOTFS_PATH[] = {'\\','R','O','O','T','F','S','.','T','A','R',0};
+static CHAR16 MSG_ROOTFS[] = {
+    'L','o','a','d','i','n','g',' ',
+    'R','O','O','T','F','S','.','T','A','R',
+    '.','.','.',
+    '\r','\n',0
+};
 
 EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *system_table);
 /* Force one PE base relocation so firmware may freely relocate BOOTX64.EFI. */
@@ -82,7 +89,7 @@ typedef struct {
     u64 entry;
 } LoadedKernel;
 
-static EFI_STATUS read_entire_file(EFI_HANDLE image, void **out_buffer, u64 *out_size) {
+static EFI_STATUS read_entire_file(EFI_HANDLE image, CHAR16 *path, void **out_buffer, u64 *out_size) {
     EFI_STATUS status;
     EFI_LOADED_IMAGE_PROTOCOL *loaded = 0;
     EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *fs = 0;
@@ -97,7 +104,7 @@ static EFI_STATUS read_entire_file(EFI_HANDLE image, void **out_buffer, u64 *out
     if (EFI_ERROR(status)) return status;
     status = fs->OpenVolume(fs, &root);
     if (EFI_ERROR(status)) return status;
-    status = root->Open(root, &file, KERNEL_PATH, EFI_FILE_MODE_READ, 0);
+    status = root->Open(root, &file, path, EFI_FILE_MODE_READ, 0);
     if (EFI_ERROR(status)) { root->Close(root); return status; }
 
     UINTN info_size = 0;
@@ -110,7 +117,7 @@ static EFI_STATUS read_entire_file(EFI_HANDLE image, void **out_buffer, u64 *out
 
     u64 size = ((EFI_FILE_INFO_PREFIX *)info)->FileSize;
     g_bs->FreePool(info);
-    if (size < sizeof(Elf64_Ehdr)) { file->Close(file); root->Close(root); return EFI_UNSUPPORTED; }
+    if (size == 0) { file->Close(file); root->Close(root); return EFI_UNSUPPORTED; }
 
     status = g_bs->AllocatePool(EfiLoaderData, (UINTN)size, &data);
     if (EFI_ERROR(status)) { file->Close(file); root->Close(root); return status; }
@@ -134,9 +141,9 @@ static EFI_STATUS load_kernel_elf(EFI_HANDLE image, LoadedKernel *out) {
 
     void *file = 0;
     u64 file_size = 0;
-    EFI_STATUS status = read_entire_file(image, &file, &file_size);
+    EFI_STATUS status = read_entire_file(image, KERNEL_PATH, &file, &file_size);
     if (EFI_ERROR(status)) return status;
-
+    if (file_size < sizeof(Elf64_Ehdr)) { g_bs->FreePool(file); return EFI_UNSUPPORTED;}
     Elf64_Ehdr *header = (Elf64_Ehdr *)file;
     if (header->e_ident[0] != 0x7F || header->e_ident[1] != 'E' || header->e_ident[2] != 'L' || header->e_ident[3] != 'F' ||
         header->e_ident[4] != ELFCLASS64 || header->e_ident[5] != ELFDATA2LSB || header->e_type != ET_DYN ||
@@ -261,6 +268,26 @@ static EFI_STATUS load_kernel_elf(EFI_HANDLE image, LoadedKernel *out) {
     return EFI_SUCCESS;
 }
 
+static EFI_STATUS load_rootfs(EFI_HANDLE image, BootInfo *boot) {
+    void *data = 0;
+    u64 size = 0;
+
+    EFI_STATUS status = read_entire_file(
+        image,
+        ROOTFS_PATH,
+        &data,
+        &size
+    );
+
+    if (EFI_ERROR(status))
+        return status;
+
+    boot->initrd_base = (u64)(UINTN)data;
+    boot->initrd_size = size;
+
+    return EFI_SUCCESS;
+}
+
 static EFI_STATUS get_framebuffer(BootInfo *boot) {
     EFI_GRAPHICS_OUTPUT_PROTOCOL *gop = 0;
     EFI_STATUS status = g_bs->LocateProtocol(&GOP_GUID, 0, (void **)&gop);
@@ -352,6 +379,11 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *system_table) {
     g_boot_info.kernel_base = kernel.base;
     g_boot_info.kernel_size = kernel.size;
     g_boot_info.kernel_entry = kernel.entry;
+
+    text(MSG_ROOTFS);
+    status = load_rootfs(image, &g_boot_info);
+    if (EFI_ERROR(status)) return fail(status);
+
     g_boot_info.acpi_rsdp = find_acpi_rsdp();
     if (!g_boot_info.acpi_rsdp) text(MSG_NO_ACPI);
 

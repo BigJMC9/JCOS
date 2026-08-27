@@ -263,10 +263,11 @@ def validate_elf(kernel: bytes) -> None:
                 require(section_size == 0, "kernel contains runtime relocation records")
 
 
-def validate(image_path: Path, efi_path: Path, kernel_path: Path) -> None:
+def validate(image_path: Path, efi_path: Path, kernel_path: Path, rootfs_path: Path) -> None:
     image = image_path.read_bytes()
     efi = efi_path.read_bytes()
     kernel = kernel_path.read_bytes()
+    rootfs = rootfs_path.read_bytes()
     require(len(image) >= 34 * SECTOR and len(image) % SECTOR == 0, "image size is invalid")
     last_lba = len(image) // SECTOR - 1
 
@@ -294,6 +295,7 @@ def validate(image_path: Path, efi_path: Path, kernel_path: Path) -> None:
     root = fat.directory(fat.root_cluster)
     require(b"EFI        " in root and root[b"EFI        "].attributes & 0x10, "missing /EFI directory")
     require(b"KERNEL  ELF" in root and not root[b"KERNEL  ELF"].attributes & 0x10, "missing /KERNEL.ELF")
+    require(b"ROOTFS  TAR" in root and not root[b"ROOTFS  TAR"].attributes & 0x10, "missing /ROOTFS.TAR")
     efi_dir = fat.directory(root[b"EFI        "].first_cluster)
     require(b"BOOT       " in efi_dir and efi_dir[b"BOOT       "].attributes & 0x10, "missing /EFI/BOOT directory")
     boot_dir = fat.directory(efi_dir[b"BOOT       "].first_cluster)
@@ -302,8 +304,10 @@ def validate(image_path: Path, efi_path: Path, kernel_path: Path) -> None:
 
     embedded_kernel = fat.data(root[b"KERNEL  ELF"].first_cluster, root[b"KERNEL  ELF"].size)
     embedded_efi = fat.data(boot_dir[b"BOOTX64 EFI"].first_cluster, boot_dir[b"BOOTX64 EFI"].size)
+    embedded_rootfs = fat.data(root[b"ROOTFS  TAR"].first_cluster, root[b"ROOTFS  TAR"].size)
     require(embedded_kernel == kernel, "embedded KERNEL.ELF differs from build artifact")
     require(embedded_efi == efi, "embedded BOOTX64.EFI differs from build artifact")
+    require(embedded_rootfs == rootfs, "embedded ROOTFS.TAR differs from build artifact")
     validate_pe(efi)
     validate_elf(kernel)
 
@@ -311,6 +315,7 @@ def validate(image_path: Path, efi_path: Path, kernel_path: Path) -> None:
     print(f"  image:  {len(image):,} bytes  sha256={sha256(image)}")
     print(f"  EFI:    {len(efi):,} bytes  sha256={sha256(efi)}")
     print(f"  kernel: {len(kernel):,} bytes  sha256={sha256(kernel)}")
+    print(f"  rootfs: {len(rootfs):,} bytes  "f"sha256={sha256(rootfs)}")
     print(f"  ESP:    LBA {first_lba}..{final_lba} ({final_lba - first_lba + 1:,} sectors)")
 
 
@@ -319,9 +324,10 @@ def main() -> int:
     parser.add_argument("image", type=Path)
     parser.add_argument("efi", type=Path)
     parser.add_argument("kernel", type=Path)
+    parser.add_argument("rootfs", type=Path)
     args = parser.parse_args()
     try:
-        validate(args.image, args.efi, args.kernel)
+        validate(args.image, args.efi, args.kernel, args.rootfs)
     except (OSError, ValidationError, struct.error, ValueError) as exc:
         print(f"validation failed: {exc}", file=sys.stderr)
         return 1

@@ -11,7 +11,7 @@ typedef signed int         s32;
 typedef signed long long   s64;
 
 #define BOOT_INFO_MAGIC 0x4A434F53424F4F54ULL  /* "JCOSBOOT" */
-#define BOOT_INFO_VERSION 5U
+#define BOOT_INFO_VERSION 6U
 
 typedef struct {
     u32 type;
@@ -53,6 +53,9 @@ typedef struct {
     u64 kernel_size;
     u64 kernel_entry;
     u64 acpi_rsdp;
+
+    u64 initrd_base;
+    u64 initrd_size;
 } BootInfo;
 
 #endif

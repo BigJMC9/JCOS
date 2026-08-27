@@ -1,7 +1,16 @@
 BUILD := build
 EFI := $(BUILD)/BOOTX64.EFI
 KERNEL := $(BUILD)/KERNEL.ELF
+ROOTFS_DIR := rootfs
+ROOTFS := $(BUILD)/ROOTFS.TAR
+ROOTFS_FILES := $(shell test -d $(ROOTFS_DIR) && find $(ROOTFS_DIR) -type f)
 IMAGE := $(BUILD)/JA-os.img
+
+$(ROOTFS): $(ROOTFS_FILES) | $(BUILD)
+	@test -d "$(ROOTFS_DIR)" || { echo "Missing $(ROOTFS_DIR) directory"; exit 1; }
+	@test -n "$(ROOTFS_FILES)" || { echo "$(ROOTFS_DIR) contains no files"; exit 1; }
+	rm -f $@
+	tar --format=ustar -cf $@ -C $(ROOTFS_DIR) .
 
 CLANG ?= clang
 LLD_LINK ?= lld-link
@@ -83,11 +92,14 @@ $(KERNEL): $(BUILD)/arch.o $(KERNEL_C_OBJECTS) kernel/linker.ld
 		exit 1; \
 	fi
 
-$(IMAGE): $(EFI) $(KERNEL) tools/make_usb_image.py
-	$(PYTHON) tools/make_usb_image.py $(EFI) $(KERNEL) $(IMAGE)
+$(ROOTFS): $(shell find $(ROOTFS_DIR) -type f) | $(BUILD)
+	tar --format=ustar -cf $@ -C $(ROOTFS_DIR) .
+
+$(IMAGE): $(EFI) $(KERNEL) $(ROOTFS) tools/make_usb_image.py
+	$(PYTHON) tools/make_usb_image.py $(EFI) $(KERNEL) $(ROOTFS) $(IMAGE)
 
 validate: check-image-tools $(IMAGE) tools/validate_image.py
-	$(PYTHON) tools/validate_image.py $(IMAGE) $(EFI) $(KERNEL)
+	$(PYTHON) tools/validate_image.py $(IMAGE) $(EFI) $(KERNEL) $(ROOTFS)
 
 inspect: check-inspect-tools binaries
 	@echo "=== EFI loader ==="
