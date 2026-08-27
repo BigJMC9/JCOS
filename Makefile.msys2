@@ -1,0 +1,88 @@
+BUILD := build
+EFI := $(BUILD)/BOOTX64.EFI
+KERNEL := $(BUILD)/KERNEL.ELF
+IMAGE := $(BUILD)/hello-os-v4.img
+
+CLANG ?= clang
+LLD_LINK ?= lld-link
+ELF_LD ?= ld.lld
+NASM ?= nasm
+PYTHON ?= python
+LLVM_READELF ?= llvm-readelf
+LLVM_OBJDUMP ?= llvm-objdump
+QEMU ?= qemu-system-x86_64
+OVMF_CODE ?= /mingw64/share/qemu/edk2-x86_64-code.fd
+
+LOADER_CFLAGS := --target=x86_64-pc-win32-coff -ffreestanding -fno-stack-protector \
+                 -fno-builtin -fno-exceptions -fno-asynchronous-unwind-tables \
+                 -fno-unwind-tables -Wall -Wextra -O2
+
+KERNEL_CFLAGS := --target=x86_64-unknown-none-elf -ffreestanding -fno-stack-protector \
+                 -fno-builtin -fno-pic -fpie -mno-red-zone -mno-sse -mno-sse2 \
+                 -fno-asynchronous-unwind-tables -fno-unwind-tables -Wall -Wextra -O2
+
+.PHONY: all image run inspect clean check-build-tools check-image-tools check-inspect-tools check-run-tools
+
+all: check-build-tools $(EFI) $(KERNEL)
+
+image: check-image-tools $(IMAGE)
+
+check-build-tools:
+	@command -v $(CLANG) >/dev/null || { echo "Missing $(CLANG). Run: pacman -S --needed mingw-w64-x86_64-clang"; exit 1; }
+	@command -v $(LLD_LINK) >/dev/null || { echo "Missing $(LLD_LINK). Run: pacman -S --needed mingw-w64-x86_64-lld"; exit 1; }
+	@command -v $(ELF_LD) >/dev/null || { echo "Missing $(ELF_LD). Run: pacman -S --needed mingw-w64-x86_64-lld"; exit 1; }
+	@command -v $(LLVM_READELF) >/dev/null || { echo "Missing $(LLVM_READELF). Run: pacman -S --needed mingw-w64-x86_64-llvm-tools"; exit 1; }
+	@command -v $(NASM) >/dev/null || { echo "Missing $(NASM). Run: pacman -S --needed mingw-w64-x86_64-nasm"; exit 1; }
+
+check-image-tools: check-build-tools
+	@command -v $(PYTHON) >/dev/null || { echo "Missing $(PYTHON). Run: pacman -S --needed mingw-w64-x86_64-python"; exit 1; }
+
+check-inspect-tools: check-build-tools
+	@command -v $(LLVM_OBJDUMP) >/dev/null || { echo "Missing $(LLVM_OBJDUMP). Run: pacman -S --needed mingw-w64-x86_64-llvm-tools"; exit 1; }
+
+check-run-tools: check-image-tools
+	@command -v $(QEMU) >/dev/null || { echo "Missing $(QEMU). Run: pacman -S --needed mingw-w64-x86_64-qemu"; exit 1; }
+
+$(BUILD):
+	mkdir -p $(BUILD)
+
+$(BUILD)/loader.obj: loader/loader.c loader/uefi.h loader/elf.h include/boot_info.h | $(BUILD)
+	$(CLANG) $(LOADER_CFLAGS) -c loader/loader.c -o $@
+
+$(EFI): $(BUILD)/loader.obj
+	MSYS2_ARG_CONV_EXCL='*' $(LLD_LINK) /subsystem:efi_application /entry:efi_main /nodefaultlib /machine:x64 \
+	           /dynamicbase /out:$@ $^
+
+$(BUILD)/entry.o: kernel/entry.asm include/boot_info.h | $(BUILD)
+	$(NASM) -f elf64 kernel/entry.asm -o $@
+
+$(BUILD)/kernel.o: kernel/kernel.c include/boot_info.h | $(BUILD)
+	$(CLANG) $(KERNEL_CFLAGS) -c kernel/kernel.c -o $@
+
+$(KERNEL): $(BUILD)/entry.o $(BUILD)/kernel.o kernel/linker.ld
+	$(ELF_LD) -m elf_x86_64 -pie --no-dynamic-linker -nostdlib -T kernel/linker.ld -o $@ $(BUILD)/entry.o $(BUILD)/kernel.o
+	@if $(LLVM_READELF) -r $@ | grep -q 'R_X86_64'; then \
+		echo "Kernel has runtime relocations; loader does not apply them."; \
+		$(LLVM_READELF) -r $@; \
+		exit 1; \
+	fi
+
+$(IMAGE): $(EFI) $(KERNEL) tools/make_usb_image.py
+	$(PYTHON) tools/make_usb_image.py $(EFI) $(KERNEL) $(IMAGE)
+
+inspect: check-inspect-tools all
+	@echo "=== EFI loader ==="
+	$(LLVM_OBJDUMP) -p $(EFI) | grep -E 'file format|Subsystem|reloc' || true
+	@echo "=== kernel ELF ==="
+	$(LLVM_READELF) -h $(KERNEL) | grep -E 'Class:|Type:|Machine:|Entry point'
+	$(LLVM_READELF) -l $(KERNEL)
+	$(LLVM_READELF) -r $(KERNEL)
+
+run: check-run-tools $(IMAGE)
+	@if [ ! -f "$(OVMF_CODE)" ]; then echo "OVMF firmware not found: $(OVMF_CODE)"; exit 1; fi
+	$(QEMU) -machine q35 -m 256M \
+		-drive if=pflash,format=raw,readonly=on,file="$(OVMF_CODE)" \
+		-drive format=raw,file=$(IMAGE)
+
+clean:
+	rm -rf $(BUILD)

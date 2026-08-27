@@ -1,0 +1,76 @@
+BUILD = build
+EFI = $(BUILD)\BOOTX64.EFI
+KERNEL = $(BUILD)\KERNEL.ELF
+IMAGE = $(BUILD)\hello-os-v4.img
+
+CLANG = clang
+LLD_LINK = lld-link
+LD = ld.lld
+NASM = nasm
+PYTHON = python
+LLVM_READELF = llvm-readelf
+LLVM_OBJDUMP = llvm-objdump
+QEMU = qemu-system-x86_64
+
+LOADER_CFLAGS = --target=x86_64-pc-win32-coff -ffreestanding -fno-stack-protector -fno-builtin -fno-exceptions -fno-asynchronous-unwind-tables -fno-unwind-tables -Wall -Wextra -O2
+
+KERNEL_CFLAGS = --target=x86_64-unknown-none-elf -ffreestanding -fno-stack-protector -fno-builtin -fno-pic -fpie -mno-red-zone -mno-sse -mno-sse2 -fno-asynchronous-unwind-tables -fno-unwind-tables -Wall -Wextra -O2
+
+all: check-build-tools $(EFI) $(KERNEL)
+
+image: check-image-tools $(IMAGE)
+
+check-build-tools:
+	@where /q $(CLANG) || (echo Missing $(CLANG). Install LLVM/Clang and add it to PATH. & exit /b 1)
+	@where /q $(LLD_LINK) || (echo Missing $(LLD_LINK). Install LLVM/Clang and add it to PATH. & exit /b 1)
+	@where /q $(LD) || (echo Missing $(LD). Install LLVM/Clang and add it to PATH. & exit /b 1)
+	@where /q $(LLVM_READELF) || (echo Missing $(LLVM_READELF). Install LLVM tools and add them to PATH. & exit /b 1)
+	@where /q $(NASM) || (echo Missing $(NASM). Install NASM and add it to PATH. & exit /b 1)
+
+check-image-tools: check-build-tools
+	@where /q $(PYTHON) || (echo Missing $(PYTHON). Install Python and add it to PATH. & exit /b 1)
+
+check-inspect-tools: check-build-tools
+	@where /q $(LLVM_OBJDUMP) || (echo Missing $(LLVM_OBJDUMP). Install LLVM tools and add them to PATH. & exit /b 1)
+
+check-run-tools: check-image-tools
+	@where /q $(QEMU) || (echo Missing $(QEMU). Install QEMU and add it to PATH. & exit /b 1)
+
+$(BUILD):
+	@if not exist "$(BUILD)" mkdir "$(BUILD)"
+
+$(BUILD)\loader.obj: loader\loader.c loader\uefi.h loader\elf.h include\boot_info.h $(BUILD)
+	$(CLANG) $(LOADER_CFLAGS) -c loader\loader.c -o "$@"
+
+$(EFI): $(BUILD)\loader.obj
+	$(LLD_LINK) /subsystem:efi_application /entry:efi_main /nodefaultlib /machine:x64 /dynamicbase /out:"$@" $(BUILD)\loader.obj
+
+$(BUILD)\entry.o: kernel\entry.asm include\boot_info.h $(BUILD)
+	$(NASM) -f elf64 kernel\entry.asm -o "$@"
+
+$(BUILD)\kernel.o: kernel\kernel.c include\boot_info.h $(BUILD)
+	$(CLANG) $(KERNEL_CFLAGS) -c kernel\kernel.c -o "$@"
+
+$(KERNEL): $(BUILD)\entry.o $(BUILD)\kernel.o kernel\linker.ld
+	$(LD) -pie --no-dynamic-linker -nostdlib -T kernel\linker.ld -o "$@" $(BUILD)\entry.o $(BUILD)\kernel.o
+	@$(LLVM_READELF) -r "$@" > "$(BUILD)\kernel.relocs.txt"
+	@findstr /C:"R_X86_64" "$(BUILD)\kernel.relocs.txt" >NUL && (echo Kernel has runtime relocations; loader does not apply them. & type "$(BUILD)\kernel.relocs.txt" & exit /b 1) || rem no runtime relocations
+	@del "$(BUILD)\kernel.relocs.txt" >NUL 2>NUL
+
+$(IMAGE): $(EFI) $(KERNEL) tools\make_usb_image.py
+	$(PYTHON) tools\make_usb_image.py "$(EFI)" "$(KERNEL)" "$(IMAGE)"
+
+inspect: check-inspect-tools all
+	@echo === EFI loader ===
+	$(LLVM_OBJDUMP) -p "$(EFI)"
+	@echo === kernel ELF ===
+	$(LLVM_READELF) -h "$(KERNEL)"
+	$(LLVM_READELF) -l "$(KERNEL)"
+	$(LLVM_READELF) -r "$(KERNEL)"
+
+run: check-run-tools $(IMAGE)
+	@if "$(OVMF_CODE)"=="" (echo OVMF_CODE is not set. Set OVMF_CODE=C:\path\to\OVMF_CODE.fd & exit /b 1)
+	$(QEMU) -machine q35 -m 256M -drive if=pflash,format=raw,readonly=on,file="$(OVMF_CODE)" -drive format=raw,file="$(IMAGE)"
+
+clean:
+	@if exist "$(BUILD)" rmdir /s /q "$(BUILD)"
