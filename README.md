@@ -1,4 +1,4 @@
-# Hello OS v4 - UEFI loader + standalone x86_64 kernel
+# JA OS v4 - UEFI loader + standalone x86_64 kernel
 
 This version separates firmware-facing boot code from the kernel:
 
@@ -82,7 +82,7 @@ Outputs:
 ```text
 build/BOOTX64.EFI
 build/KERNEL.ELF
-build/hello-os-v4.img
+build/JA-os-v4.img
 ```
 
 Inspect the binaries:
@@ -119,7 +119,7 @@ Linux:
 
 ```sh
 lsblk
-sudo dd if=build/hello-os-v4.img of=/dev/sdX bs=4M status=progress conv=fsync
+sudo dd if=build/JA-os-v4.img of=/dev/sdX bs=4M status=progress conv=fsync
 sync
 ```
 
@@ -130,11 +130,11 @@ macOS:
 ```sh
 diskutil list
 diskutil unmountDisk /dev/diskN
-sudo dd if=build/hello-os-v4.img of=/dev/rdiskN bs=1m
+sudo dd if=build/JA-os-v4.img of=/dev/rdiskN bs=1m
 diskutil eject /dev/diskN
 ```
 
-Windows: write `build/hello-os-v4.img` as a raw image with a raw disk imaging tool.
+Windows: write `build/JA-os-v4.img` as a raw image with a raw disk imaging tool.
 
 Boot the USB in **UEFI x86-64 mode**. Secure Boot must currently be disabled because this hobby EFI loader is unsigned.
 

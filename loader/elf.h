@@ -8,6 +8,8 @@
 #define ET_DYN 3
 #define EM_X86_64 62
 #define PT_LOAD 1
+#define PF_X 1
+#define PF_W 2
 
 typedef struct {
     u8 e_ident[16];

@@ -119,7 +119,7 @@ def build(efi_path: Path, kernel_path: Path, output_path: Path) -> None:
     entry[16:32] = uuid.uuid4().bytes_le
     entry[32:40] = p64(PART_START)
     entry[40:48] = p64(PART_END)
-    name = "JC_OS_V4".encode("utf-16le")
+    name = "JA_OS_V5".encode("utf-16le")
     entry[56:56 + len(name)] = name
     entries[:GPT_ENTRY_SIZE] = entry
     entries_crc = binascii.crc32(entries) & 0xFFFFFFFF
@@ -158,8 +158,8 @@ def build(efi_path: Path, kernel_path: Path, output_path: Path) -> None:
     boot[50:52] = p16(6)
     boot[64] = 0x80
     boot[66] = 0x29
-    boot[67:71] = p32(0x5634484F)
-    boot[71:82] = b"HELLOOSV4  "
+    boot[67:71] = p32(0x5635484F)
+    boot[71:82] = b"JAOSV5  "
     boot[82:90] = b"FAT32   "
     boot[510:512] = b"\x55\xAA"
     image[PART_START * SECTOR:(PART_START + 1) * SECTOR] = boot

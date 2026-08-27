@@ -36,6 +36,11 @@ typedef struct {
 } EFI_GUID;
 
 typedef struct {
+    EFI_GUID VendorGuid;
+    void *VendorTable;
+} EFI_CONFIGURATION_TABLE;
+
+typedef struct {
     u64 Signature;
     u32 Revision;
     u32 HeaderSize;

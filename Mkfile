@@ -1,22 +1,27 @@
 BUILD = build
 EFI = $(BUILD)\BOOTX64.EFI
 KERNEL = $(BUILD)\KERNEL.ELF
-IMAGE = $(BUILD)\hello-os-v4.img
+IMAGE = $(BUILD)\JA-os.img
 
 CLANG = clang
 LLD_LINK = lld-link
 LD = ld.lld
 NASM = nasm
 PYTHON = python
-LLVM_READELF = llvm-readelf
-LLVM_OBJDUMP = llvm-objdump
+READELF = llvm-readelf
+OBJDUMP = llvm-objdump
 QEMU = qemu-system-x86_64
 
-LOADER_CFLAGS = --target=x86_64-pc-win32-coff -ffreestanding -fno-stack-protector -fno-builtin -fno-exceptions -fno-asynchronous-unwind-tables -fno-unwind-tables -Wall -Wextra -O2
+LOADER_CFLAGS = --target=x86_64-pc-win32-coff -std=c11 -ffreestanding -fno-stack-protector -fno-builtin -fno-exceptions -fno-asynchronous-unwind-tables -fno-unwind-tables -Wall -Wextra -Werror -O2
 
-KERNEL_CFLAGS = --target=x86_64-unknown-none-elf -ffreestanding -fno-stack-protector -fno-builtin -fno-pic -fpie -mno-red-zone -mno-sse -mno-sse2 -fno-asynchronous-unwind-tables -fno-unwind-tables -Wall -Wextra -O2
+KERNEL_CFLAGS = --target=x86_64-unknown-none-elf -std=c11 -ffreestanding -fno-stack-protector -fno-builtin -fpie -fno-plt -fvisibility=hidden -mno-red-zone -mno-sse -mno-sse2 -fno-asynchronous-unwind-tables -fno-unwind-tables -Wall -Wextra -Werror -O2
 
-all: check-build-tools $(EFI) $(KERNEL)
+KERNEL_HEADERS = kernel\acpi.h kernel\arch.h kernel\framebuffer.h kernel\interrupt_controller.h kernel\interrupts.h kernel\lib.h kernel\pmm.h kernel\ps2.h kernel\serial.h kernel\shell.h kernel\terminal.h kernel\types.h include\boot_info.h
+KERNEL_C_OBJECTS = $(BUILD)\kernel_acpi.o $(BUILD)\kernel_framebuffer.o $(BUILD)\kernel_interrupt_controller.o $(BUILD)\kernel_interrupts.o $(BUILD)\kernel_kernel.o $(BUILD)\kernel_lib.o $(BUILD)\kernel_pmm.o $(BUILD)\kernel_ps2.o $(BUILD)\kernel_serial.o $(BUILD)\kernel_shell.o $(BUILD)\kernel_terminal.o
+
+all: check-image-tools $(IMAGE)
+
+binaries: check-build-tools $(EFI) $(KERNEL)
 
 image: check-image-tools $(IMAGE)
 
@@ -24,14 +29,13 @@ check-build-tools:
 	@where /q $(CLANG) || (echo Missing $(CLANG). Install LLVM/Clang and add it to PATH. & exit /b 1)
 	@where /q $(LLD_LINK) || (echo Missing $(LLD_LINK). Install LLVM/Clang and add it to PATH. & exit /b 1)
 	@where /q $(LD) || (echo Missing $(LD). Install LLVM/Clang and add it to PATH. & exit /b 1)
-	@where /q $(LLVM_READELF) || (echo Missing $(LLVM_READELF). Install LLVM tools and add them to PATH. & exit /b 1)
-	@where /q $(NASM) || (echo Missing $(NASM). Install NASM and add it to PATH. & exit /b 1)
+	@where /q $(READELF) || (echo Missing $(READELF). Install LLVM tools and add them to PATH. & exit /b 1)
 
 check-image-tools: check-build-tools
 	@where /q $(PYTHON) || (echo Missing $(PYTHON). Install Python and add it to PATH. & exit /b 1)
 
 check-inspect-tools: check-build-tools
-	@where /q $(LLVM_OBJDUMP) || (echo Missing $(LLVM_OBJDUMP). Install LLVM tools and add them to PATH. & exit /b 1)
+	@where /q $(OBJDUMP) || (echo Missing $(OBJDUMP). Install LLVM tools and add them to PATH. & exit /b 1)
 
 check-run-tools: check-image-tools
 	@where /q $(QEMU) || (echo Missing $(QEMU). Install QEMU and add it to PATH. & exit /b 1)
@@ -39,38 +43,96 @@ check-run-tools: check-image-tools
 $(BUILD):
 	@if not exist "$(BUILD)" mkdir "$(BUILD)"
 
-$(BUILD)\loader.obj: loader\loader.c loader\uefi.h loader\elf.h include\boot_info.h $(BUILD)
+$(BUILD)\loader.obj: loader\loader.c loader\uefi.h loader\elf.h include\boot_info.h
+	@if not exist "$(BUILD)" mkdir "$(BUILD)"
 	$(CLANG) $(LOADER_CFLAGS) -c loader\loader.c -o "$@"
 
 $(EFI): $(BUILD)\loader.obj
-	$(LLD_LINK) /subsystem:efi_application /entry:efi_main /nodefaultlib /machine:x64 /dynamicbase /out:"$@" $(BUILD)\loader.obj
+	$(LLD_LINK) /subsystem:efi_application /entry:efi_main /nodefaultlib /machine:x64 /dynamicbase /nxcompat /out:"$@" $(BUILD)\loader.obj
 
-$(BUILD)\entry.o: kernel\entry.asm include\boot_info.h $(BUILD)
-	$(NASM) -f elf64 kernel\entry.asm -o "$@"
+$(BUILD)\arch.o: kernel\arch.asm kernel\arch.S include\boot_info.h
+	@if not exist "$(BUILD)" mkdir "$(BUILD)"
+	@where /q $(NASM) && (echo Using NASM: & where $(NASM) & $(NASM) -f elf64 kernel\arch.asm -o "$@") || (echo NASM not found; using equivalent Clang/GAS fallback kernel\arch.S & $(CLANG) --target=x86_64-unknown-none-elf -c -x assembler kernel\arch.S -o "$@")
 
-$(BUILD)\kernel.o: kernel\kernel.c include\boot_info.h $(BUILD)
+$(BUILD)\kernel_acpi.o: kernel\acpi.c $(KERNEL_HEADERS)
+	@if not exist "$(BUILD)" mkdir "$(BUILD)"
+	$(CLANG) $(KERNEL_CFLAGS) -c kernel\acpi.c -o "$@"
+
+$(BUILD)\kernel_framebuffer.o: kernel\framebuffer.c $(KERNEL_HEADERS)
+	@if not exist "$(BUILD)" mkdir "$(BUILD)"
+	$(CLANG) $(KERNEL_CFLAGS) -c kernel\framebuffer.c -o "$@"
+
+$(BUILD)\kernel_interrupt_controller.o: kernel\interrupt_controller.c $(KERNEL_HEADERS)
+	@if not exist "$(BUILD)" mkdir "$(BUILD)"
+	$(CLANG) $(KERNEL_CFLAGS) -c kernel\interrupt_controller.c -o "$@"
+
+$(BUILD)\kernel_interrupts.o: kernel\interrupts.c $(KERNEL_HEADERS)
+	@if not exist "$(BUILD)" mkdir "$(BUILD)"
+	$(CLANG) $(KERNEL_CFLAGS) -c kernel\interrupts.c -o "$@"
+
+$(BUILD)\kernel_kernel.o: kernel\kernel.c $(KERNEL_HEADERS)
+	@if not exist "$(BUILD)" mkdir "$(BUILD)"
 	$(CLANG) $(KERNEL_CFLAGS) -c kernel\kernel.c -o "$@"
 
-$(KERNEL): $(BUILD)\entry.o $(BUILD)\kernel.o kernel\linker.ld
-	$(LD) -pie --no-dynamic-linker -nostdlib -T kernel\linker.ld -o "$@" $(BUILD)\entry.o $(BUILD)\kernel.o
-	@$(LLVM_READELF) -r "$@" > "$(BUILD)\kernel.relocs.txt"
-	@findstr /C:"R_X86_64" "$(BUILD)\kernel.relocs.txt" >NUL && (echo Kernel has runtime relocations; loader does not apply them. & type "$(BUILD)\kernel.relocs.txt" & exit /b 1) || rem no runtime relocations
+$(BUILD)\kernel_lib.o: kernel\lib.c $(KERNEL_HEADERS)
+	@if not exist "$(BUILD)" mkdir "$(BUILD)"
+	$(CLANG) $(KERNEL_CFLAGS) -c kernel\lib.c -o "$@"
+
+$(BUILD)\kernel_pmm.o: kernel\pmm.c $(KERNEL_HEADERS)
+	@if not exist "$(BUILD)" mkdir "$(BUILD)"
+	$(CLANG) $(KERNEL_CFLAGS) -c kernel\pmm.c -o "$@"
+
+$(BUILD)\kernel_ps2.o: kernel\ps2.c $(KERNEL_HEADERS)
+	@if not exist "$(BUILD)" mkdir "$(BUILD)"
+	$(CLANG) $(KERNEL_CFLAGS) -c kernel\ps2.c -o "$@"
+
+$(BUILD)\kernel_serial.o: kernel\serial.c $(KERNEL_HEADERS)
+	@if not exist "$(BUILD)" mkdir "$(BUILD)"
+	$(CLANG) $(KERNEL_CFLAGS) -c kernel\serial.c -o "$@"
+
+$(BUILD)\kernel_shell.o: kernel\shell.c $(KERNEL_HEADERS)
+	@if not exist "$(BUILD)" mkdir "$(BUILD)"
+	$(CLANG) $(KERNEL_CFLAGS) -c kernel\shell.c -o "$@"
+
+$(BUILD)\kernel_terminal.o: kernel\terminal.c $(KERNEL_HEADERS)
+	@if not exist "$(BUILD)" mkdir "$(BUILD)"
+	$(CLANG) $(KERNEL_CFLAGS) -c kernel\terminal.c -o "$@"
+
+$(KERNEL): $(BUILD)\arch.o $(KERNEL_C_OBJECTS) kernel\linker.ld
+	$(LD) -m elf_x86_64 -pie -Bsymbolic --no-dynamic-linker --no-undefined -nostdlib -T kernel\linker.ld -o "$@" $(BUILD)\arch.o $(KERNEL_C_OBJECTS)
+	@$(READELF) -r "$@" > "$(BUILD)\kernel.relocs.txt"
+	@findstr /C:"R_X86_64" "$(BUILD)\kernel.relocs.txt" >NUL && (echo Kernel has runtime relocations; this loader does not apply them. & type "$(BUILD)\kernel.relocs.txt" & del "$(BUILD)\kernel.relocs.txt" >NUL 2>NUL & exit /b 1) || rem no runtime relocations
 	@del "$(BUILD)\kernel.relocs.txt" >NUL 2>NUL
 
 $(IMAGE): $(EFI) $(KERNEL) tools\make_usb_image.py
 	$(PYTHON) tools\make_usb_image.py "$(EFI)" "$(KERNEL)" "$(IMAGE)"
 
-inspect: check-inspect-tools all
+validate: check-image-tools $(IMAGE) tools\validate_image.py
+	$(PYTHON) tools\validate_image.py "$(IMAGE)" "$(EFI)" "$(KERNEL)"
+
+inspect: check-inspect-tools binaries
 	@echo === EFI loader ===
-	$(LLVM_OBJDUMP) -p "$(EFI)"
+	$(OBJDUMP) -p "$(EFI)"
 	@echo === kernel ELF ===
-	$(LLVM_READELF) -h "$(KERNEL)"
-	$(LLVM_READELF) -l "$(KERNEL)"
-	$(LLVM_READELF) -r "$(KERNEL)"
+	$(READELF) -h "$(KERNEL)"
+	$(READELF) -l "$(KERNEL)"
+	$(READELF) -r "$(KERNEL)"
+	@echo === important symbols ===
+	@$(READELF) -s "$(KERNEL)" > "$(BUILD)\kernel.symbols.txt"
+	@findstr /C:"_start" /C:"kernel_main" /C:"interrupt_dispatch" /C:"isr_stub_offsets" "$(BUILD)\kernel.symbols.txt" || rem symbols not found
+	@del "$(BUILD)\kernel.symbols.txt" >NUL 2>NUL
 
 run: check-run-tools $(IMAGE)
 	@if "$(OVMF_CODE)"=="" (echo OVMF_CODE is not set. Set OVMF_CODE=C:\path\to\OVMF_CODE.fd & exit /b 1)
-	$(QEMU) -machine q35 -m 256M -drive if=pflash,format=raw,readonly=on,file="$(OVMF_CODE)" -drive format=raw,file="$(IMAGE)"
+	@if "$(OVMF_VARS)"=="" (echo OVMF_VARS is not set. Set OVMF_VARS=C:\path\to\OVMF_VARS.fd & exit /b 1)
+	@copy /Y "$(OVMF_VARS)" "$(BUILD)\OVMF_VARS.runtime.fd" >NUL
+	$(QEMU) -machine q35 -m 256M -drive "if=pflash,format=raw,readonly=on,file=$(OVMF_CODE)" -drive "if=pflash,format=raw,file=$(BUILD)\OVMF_VARS.runtime.fd" -drive "format=raw,file=$(IMAGE)" -monitor none -serial stdio
+
+run-headless: check-run-tools $(IMAGE)
+	@if "$(OVMF_CODE)"=="" (echo OVMF_CODE is not set. Set OVMF_CODE=C:\path\to\OVMF_CODE.fd & exit /b 1)
+	@if "$(OVMF_VARS)"=="" (echo OVMF_VARS is not set. Set OVMF_VARS=C:\path\to\OVMF_VARS.fd & exit /b 1)
+	@copy /Y "$(OVMF_VARS)" "$(BUILD)\OVMF_VARS.runtime.fd" >NUL
+	$(QEMU) -machine q35 -m 256M -drive "if=pflash,format=raw,readonly=on,file=$(OVMF_CODE)" -drive "if=pflash,format=raw,file=$(BUILD)\OVMF_VARS.runtime.fd" -drive "format=raw,file=$(IMAGE)" -monitor none -serial stdio -display none
 
 clean:
 	@if exist "$(BUILD)" rmdir /s /q "$(BUILD)"
