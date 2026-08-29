@@ -1,87 +1,374 @@
 #include "pmm.h"
+#include "lib.h"
 
-#define PAGE_SIZE 4096ULL
 #define EFI_CONVENTIONAL_MEMORY 7U
-#define MAX_RANGES 128U
+
+#define PMM_MAX_RANGES 128U
+
 #define MIN_USABLE_ADDRESS 0x100000ULL
 
 typedef struct {
-    u64 next;
-    u64 end;
+    /*
+     * Physical frame numbers.
+     *
+     * end is exclusive.
+     */
+    frame_t first; frame_t end;
 } PmmRange;
 
-static PmmRange g_ranges[MAX_RANGES];
+static PmmRange g_ranges[PMM_MAX_RANGES];
 static PmmStats g_stats;
 
-static u64 align_up(u64 value, u64 alignment) {
-    return (value + alignment - 1) & ~(alignment - 1);
+/*
+ * Bitmap:
+ *
+ *     0 = free
+ *     1 = allocated / reserved
+ *
+ * The pointer is assigned at runtime so we keep
+ * the relocation-free PIE rules intact.
+ */
+static u8 *g_bitmap;
+static frame_t g_base_frame;
+static u64 g_bitmap_bits;
+static frame_t g_bitmap_first_frame;
+static u64 g_bitmap_page_count;
+static u64 g_next_hint;
+static bool g_initialized;
+
+/* Alignment helpers. */
+static bool align_up_page(u64 value, u64 *result) {
+    if (!result) return false;
+    if (value > ~0ULL - (FRAME_SIZE - 1ULL)) return false;
+
+    *result = (value + FRAME_SIZE - 1ULL) & ~(FRAME_SIZE - 1ULL);
+
+    return true;
 }
 
-static u64 align_down(u64 value, u64 alignment) {
-    return value & ~(alignment - 1);
+static u64 align_down_page(u64 value) {
+    return
+        value &
+        ~(FRAME_SIZE - 1ULL);
+}
+
+/* Return true if this physical frame belongs to one of the conventional-memory regions that PMM owns. */
+static bool frame_managed(frame_t frame) {
+    for (u32 i = 0; i < g_stats.range_count; ++i) {
+        if (frame >= g_ranges[i].first && frame < g_ranges[i].end) return true;
+    }
+
+    return false;
+}
+
+/* PMM metadata itself occupies physical frames. Those frames can never be returned through frame_free(). */
+static bool frame_is_bitmap(frame_t frame) {
+    if (g_bitmap_first_frame == FRAME_INVALID) return false;
+    if (frame < g_bitmap_first_frame) return false;
+
+    return
+        frame - g_bitmap_first_frame <
+        g_bitmap_page_count;
+}
+
+static bool bitmap_used(u64 index) {
+    u64 byte = index >> 3;
+    u32 bit = (u32)(index & 7ULL);
+
+    return (g_bitmap[byte] & (u8)(1U << bit)) != 0;
+}
+
+static void bitmap_set(u64 index) {
+    u64 byte = index >> 3;
+    u32 bit = (u32)(index & 7ULL);
+
+    g_bitmap[byte] |= (u8)(1U << bit);
+}
+
+static void bitmap_clear(u64 index) {
+    u64 byte = index >> 3;
+    u32 bit = (u32)(index & 7ULL);
+    u8 mask = (u8)(1U << bit);
+
+    g_bitmap[byte] &= (u8)~mask;
+}
+
+static u64 frame_bitmap_index(frame_t frame) {
+    return frame - g_base_frame;
+}
+
+u64 frame_to_phys(frame_t frame) {
+    if (frame == FRAME_INVALID) return 0;
+    if (frame > ~0ULL / FRAME_SIZE) return 0;
+
+    return frame * FRAME_SIZE;
+}
+
+frame_t phys_to_frame(u64 physical) {
+    if (physical & (FRAME_SIZE - 1ULL)) return FRAME_INVALID;
+
+    return physical / FRAME_SIZE;
 }
 
 bool pmm_init(const BootInfo *boot) {
-    g_stats.total_pages = 0;
-    g_stats.free_pages = 0;
-    g_stats.range_count = 0;
-    g_stats.discarded_ranges = 0;
+    g_initialized = false;
+    g_bitmap = 0;
+    g_base_frame = FRAME_INVALID;
+    g_bitmap_first_frame = FRAME_INVALID;
+    g_bitmap_page_count = 0;
+    g_bitmap_bits = 0;
+    g_next_hint = 0;
 
-    if (!boot || !boot->memory_map ||
-        boot->memory_map_descriptor_size < sizeof(BootMemoryDescriptor)) return false;
+    k_memset(&g_stats, 0, sizeof(g_stats));
+    k_memset(g_ranges, 0, sizeof(g_ranges));
 
-    for (u64 offset = 0; offset + sizeof(BootMemoryDescriptor) <= boot->memory_map_size;
-         offset += boot->memory_map_descriptor_size) {
-        const BootMemoryDescriptor *d =
-            (const BootMemoryDescriptor *)(u64)(boot->memory_map + offset);
-        if (d->type != EFI_CONVENTIONAL_MEMORY || d->number_of_pages == 0) continue;
-        if (d->number_of_pages > (~0ULL / PAGE_SIZE)) continue;
+    if (!boot || !boot->memory_map || !boot->memory_map_size || boot->memory_map_descriptor_size < sizeof(BootMemoryDescriptor)) return false;
 
-        u64 bytes = d->number_of_pages * PAGE_SIZE;
-        u64 raw_end = d->physical_start + bytes;
-        if (raw_end < d->physical_start) continue;
-        u64 start = align_up(d->physical_start, PAGE_SIZE);
-        u64 end = align_down(raw_end, PAGE_SIZE);
+    /*
+     * First pass:
+     *
+     * Collect every conventional-memory range
+     * that PMM will own.
+     */
+    for (u64 offset = 0; offset + sizeof(BootMemoryDescriptor) <= boot->memory_map_size; offset += boot->memory_map_descriptor_size) {
+
+        const BootMemoryDescriptor *descriptor = (const BootMemoryDescriptor *)(u64)(boot->memory_map + offset);
+
+        if (descriptor->type != EFI_CONVENTIONAL_MEMORY) continue;
+        if (!descriptor->number_of_pages) continue;
+        if (descriptor->number_of_pages > ~0ULL / FRAME_SIZE) continue;
+
+        u64 bytes = descriptor->number_of_pages * FRAME_SIZE;
+
+        if (descriptor->physical_start > ~0ULL - bytes) continue;
+
+        u64 raw_end = descriptor->physical_start + bytes;
+        u64 start = 0;
+
+        if (!align_up_page(descriptor->physical_start, &start)) continue;
+
+        u64 end = align_down_page(raw_end);
+
+        /* Keep the first MiB out of the allocator. */
         if (start < MIN_USABLE_ADDRESS) start = MIN_USABLE_ADDRESS;
         if (end <= start) continue;
 
-        /* Merge adjacent conventional-memory descriptors where possible. */
-        if (g_stats.range_count && g_ranges[g_stats.range_count - 1].end == start) {
-            g_ranges[g_stats.range_count - 1].end = end;
-        } else if (g_stats.range_count < MAX_RANGES) {
-            g_ranges[g_stats.range_count].next = start;
-            g_ranges[g_stats.range_count].end = end;
-            ++g_stats.range_count;
-        } else {
+        frame_t first = phys_to_frame(start);
+        frame_t last = phys_to_frame(end);
+
+        if (first == FRAME_INVALID || last == FRAME_INVALID || last <= first) continue;
+
+        /* Merge adjacent ranges where possible. */
+        if (g_stats.range_count && g_ranges[g_stats.range_count - 1U].end == first) {
+            g_ranges[g_stats.range_count - 1U].end = last;
+            continue;
+        }
+
+        if (g_stats.range_count >= PMM_MAX_RANGES) {
             ++g_stats.discarded_ranges;
             continue;
         }
+
+        PmmRange *range = &g_ranges[g_stats.range_count++];
+
+        range->first = first;
+        range->end = last;
     }
 
+    if (!g_stats.range_count) return false;
+
+    /* Determine the physical frame span covered by the bitmap. */
+    frame_t lowest = g_ranges[0].first;
+    frame_t highest = g_ranges[0].end;
+
     for (u32 i = 0; i < g_stats.range_count; ++i) {
-        u64 pages = (g_ranges[i].end - g_ranges[i].next) / PAGE_SIZE;
-        g_stats.total_pages += pages;
+
+        PmmRange *range = &g_ranges[i];
+
+        if (range->first < lowest) lowest = range->first;
+        if (range->end > highest) highest = range->end;
+
+        g_stats.total_pages += range->end - range->first;
     }
-    g_stats.free_pages = g_stats.total_pages;
-    return g_stats.range_count != 0;
+
+    if (highest <= lowest) return false;
+
+    g_base_frame = lowest;
+    g_bitmap_bits = highest - lowest;
+
+    if (g_bitmap_bits > ~0ULL - 7ULL) return false;
+
+    u64 bitmap_bytes = (g_bitmap_bits + 7ULL) / 8ULL;
+
+    if (!bitmap_bytes) return false;
+    if (bitmap_bytes > ~0ULL - (FRAME_SIZE - 1ULL)) return false;
+
+    g_bitmap_page_count = (bitmap_bytes + FRAME_SIZE - 1ULL) / FRAME_SIZE;
+
+    if (!g_bitmap_page_count) return false;
+
+    /*
+     * Find one conventional-memory range large
+     * enough to hold the bitmap itself.
+     *
+     * Since the allocator does not exist yet,
+     * this is the bootstrap allocation.
+     */
+    for (u32 i = 0; i < g_stats.range_count; ++i) {
+        u64 pages = g_ranges[i].end - g_ranges[i].first;
+
+        if (pages >= g_bitmap_page_count) {
+            g_bitmap_first_frame = g_ranges[i].first;
+            break;
+        }
+    }
+
+    if (g_bitmap_first_frame == FRAME_INVALID) return false;
+
+    u64 bitmap_physical = frame_to_phys(g_bitmap_first_frame);
+
+    if (!bitmap_physical) return false;
+    if (g_bitmap_page_count > ~0ULL / FRAME_SIZE) return false;
+
+    u64 bitmap_storage_bytes = g_bitmap_page_count * FRAME_SIZE;
+
+    /*
+     * Current boot mappings allow physical RAM
+     * to be directly accessed.
+     *
+     * Once VMM owns CR3, this bitmap will be
+     * accessed through the physical direct map.
+     */
+    g_bitmap = (u8 *)(u64) bitmap_physical;
+
+    /*
+     * Start pessimistically:
+     *
+     * everything is reserved.
+     */
+    k_memset(g_bitmap, 0xFFU, (usize)bitmap_storage_bytes);
+
+    /*
+     * Now mark only managed conventional-memory
+     * frames as free.
+     *
+     * Holes and non-conventional memory therefore
+     * remain permanently reserved.
+     */
+    for (u32 i = 0; i < g_stats.range_count; ++i) {
+        for (frame_t frame = g_ranges[i].first; frame < g_ranges[i].end; ++frame) {
+            u64 index = frame_bitmap_index(frame);
+            bitmap_clear(index);
+        }
+    }
+
+    /* Reserve PMM own bitmap storage again. */
+    for (u64 i = 0; i < g_bitmap_page_count; ++i) {
+        frame_t frame = g_bitmap_first_frame + i;
+        bitmap_set(frame_bitmap_index(frame));
+    }
+
+    if (g_bitmap_page_count > g_stats.total_pages) return false;
+
+    g_stats.free_pages = g_stats.total_pages - g_bitmap_page_count;
+    g_stats.bitmap_physical = bitmap_physical;
+    g_stats.bitmap_pages = g_bitmap_page_count;
+    g_next_hint = 0;
+    g_initialized = true;
+
+    return true;
 }
 
-u64 pmm_alloc_pages(u64 count) {
-    if (!count || count > (~0ULL / PAGE_SIZE)) return 0;
-    u64 bytes = count * PAGE_SIZE;
-    for (u32 i = 0; i < g_stats.range_count; ++i) {
-        PmmRange *range = &g_ranges[i];
-        if (range->end - range->next < bytes) continue;
-        u64 address = range->next;
-        range->next += bytes;
-        g_stats.free_pages -= count;
-        return address;
+frame_t frame_alloc(void) {
+    if (!g_initialized || !g_bitmap || !g_bitmap_bits || !g_stats.free_pages) return FRAME_INVALID;
+
+    u64 index = g_next_hint;
+
+    /* Search the bitmap once, wrapping at the end. */
+    for (u64 scanned = 0; scanned < g_bitmap_bits; ++scanned) {
+        if (!bitmap_used(index)) {
+            bitmap_set(index);
+            --g_stats.free_pages;
+            frame_t frame = g_base_frame + index;
+            ++index;
+
+            if (index >= g_bitmap_bits) index = 0;
+            g_next_hint = index;
+            return frame;
+        }
+
+        ++index;
+        if (index >= g_bitmap_bits) index = 0;
     }
+    return FRAME_INVALID;
+}
+
+bool frame_free(frame_t frame) {
+    if (!g_initialized || frame == FRAME_INVALID) return false;
+
+    /* Reject frames outside memory PMM owns. */
+    if (!frame_managed(frame)) return false;
+
+    /* PMM metadata can never be freed. */
+    if (frame_is_bitmap(frame)) return false;
+
+    u64 index = frame_bitmap_index(frame);
+    if (index >= g_bitmap_bits) return false;
+
+    /* Already clear means this is a double free. */
+    if (!bitmap_used(index)) return false;
+
+    bitmap_clear(index);
+    ++g_stats.free_pages;
+
+    /* Prefer the newly freed frame on the next allocation. Makes reuse behavior deterministic for our PMM self-test. */
+    g_next_hint = index;
+    return true;
+}
+
+/*
+ * Compatibility contiguous allocator.
+ *
+ * Nothing currently requires this except keeping
+ * the old PMM interface intact, but make it correct
+ * rather than silently changing its semantics.
+ */
+u64 pmm_alloc_pages(u64 count) {
+    if (!g_initialized || !count || count > g_stats.free_pages || count > g_bitmap_bits) return 0;
+
+    u64 run_start = 0;
+    u64 run_length = 0;
+
+    for (u64 index = 0; index < g_bitmap_bits; ++index) {
+        if (bitmap_used(index)) {
+            run_length = 0;
+            continue;
+        }
+
+        if (!run_length) run_start = index;
+
+        ++run_length;
+
+        if (run_length < count) continue;
+        for (u64 i = 0; i < count; ++i) bitmap_set(run_start + i);
+
+        g_stats.free_pages -= count;
+        g_next_hint = run_start + count;
+        if (g_next_hint >= g_bitmap_bits) g_next_hint = 0;
+
+        frame_t first = g_base_frame + run_start;
+
+        return frame_to_phys(first);
+    }
+
     return 0;
 }
 
 u64 pmm_alloc_page(void) {
-    return pmm_alloc_pages(1);
+    frame_t frame = frame_alloc();
+
+    if (frame == FRAME_INVALID) return 0;
+    return frame_to_phys(frame);
 }
 
 PmmStats pmm_stats(void) {

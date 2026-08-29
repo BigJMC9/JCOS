@@ -6,6 +6,7 @@
 #include "lib.h"
 #include "pci.h"
 #include "pmm.h"
+#include "vmm.h"
 #include "ps2.h"
 #include "serial.h"
 #include "terminal.h"
@@ -109,9 +110,11 @@ static void command_help(void) {
     terminal_writeln("  pwd         print current directory"); 
     terminal_writeln("  cat FILE    print a file"); 
     terminal_writeln("  memory      show UEFI memory-map and allocator state");
-    terminal_writeln("  alloc       allocate one physical 4 KiB page"); 
-    terminal_writeln("  cpu         show CPUID information"); 
-    terminal_writeln("  interrupts  show APIC/PIC and keyboard counters"); 
+    terminal_writeln("  alloc       allocate one physical 4 KiB frame");
+    terminal_writeln("  frametest   test PMM allocation/free/reuse");
+    terminal_writeln("  vmmtest     test x86-64 page-table operations");
+    terminal_writeln("  cpu         show CPUID information");
+    terminal_writeln("  interrupts  show APIC/PIC and keyboard counters");
     terminal_writeln("  acpi        show ACPI discovery results");
     terminal_writeln("  pci         list discovered PCI devices"); 
     terminal_writeln("  ahci        show AHCI controller and SATA ports"); 
@@ -134,28 +137,234 @@ static void command_about(void) {
 
 static void command_memory(void) {
     PmmStats stats = pmm_stats();
-    terminal_write("UEFI DESCRIPTORS: "); terminal_write_u64(g_boot->memory_map_descriptor_size ? g_boot->memory_map_size / g_boot->memory_map_descriptor_size : 0);
-    terminal_putchar('\n');
+
+    terminal_write("UEFI DESCRIPTORS: "); terminal_write_u64(g_boot->memory_map_descriptor_size ? g_boot->memory_map_size / g_boot->memory_map_descriptor_size : 0); terminal_putchar('\n');
     terminal_write("ALLOCATOR RANGES: "); terminal_write_u64(stats.range_count); terminal_putchar('\n');
-    terminal_write("CONVENTIONAL MEMORY: "); print_mib(stats.total_pages); terminal_putchar('\n');
-    terminal_write("FREE BUMP-ALLOCATOR MEMORY: "); print_mib(stats.free_pages); terminal_putchar('\n');
-    terminal_write("FREE PAGES: "); terminal_write_u64(stats.free_pages); terminal_putchar('\n');
+    terminal_write("MANAGED MEMORY: ");
+    print_mib(stats.total_pages);
+    terminal_putchar('\n');
+    terminal_write("TOTAL FRAMES: "); terminal_write_u64(stats.total_pages); terminal_putchar('\n');
+    terminal_write("FREE FRAME MEMORY: ");
+    print_mib(stats.free_pages);
+    terminal_putchar('\n');
+    terminal_write("FREE FRAMES: "); terminal_write_u64(stats.free_pages); terminal_putchar('\n');
+    terminal_write("USED/RESERVED FRAMES: "); terminal_write_u64(stats.total_pages - stats.free_pages); terminal_putchar('\n');
+    terminal_write("PMM BITMAP: "); terminal_write_hex(stats.bitmap_physical);
+    terminal_write("  PAGES: "); terminal_write_u64(stats.bitmap_pages); terminal_putchar('\n');
     terminal_write("KERNEL BASE: "); terminal_write_hex(g_boot->kernel_base); terminal_putchar('\n');
     terminal_write("KERNEL SIZE: "); terminal_write_u64(g_boot->kernel_size);
     terminal_writeln(" bytes");
+
     if (stats.discarded_ranges) { terminal_write("DISCARDED EXTRA RANGES: "); terminal_write_u64(stats.discarded_ranges); terminal_putchar('\n'); }
 }
 
 static void command_alloc(void) {
-    u64 page = pmm_alloc_page();
-    if (!page) {
+    frame_t frame = frame_alloc();
+
+    if (frame == FRAME_INVALID) {
+
         terminal_set_color(terminal_error_color());
-        terminal_writeln("OUT OF PHYSICAL PAGES.");
+        terminal_writeln("OUT OF PHYSICAL FRAMES.");
+        terminal_set_color(terminal_default_color());
+
+        return;
+    }
+
+    terminal_write("ALLOCATED FRAME: ");
+    terminal_write_u64(frame);
+    terminal_write("  PHYSICAL: ");
+    terminal_write_hex(frame_to_phys(frame));
+    terminal_putchar('\n');
+    terminal_writeln("FRAME REMAINS ALLOCATED.");
+}
+
+static void command_frametest(void) {
+    terminal_writeln("PMM FRAME TEST:");
+
+    PmmStats before = pmm_stats();
+
+    terminal_write("  FREE BEFORE: ");
+    terminal_write_u64(before.free_pages);
+    terminal_putchar('\n');
+
+    frame_t a = frame_alloc();
+    frame_t b = frame_alloc();
+    frame_t c = frame_alloc();
+
+    if (a == FRAME_INVALID || b == FRAME_INVALID || c == FRAME_INVALID) {
+        if (a != FRAME_INVALID) (void)frame_free(a);
+        if (b != FRAME_INVALID) (void)frame_free(b);
+        if (c != FRAME_INVALID) (void)frame_free(c);
+
+        terminal_set_color(terminal_error_color());
+        terminal_writeln("  ALLOCATION: FAILED");
+        terminal_set_color(terminal_default_color());
+
+        return;
+    }
+
+    terminal_write("  A: FRAME "); terminal_write_u64(a); terminal_write("  PHYS="); terminal_write_hex(frame_to_phys(a)); terminal_putchar('\n');
+    terminal_write("  B: FRAME "); terminal_write_u64(b); terminal_write("  PHYS="); terminal_write_hex(frame_to_phys(b)); terminal_putchar('\n');
+    terminal_write("  C: FRAME "); terminal_write_u64(c); terminal_write("  PHYS="); terminal_write_hex(frame_to_phys(c)); terminal_putchar('\n');
+
+    bool distinct = a != b && a != c && b != c;
+
+    bool freed_b = frame_free(b);
+
+    frame_t d = frame_alloc();
+
+    bool reused = freed_b && d != FRAME_INVALID && d == b;
+
+    terminal_write("  REUSE FREED FRAME: ");
+    terminal_writeln(reused ? "PASS" : "FAILED");
+
+    bool freed_a = frame_free(a);
+
+    bool freed_c = frame_free(c);
+
+    bool freed_d = false;
+
+    if (d != FRAME_INVALID) freed_d = frame_free(d);
+
+    /*
+     * D has already been freed above.
+     *
+     * A second free must be rejected.
+     */
+    bool double_free_rejected = d != FRAME_INVALID && !frame_free(d);
+
+    terminal_write("  DOUBLE FREE REJECTED: ");
+    terminal_writeln(double_free_rejected ? "PASS" : "FAILED");
+
+    PmmStats after = pmm_stats();
+
+    terminal_write("  FREE AFTER: ");
+    terminal_write_u64(after.free_pages);
+    terminal_putchar('\n');
+
+    bool count_restored = before.free_pages == after.free_pages;
+
+    bool pass = distinct && reused && freed_a && freed_c && freed_d && double_free_rejected && count_restored;
+
+    terminal_set_color(pass ? terminal_accent_color() : terminal_error_color());
+    terminal_write("PMM FRAME TEST: ");
+    terminal_writeln(pass ? "PASS" : "FAILED");
+    terminal_set_color(terminal_default_color());
+}
+
+static void command_vmmtest(void) {
+    terminal_writeln("VMM PAGE TABLE TEST:");
+
+    PmmStats before = pmm_stats();
+
+    terminal_write("  FREE BEFORE: ");
+    terminal_write_u64(before.free_pages);
+    terminal_putchar('\n');
+
+    VmPageMap map;
+
+    if (!vmm_page_map_create(&map)) {
+
+        terminal_set_color(terminal_error_color());
+        terminal_writeln("  CREATE PAGE MAP: FAILED");
+        terminal_set_color(terminal_default_color());
+
+        return;
+    }
+
+    terminal_write("  ROOT FRAME: ");
+    terminal_write_u64(map.root_frame);
+    terminal_write("  PHYS=");
+    terminal_write_hex(frame_to_phys(map.root_frame));
+    terminal_putchar('\n');
+
+    frame_t data = frame_alloc();
+
+    if (data == FRAME_INVALID) {
+
+        vmm_page_map_destroy(&map);
+        terminal_set_color(terminal_error_color());
+        terminal_writeln("  DATA FRAME: FAILED");
         terminal_set_color(terminal_default_color());
         return;
     }
-    terminal_write("ALLOCATED PHYSICAL PAGE: "); terminal_write_hex(page); terminal_putchar('\n');
-    terminal_writeln("THIS V5 ALLOCATOR IS MONOTONIC; FREE() AND OWN PAGE TABLES COME NEXT.");
+
+    terminal_write("  DATA FRAME: ");
+    terminal_write_u64(data);
+    terminal_write("  PHYS=");
+    terminal_write_hex(frame_to_phys(data));
+    terminal_putchar('\n');
+
+    const u64 test_virtual = 0x40000000ULL;
+    bool mapped = vmm_map_page(&map, test_virtual, data, VM_WRITE);
+
+    terminal_write("  MAP: ");
+    terminal_writeln(mapped ? "PASS" : "FAILED");
+
+    frame_t queried_frame = FRAME_INVALID;
+    vm_flags_t queried_flags = 0;
+    bool queried = mapped && vmm_query_page(&map, test_virtual, &queried_frame, &queried_flags);
+
+    terminal_write("  QUERY: ");
+    terminal_writeln(queried ? "PASS" : "FAILED");
+
+    bool frame_match = queried && queried_frame == data;
+
+    terminal_write("  FRAME MATCH: ");
+    terminal_writeln(frame_match ? "PASS" : "FAILED");
+
+    bool flags_match = queried && queried_flags == VM_WRITE;
+
+    terminal_write("  FLAGS MATCH: ");
+    terminal_writeln(flags_match ? "PASS" : "FAILED");
+
+    /* Mapping same virtual page again must fail rather than silently replacing it. */
+    bool duplicate_rejected = mapped && !vmm_map_page(&map, test_virtual, data, VM_WRITE);
+
+    terminal_write("  DUPLICATE MAP REJECTED: ");
+    terminal_writeln(duplicate_rejected ? "PASS" : "FAILED");
+
+    frame_t old_frame = FRAME_INVALID;
+    bool unmapped = mapped && vmm_unmap_page(&map, test_virtual, &old_frame);
+
+    terminal_write("  UNMAP: ");
+    terminal_writeln(unmapped ? "PASS" : "FAILED");
+
+    bool old_frame_match = unmapped && old_frame == data;
+
+    terminal_write("  OLD FRAME MATCH: ");
+    terminal_writeln(old_frame_match ? "PASS" : "FAILED");
+
+    frame_t after_frame = FRAME_INVALID;
+    vm_flags_t after_flags = 0;
+    bool query_after_unmap_rejected = unmapped && !vmm_query_page(&map, test_virtual, &after_frame, &after_flags);
+
+    terminal_write("  QUERY AFTER UNMAP: ");
+    terminal_writeln(query_after_unmap_rejected ? "PASS" : "FAILED");
+
+    /* The VMM removed the mapping but deliberately did not free the data frame. */
+    bool data_freed = frame_free(data);
+
+    /* Frees the PML4 and any remaining paging-structure frames. */
+    vmm_page_map_destroy(&map);
+
+    PmmStats after = pmm_stats();
+
+    terminal_write("  FREE AFTER: ");
+    terminal_write_u64(after.free_pages);
+    terminal_putchar('\n');
+
+    bool count_restored = before.free_pages == after.free_pages;
+
+    terminal_write("  FRAME COUNT RESTORED: ");
+    terminal_writeln(count_restored ? "PASS" : "FAILED");
+
+    bool pass = mapped && queried && frame_match && flags_match && duplicate_rejected && unmapped && old_frame_match && query_after_unmap_rejected && data_freed && count_restored;
+
+    terminal_set_color(pass ? terminal_accent_color() : terminal_error_color());
+    terminal_write("VMM PAGE TABLE TEST: ");
+    terminal_writeln(pass ? "PASS" : "FAILED");
+    terminal_set_color(terminal_default_color());
 }
 
 static void command_cpu(void) {
@@ -540,8 +749,7 @@ static void command_fatls(void) {
         return;
     }
 
-    terminal_write("FAT32 ROOT: ");
-    terminal_write_u64(count);
+    terminal_write("FAT32 ROOT: "); terminal_write_u64(count);
     terminal_writeln(" ENTRIES");
 
     for (u32 i = 0; i < count; ++i) {
@@ -550,9 +758,7 @@ static void command_fatls(void) {
 
         terminal_write("  "); terminal_write(entry->name);
         if (entry->attributes & FAT32_ATTR_DIRECTORY) terminal_putchar('/');
-        terminal_putchar('\n');
-        terminal_write("    CLUSTER: ");
-        terminal_write_u64(entry->first_cluster);
+        terminal_putchar('\n'); terminal_write("    CLUSTER: "); terminal_write_u64(entry->first_cluster);
 
         if (!(entry->attributes & FAT32_ATTR_DIRECTORY)) { terminal_write("  SIZE: "); terminal_write_u64(entry->size); terminal_write(" BYTES"); }
 
@@ -754,6 +960,8 @@ static void execute(char *line) {
     else if (k_strieq(command, "clear")) terminal_clear();
     else if (k_strieq(command, "memory")) command_memory();
     else if (k_strieq(command, "alloc")) command_alloc();
+    else if (k_strieq(command, "frametest")) command_frametest();
+    else if (k_strieq(command, "vmmtest")) command_vmmtest();
     else if (k_strieq(command, "cpu")) command_cpu();
     else if (k_strieq(command, "interrupts")) command_interrupts();
     else if (k_strieq(command, "acpi")) command_acpi();
