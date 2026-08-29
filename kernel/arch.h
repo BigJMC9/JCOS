@@ -19,7 +19,36 @@ u64 arch_read_msr(u32 msr);
 void arch_write_msr(u32 msr, u64 value);
 void arch_cpuid(u32 leaf, u32 subleaf, u32 *a, u32 *b, u32 *c, u32 *d);
 u16 arch_read_cs(void);
+
 u64 arch_read_cr2(void);
+u64 arch_read_cr3(void);
+void arch_write_cr3(u64 value);
+u64 arch_read_cr4(void);
+
+typedef struct PACKED {
+    u16 limit;
+    u64 base;
+} ArchDescriptorTablePointer;
+
+void arch_store_gdt(
+    ArchDescriptorTablePointer *descriptor
+);
+
+void arch_load_gdtr(
+    const ArchDescriptorTablePointer *descriptor
+);
+
+void arch_reload_segments(
+    u16 code_selector,
+    u16 data_selector
+);
+
+void arch_load_tr(
+    u16 selector
+);
+
+u16 arch_read_tr(void);
+
 void arch_load_idt(const void *descriptor);
 
 /* Entries 0..47 are vectors 0..47; entry 48 is vector 255. */

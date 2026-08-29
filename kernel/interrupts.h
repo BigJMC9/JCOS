@@ -13,7 +13,7 @@ typedef struct {
     u64 rflags;
 } InterruptFrame;
 
-void idt_init(void);
+void idt_init(bool tss_ready);
 void interrupt_dispatch(InterruptFrame *frame);
 void interrupts_enable(void);
 void interrupts_disable(void);

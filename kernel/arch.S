@@ -15,8 +15,16 @@
 .global arch_cpuid
 .global arch_read_cs
 .global arch_read_cr2
+.global arch_read_cr3
+.global arch_write_cr3
+.global arch_read_cr4
 .global arch_load_idt
 .global arch_triple_fault
+.global arch_store_gdt
+.global arch_load_gdtr
+.global arch_reload_segments
+.global arch_load_tr
+.global arch_read_tr
 .global isr_stub_offsets
 .extern kernel_main
 .extern interrupt_dispatch
@@ -111,6 +119,56 @@ arch_read_cs:
 arch_read_cr2:
     mov rax, cr2
     ret
+arch_read_cr3:
+    mov rax, cr3
+    ret
+arch_write_cr3:
+    mov cr3, rdi
+    ret
+arch_read_cr4:
+    mov rax, cr4
+    ret
+
+arch_store_gdt:
+    sgdt [rdi]
+    ret
+arch_load_gdtr:
+    lgdt [rdi]
+    ret
+
+
+arch_reload_segments:
+    movzx eax, di
+    push rax
+
+    lea rax, [rip + .Lgdt_reload_cs]
+    push rax
+
+    /*
+     * RETFQ
+     *
+     * Encoding is REX.W + RETF.
+     */
+    .byte 0x48, 0xCB
+
+.Lgdt_reload_cs:
+    mov ax, si
+
+    mov ds, ax
+    mov es, ax
+    mov ss, ax
+
+    ret
+
+arch_load_tr:
+    mov ax, di
+    ltr ax
+    ret
+arch_read_tr:
+    xor eax, eax
+    str ax
+    ret
+
 arch_load_idt:
     lidt [rdi]
     ret

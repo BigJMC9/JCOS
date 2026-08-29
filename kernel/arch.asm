@@ -17,8 +17,16 @@ GLOBAL arch_write_msr
 GLOBAL arch_cpuid
 GLOBAL arch_read_cs
 GLOBAL arch_read_cr2
+GLOBAL arch_read_cr3
+GLOBAL arch_write_cr3
+GLOBAL arch_read_cr4
 GLOBAL arch_load_idt
 GLOBAL arch_triple_fault
+GLOBAL arch_store_gdt
+GLOBAL arch_load_gdtr
+GLOBAL arch_reload_segments
+GLOBAL arch_load_tr
+GLOBAL arch_read_tr
 GLOBAL isr_stub_offsets
 EXTERN kernel_main
 EXTERN interrupt_dispatch
@@ -122,6 +130,71 @@ arch_read_cs:
 
 arch_read_cr2:
     mov rax, cr2
+    ret
+
+arch_read_cr3:
+    mov rax, cr3
+    ret
+
+arch_write_cr3:
+    mov cr3, rdi
+    ret
+
+arch_read_cr4:
+    mov rax, cr4
+    ret
+
+arch_store_gdt:
+    sgdt [rdi]
+    ret
+
+arch_load_gdtr:
+    lgdt [rdi]
+    ret
+
+arch_reload_segments:
+    ;
+    ; SysV ABI:
+    ;
+    ; RDI = code selector
+    ; RSI = data selector
+    ;
+    ; RETFQ expects:
+    ;
+    ;   [RSP + 0] = new RIP
+    ;   [RSP + 8] = new CS
+    ;
+    ; The ordinary C return address remains below
+    ; those values and is consumed by RET afterward.
+    ;
+
+    movzx eax, di
+    push rax
+
+    lea rax, [rel .reload_cs]
+    push rax
+
+    retfq
+
+.reload_cs:
+    mov ax, si
+
+    mov ds, ax
+    mov es, ax
+    mov ss, ax
+
+    ret
+
+
+arch_load_tr:
+    mov ax, di
+    ltr ax
+    ret
+
+
+arch_read_tr:
+    xor eax, eax
+    str ax
     ret
 
 arch_load_idt:

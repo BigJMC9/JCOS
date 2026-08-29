@@ -538,20 +538,76 @@ bool vmm_unmap_page(VmPageMap *map, u64 virtual_address, frame_t *old_frame) {
      */
     if (table_empty(pt)) {
         pd[i2] = 0;
-
         (void)frame_free(pt_frame);
 
         if (table_empty(pd)) {
             pdpt[i3] = 0;
-
             (void)frame_free(pd_frame);
 
             if (table_empty(pdpt)) {
                 pml4[i4] = 0;
-
                 (void)frame_free(pdpt_frame);
             }
         }
+    }
+
+    return true;
+}
+
+bool vmm_identity_map_range(VmPageMap *map, u64 physical_address, u64 size, vm_flags_t flags) {
+    if (!map) return false;
+    if (!size) return true;
+
+    /* Inclusive final byte. */
+    if (physical_address > ~0ULL - (size - 1ULL)) return false;
+
+    u64 last_byte = physical_address + size - 1ULL;
+    u64 first_page = physical_address & ~(VM_PAGE_SIZE - 1ULL);
+    u64 last_page = last_byte & ~(VM_PAGE_SIZE - 1ULL);
+    u64 page = first_page;
+
+    for (;;) {
+
+        /*
+         * Deliberately leave virtual address zero
+         * unmapped. This will eventually help
+         * catch NULL dereferences.
+         *
+         * Nothing JCOS currently requires lives
+         * in physical page zero.
+         */
+        if (page != 0) {
+
+            frame_t expected = phys_to_frame(page);
+
+            if (expected == FRAME_INVALID) return false;
+
+            /*
+             * The function is idempotent.
+             *
+             * This matters because explicit
+             * framebuffer/MMIO mappings may
+             * overlap UEFI descriptors.
+             */
+            frame_t existing = FRAME_INVALID;
+
+            vm_flags_t existing_flags = 0;
+
+            if (vmm_query_page(map, page, &existing, &existing_flags)) {
+                if (existing != expected) return false;
+
+                /* Existing mapping must provide at least the requested public permissions. */
+                if ((existing_flags & flags) != flags) return false;
+            } else {
+
+                if (!vmm_map_page(map, page, expected, flags)) return false;
+            }
+        }
+
+        if (page == last_page) break;
+        if (page > ~0ULL - VM_PAGE_SIZE) return false;
+
+        page += VM_PAGE_SIZE;
     }
 
     return true;

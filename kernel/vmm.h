@@ -27,32 +27,16 @@ typedef struct {
     frame_t root_frame;
 } VmPageMap;
 
-bool vmm_page_map_create(
-    VmPageMap *map
-);
+bool vmm_page_map_create(VmPageMap *map);
 
-void vmm_page_map_destroy(
-    VmPageMap *map
-);
+void vmm_page_map_destroy(VmPageMap *map);
 
-bool vmm_map_page(
-    VmPageMap *map,
-    u64 virtual_address,
-    frame_t frame,
-    vm_flags_t flags
-);
+bool vmm_map_page(VmPageMap *map, u64 virtual_address, frame_t frame, vm_flags_t flags);
 
-bool vmm_unmap_page(
-    VmPageMap *map,
-    u64 virtual_address,
-    frame_t *old_frame
-);
+bool vmm_unmap_page(VmPageMap *map, u64 virtual_address, frame_t *old_frame);
 
-bool vmm_query_page(
-    const VmPageMap *map,
-    u64 virtual_address,
-    frame_t *frame,
-    vm_flags_t *flags
-);
+bool vmm_query_page(const VmPageMap *map, u64 virtual_address, frame_t *frame, vm_flags_t *flags);
+
+bool vmm_identity_map_range(VmPageMap *map, u64 physical_address, u64 size, vm_flags_t flags);
 
 #endif

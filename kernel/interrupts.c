@@ -25,28 +25,32 @@ static IdtDescriptor g_idtr;
 static u64 g_counts[256];
 static u64 g_spurious;
 
-static void idt_set(u8 vector, u64 handler, u16 selector) {
+static void idt_set(u8 vector, u64 handler, u16 selector, u8 ist) {
     IdtEntry *entry = &g_idt[vector];
     entry->offset_low = (u16)handler;
     entry->selector = selector;
-    entry->ist = 0;
+    entry->ist = ist & 7U;
     entry->type_attributes = 0x8E; /* Present, ring 0, interrupt gate. */
     entry->offset_middle = (u16)(handler >> 16);
     entry->offset_high = (u32)(handler >> 32);
     entry->zero = 0;
 }
 
-void idt_init(void) {
-    k_memset(g_idt, 0, sizeof(g_idt));
-    k_memset(g_counts, 0, sizeof(g_counts));
+void idt_init(bool tss_ready) {
+    k_memset(g_idt, 0, sizeof(g_idt)); k_memset(g_counts, 0, sizeof(g_counts));
     g_spurious = 0;
     u64 table = (u64)(const void *)isr_stub_offsets;
     u16 selector = arch_read_cs();
     for (u32 vector = 0; vector < 48; ++vector) {
-        u64 handler = table + (s64)isr_stub_offsets[vector];
-        idt_set((u8)vector, handler, selector);
-    }
-    idt_set(0xFF, table + (s64)isr_stub_offsets[48], selector);
+
+    u64 handler = table + (s64)isr_stub_offsets[vector];
+
+    u8 ist = (tss_ready && vector == 8U) ? 1U : 0U;
+
+    idt_set((u8)vector, handler, selector, ist);
+}
+
+idt_set(0xFF, table + (s64)isr_stub_offsets[48], selector, 0);
     g_idtr.limit = (u16)(sizeof(g_idt) - 1);
     g_idtr.base = (u64)(void *)g_idt;
     arch_load_idt(&g_idtr);
@@ -85,7 +89,8 @@ static NORETURN void exception_panic(const InterruptFrame *frame) {
     terminal_set_color(terminal_error_color());
     terminal_writeln("\nKERNEL PANIC: CPU EXCEPTION");
     terminal_write("VECTOR: "); terminal_write_u64(frame->vector);
-    terminal_write(" ("); terminal_write(exception_name(frame->vector)); terminal_writeln(")");
+    terminal_write(" ("); terminal_write(exception_name(frame->vector));
+    terminal_writeln(")");
     terminal_write("ERROR CODE: "); terminal_write_hex(frame->error_code); terminal_putchar('\n');
     terminal_write("RIP: "); terminal_write_hex(frame->rip); terminal_putchar('\n');
     terminal_write("CS: "); terminal_write_hex(frame->cs); terminal_putchar('\n');
