@@ -51,7 +51,7 @@ static void newline_framebuffer(void) {
 
 bool terminal_init(void) {
     if (!framebuffer_width() || !framebuffer_height()) return false;
-    g_scale = (framebuffer_width() >= 800 && framebuffer_height() >= 600) ? 2U : 1U;
+    g_scale = 1U;
     g_cell_width = (FONT8X8_WIDTH + 1U) * g_scale;
     g_cell_height = (FONT8X8_HEIGHT + 2U) * g_scale;
     g_margin = 4 * g_scale;

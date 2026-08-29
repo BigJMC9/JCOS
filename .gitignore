@@ -1,2 +1,5 @@
 v5/**
 build/**
+assets/**
+kernel/partition.c
+kernel/partition.h
