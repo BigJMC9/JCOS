@@ -162,9 +162,15 @@ def build(efi_path: Path, kernel_path: Path, rootfs_path: Path, output_path: Pat
     boot[64] = 0x80
     boot[66] = 0x29
     boot[67:71] = p32(0x5635484F)
-    boot[71:82] = b"JAOSV5  "
+    boot[71:82] = b"JAOSV5     "
     boot[82:90] = b"FAT32   "
     boot[510:512] = b"\x55\xAA"
+
+    if len(boot) != SECTOR:
+        raise SystemExit(
+            f"internal error: FAT32 boot sector is {len(boot)} bytes, expected {SECTOR}"
+        )
+
     image[PART_START * SECTOR:(PART_START + 1) * SECTOR] = boot
     image[(PART_START + 6) * SECTOR:(PART_START + 7) * SECTOR] = boot
 

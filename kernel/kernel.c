@@ -15,6 +15,8 @@
 #include "ahci.h"
 #include "block.h"
 #include "gpt.h"
+#include "partition.h"
+#include "fat32.h"
 #include "splash.h"
 
 static void boot_delay(void) {
@@ -56,14 +58,25 @@ void kernel_main(BootInfo *boot) {
     splash_progress(70);
     block_init();
     splash_progress(73);
+    partition_init();
+    splash_progress(75);
     bool ahci_ok = ahci_init();
     splash_progress(78);
     const AcpiInfo *acpi = acpi_get();
     bool controller_ok = interrupt_controller_init(acpi);
     splash_progress(80);
     bool gpt_ok = false;
+    bool partitions_ok = false;
+    bool fat32_ok = false;
     BlockDevice *boot_disk = block_find("sda");
-    if (boot_disk) gpt_ok = gpt_probe(boot_disk);
+    if (boot_disk) {
+        gpt_ok = gpt_probe(boot_disk);
+        if (gpt_ok) partitions_ok = gpt_register_partitions();
+    }
+    if (partitions_ok) {
+        BlockDevice *esp = block_find("sda1");
+        if (esp) fat32_ok = fat32_probe(esp);
+    }
     splash_progress(85);
     bool keyboard_ok = (!acpi->i8042_known || acpi->i8042_present) ? ps2_init() : false;
     splash_progress(95);
@@ -93,6 +106,9 @@ void kernel_main(BootInfo *boot) {
     terminal_writeln(rootfs_ok ? "READY" : "FAILED");
     terminal_write("GPT: ");
     terminal_writeln(gpt_ok ? "READY" : "FAILED");
+    terminal_write("  PARTITIONS: ");
+    terminal_writeln(partitions_ok ? "READY" : "FAILED");
+    terminal_write("FAT32: "); terminal_writeln( fat32_ok ? "READY" : "FAILED");
     terminal_writeln("TYPE help AND PRESS ENTER.");
     terminal_putchar('\n');
 

@@ -104,6 +104,7 @@ class Fat32:
         self.partition_sectors = partition_sectors
         boot = image[partition_lba * SECTOR:(partition_lba + 1) * SECTOR]
         require(len(boot) == SECTOR and boot[510:512] == b"\x55\xaa", "invalid FAT32 boot sector")
+        require(boot[71:82] == b"JAOSV5     ", "unexpected FAT32 volume label")
         self.bytes_per_sector = u16(boot, 11)
         self.sectors_per_cluster = boot[13]
         self.reserved = u16(boot, 14)

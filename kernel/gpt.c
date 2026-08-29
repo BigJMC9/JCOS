@@ -1,5 +1,6 @@
 #include "gpt.h"
 #include "lib.h"
+#include "partition.h"
 
 #define GPT_SIGNATURE 0x5452415020494645ULL
 #define GPT_MIN_HEADER_SIZE 92U
@@ -66,6 +67,38 @@ static u32 crc32(const void *data, u64 size) {
     }
 
     return ~crc;
+}
+
+static bool make_partition_device_name(const BlockDevice *parent, u32 index, char output[BLOCK_NAME_MAX + 1]) {
+    if (!parent || !output || index == 0) return false;
+
+    u32 pos = 0;
+
+    while (parent->name[pos]) {
+        if (pos >= BLOCK_NAME_MAX) return false;
+
+        output[pos] = parent->name[pos];
+        ++pos;
+    }
+
+    /* Convert partition number to decimal. */
+    char digits[10];
+    u32 digit_count = 0;
+
+    u32 value = index;
+
+    do {
+        digits[digit_count++] = (char)('0' + (value % 10U));
+
+        value /= 10U;
+    } while (value && digit_count < sizeof(digits));
+
+    if (value) return false;
+    if (pos + digit_count > BLOCK_NAME_MAX) return false;
+    while (digit_count) output[pos++] = digits[--digit_count];
+    output[pos] = 0;
+
+    return true;
 }
 
 static bool guid_is_zero(const u8 guid[16]) {
@@ -164,10 +197,10 @@ bool gpt_probe(BlockDevice *device) {
         if (entry->first_lba > entry->last_lba) continue;
 
         GptPartition *partition = &g_info.partitions[output];
-        partition->valid = true; partition->index = i + 1U;
+        partition->valid = true;
+        partition->index = i + 1U;
 
-        copy_guid(partition->type_guid, entry->type_guid);
-        copy_guid(partition->unique_guid, entry->unique_guid);
+        copy_guid(partition->type_guid, entry->type_guid); copy_guid(partition->unique_guid, entry->unique_guid);
 
         partition->first_lba = entry->first_lba;
         partition->last_lba = entry->last_lba;
@@ -180,6 +213,38 @@ bool gpt_probe(BlockDevice *device) {
 
     g_info.partition_count = output;
     g_info.valid = true;
+
+    return true;
+}
+
+bool gpt_register_partitions(void) {
+    if (!g_info.valid || !g_info.device) return false;
+    for (u32 i = 0; i < g_info.partition_count; ++i) {
+
+        GptPartition *partition = &g_info.partitions[i];
+
+        if (!partition->valid) continue;
+
+        /* Already registered. */
+        if (partition->block_device) continue;
+        if (partition->first_lba > partition->last_lba) return false;
+
+        u64 block_count = partition->last_lba - partition->first_lba + 1ULL;
+
+        if (!block_count) return false;
+
+        char device_name[
+            BLOCK_NAME_MAX + 1
+        ];
+
+        if (!make_partition_device_name(g_info.device, partition->index, device_name)) return false;
+
+        BlockDevice *device = partition_register(g_info.device, device_name, partition->first_lba, block_count);
+
+        if (!device) return false;
+
+        partition->block_device = device;
+    }
 
     return true;
 }

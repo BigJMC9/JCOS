@@ -20,6 +20,8 @@ typedef struct {
     u64 attributes;
 
     char name[GPT_NAME_MAX + 1];
+
+    BlockDevice *block_device;
 } GptPartition;
 
 typedef struct {
@@ -50,5 +52,7 @@ bool gpt_probe(
 );
 
 const GptInfo *gpt_get(void);
+
+bool gpt_register_partitions(void);
 
 #endif

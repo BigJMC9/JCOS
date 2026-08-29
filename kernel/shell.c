@@ -13,6 +13,7 @@
 #include "ahci.h"
 #include "block.h"
 #include "gpt.h"
+#include "fat32.h"
 
 #define INPUT_CAPACITY 128U
 
@@ -55,6 +56,32 @@ static bool parse_u64(const char *text, u64 *value) {
     return true;
 }
 
+static bool next_argument(const char **cursor, char *output, u32 capacity) {
+    if (!cursor || !*cursor || !output || capacity == 0) return false;
+
+    const char *p = *cursor;
+
+    while (*p && k_ascii_space(*p)) ++p;
+    if (!*p) {
+        output[0] = 0;
+        *cursor = p;
+        return false;
+    }
+
+    u32 length = 0;
+
+    while (*p && !k_ascii_space(*p)) {
+        if (length + 1U >= capacity) return false;
+
+        output[length++] = *p++;
+    }
+
+    output[length] = 0;
+    *cursor = p;
+
+    return true;
+}
+
 static void terminal_hex_byte(u8 value) {
     static const char digits[] = "0123456789ABCDEF";
     terminal_putchar(digits[(value >> 4) & 0x0F]); terminal_putchar(digits[value & 0x0F]);
@@ -90,6 +117,9 @@ static void command_help(void) {
     terminal_writeln("  ahci        show AHCI controller and SATA ports"); 
     terminal_writeln("  sector LBA  dump a raw disk sector");
     terminal_writeln("  partitions  list GPT partitions");
+    terminal_writeln("  fatls       list FAT32 root directory");
+    terminal_writeln("  fat32       show FAT32 filesystem information");
+    terminal_writeln("  fatread FILE [OFFSET] [COUNT]  read/test a FAT32 root file");
     terminal_writeln("  fault       deliberately execute UD2 to test the IDT");
     terminal_writeln("  reboot      reset via ACPI, keyboard controller, or triple fault"); 
     terminal_writeln("  disks       list block devices");
@@ -383,11 +413,10 @@ static void command_sector(const char *argument) {
 
     if (!parse_u64(argument, &lba)) { terminal_writeln("usage: sector LBA"); return; }
 
-    BlockDevice *device = block_device(0);
+    BlockDevice *device = block_find("sda1");
 
     if (!device) { terminal_writeln("NO BLOCK DEVICE."); return; }
     if (device->block_size > 4096U) { terminal_writeln("BLOCK TOO LARGE."); return; }
-
     if (lba >= device->block_count) { terminal_writeln("LBA OUT OF RANGE."); return; }
 
     static u8 buffer[4096];
@@ -406,8 +435,7 @@ static void command_sector(const char *argument) {
 
     /* First 128 bytes for now. */
     for (u32 row = 0; row < 8U; ++row) {
-        terminal_write_hex(row * 16U);
-        terminal_write(": ");
+        terminal_write_hex(row * 16U); terminal_write(": ");
 
         for (u32 col = 0; col < 16U; ++col) { terminal_hex_byte(buffer[row * 16U + col]); terminal_putchar(' '); }
 
@@ -437,9 +465,7 @@ static void command_partitions(void) {
         return;
     }
 
-    terminal_write("GPT PARTITIONS: ");
-    terminal_write_u64(gpt->partition_count);
-    terminal_putchar('\n');
+    terminal_write("GPT PARTITIONS: "); terminal_write_u64(gpt->partition_count); terminal_putchar('\n');
 
     for (u32 i = 0; i < gpt->partition_count; ++i) {
 
@@ -451,27 +477,198 @@ static void command_partitions(void) {
 
         if (part->name[0]) { terminal_write("  "); terminal_write(part->name); }
 
-        terminal_putchar('\n');
-        terminal_write("    FIRST LBA: ");
-        terminal_write_u64(part->first_lba);
-        terminal_putchar('\n');
-        terminal_write("    LAST LBA: ");
-        terminal_write_u64(part->last_lba);
-        terminal_putchar('\n');
+        terminal_putchar('\n'); terminal_write("    FIRST LBA: "); terminal_write_u64(part->first_lba); terminal_putchar('\n'); terminal_write("    LAST LBA: "); terminal_write_u64(part->last_lba); terminal_putchar('\n');
 
         u64 sectors = part->last_lba - part->first_lba + 1ULL;
 
-        terminal_write("    SECTORS: ");
-        terminal_write_u64(sectors);
-        terminal_putchar('\n');
+        terminal_write("    SECTORS: "); terminal_write_u64(sectors); terminal_putchar('\n');
 
         if (gpt->device) {
             u64 bytes = sectors * gpt->device->block_size;
 
-            terminal_write("    SIZE: ");
-            terminal_write_u64(bytes / (1024ULL * 1024ULL));
+            terminal_write("    SIZE: "); terminal_write_u64(bytes / (1024ULL * 1024ULL));
             terminal_writeln(" MiB");
         }
+    }
+}
+
+static void command_fat32(void) {
+    const Fat32Info *info = fat32_get();
+
+    if (!info || !info->valid) {
+        terminal_set_color(terminal_error_color());
+        terminal_writeln("FAT32 NOT INITIALIZED.");
+        terminal_set_color(terminal_default_color());
+
+        return;
+    }
+
+    terminal_writeln("FAT32:");
+    terminal_write("  DEVICE: ");
+    terminal_writeln(info->device->name);
+    terminal_write("  BYTES/SECTOR: "); terminal_write_u64(info->bytes_per_sector); terminal_putchar('\n');
+    terminal_write("  SECTORS/CLUSTER: "); terminal_write_u64(info->sectors_per_cluster); terminal_putchar('\n');
+    terminal_write("  RESERVED SECTORS: "); terminal_write_u64(info->reserved_sectors); terminal_putchar('\n');
+    terminal_write("  FAT COUNT: "); terminal_write_u64(info->fat_count); terminal_putchar('\n');
+    terminal_write("  SECTORS/FAT: "); terminal_write_u64(info->sectors_per_fat); terminal_putchar('\n');
+    terminal_write("  TOTAL SECTORS: "); terminal_write_u64(info->total_sectors); terminal_putchar('\n');
+    terminal_write("  CLUSTERS: "); terminal_write_u64(info->cluster_count); terminal_putchar('\n');
+    terminal_write("  ROOT CLUSTER: "); terminal_write_u64(info->root_cluster); terminal_putchar('\n');
+    terminal_write("  FIRST FAT SECTOR: "); terminal_write_u64(info->first_fat_sector); terminal_putchar('\n');
+    terminal_write("  FIRST DATA SECTOR: "); terminal_write_u64(info->first_data_sector); terminal_putchar('\n');
+}
+
+static void command_fatls(void) {
+    const Fat32Info *info = fat32_get();
+
+    if (!info || !info->valid) {
+        terminal_writeln("FAT32 NOT INITIALIZED.");
+        return;
+    }
+
+    static Fat32DirectoryEntry
+        entries[64];
+
+    u32 count = 0;
+
+    if (!fat32_read_root(entries, ARRAY_COUNT(entries), &count)) {
+
+        terminal_set_color(terminal_error_color());
+        terminal_writeln("FAT32 ROOT DIRECTORY READ FAILED.");
+        terminal_set_color(terminal_default_color());
+
+        return;
+    }
+
+    terminal_write("FAT32 ROOT: ");
+    terminal_write_u64(count);
+    terminal_writeln(" ENTRIES");
+
+    for (u32 i = 0; i < count; ++i) {
+
+        Fat32DirectoryEntry *entry = &entries[i];
+
+        terminal_write("  "); terminal_write(entry->name);
+        if (entry->attributes & FAT32_ATTR_DIRECTORY) terminal_putchar('/');
+        terminal_putchar('\n');
+        terminal_write("    CLUSTER: ");
+        terminal_write_u64(entry->first_cluster);
+
+        if (!(entry->attributes & FAT32_ATTR_DIRECTORY)) { terminal_write("  SIZE: "); terminal_write_u64(entry->size); terminal_write(" BYTES"); }
+
+        terminal_putchar('\n');
+    }
+}
+
+static void command_fatread(const char *arguments) {
+
+    char name[VFS_NAME_MAX + 1];
+    char offset_text[32];
+    char count_text[32];
+
+    const char *cursor = arguments;
+
+    if (!next_argument(&cursor, name, sizeof(name))) {
+
+        terminal_writeln("usage: fatread FILE [OFFSET] [COUNT]");
+        return;
+    }
+
+    u64 offset = 0;
+    u64 requested = 1024;
+
+    if (next_argument(&cursor, offset_text, sizeof(offset_text))) {
+        if (!parse_u64(offset_text, &offset)) {
+
+            terminal_writeln("fatread: invalid offset");
+            return;
+        }
+    }
+
+    if (next_argument(&cursor, count_text, sizeof(count_text))) {
+        if (!parse_u64(count_text, &requested)) {
+
+            terminal_writeln("fatread: invalid byte count");
+            return;
+        }
+    }
+
+    Fat32DirectoryEntry entry;
+
+    if (!fat32_find_root(name, &entry)) {
+
+        terminal_set_color(terminal_error_color());
+        terminal_writeln("FAT32 FILE NOT FOUND.");
+        terminal_set_color(terminal_default_color());
+
+        return;
+    }
+
+    if (entry.attributes & FAT32_ATTR_DIRECTORY) {
+
+        terminal_writeln("fatread: entry is a directory");
+        return;
+    }
+
+    /*
+     * 1024 bytes deliberately crosses two
+     * clusters on the current image because
+     * sectors/cluster = 1 and sector = 512.
+     *
+     * This therefore tests FAT-chain following,
+     * not just one-cluster reads.
+     */
+    static u8 buffer[1024];
+
+    k_memset(buffer, 0, sizeof(buffer));
+
+    if (requested > sizeof(buffer)) requested = sizeof(buffer);
+
+    u64 amount = requested;
+
+    u64 read = 0;
+
+    if (!fat32_read_file(&entry, offset, buffer, amount, &read)) {
+
+        terminal_set_color(terminal_error_color());
+        terminal_writeln("FAT32 FILE READ FAILED.");
+        terminal_set_color(terminal_default_color());
+
+        return;
+    }
+
+    terminal_write("FILE: ");
+    terminal_writeln(entry.name);
+    terminal_write("SIZE: "); terminal_write_u64(entry.size);
+    terminal_writeln(" BYTES");
+    terminal_write("OFFSET: "); terminal_write_u64(offset); terminal_putchar('\n');
+    terminal_write("FIRST CLUSTER: "); terminal_write_u64(entry.first_cluster); terminal_putchar('\n');
+    terminal_write("TEST READ: "); terminal_write_u64(read);
+    terminal_writeln(" BYTES");
+    terminal_writeln("FIRST 64 BYTES OF READ:");
+
+    u64 dump = read < 64ULL ? read : 64ULL;
+
+    for (u64 offset = 0; offset < dump; offset += 16ULL) {
+
+        terminal_write_hex(offset); terminal_write(": ");
+
+        u64 row = dump - offset;
+
+        if (row > 16ULL) row = 16ULL;
+        for (u64 i = 0; i < row; ++i) { terminal_hex_byte(buffer[offset + i]); terminal_putchar(' '); }
+
+        terminal_putchar('\n');
+    }
+
+    /* ELF64 signature: 7F 'E' 'L' 'F' */
+    if (read >= 4 && buffer[0] == 0x7FU && buffer[1] == 'E' && buffer[2] == 'L' && buffer[3] == 'F') {
+        terminal_writeln("ELF SIGNATURE: VALID");
+    }
+
+    /* USTAR magic starts at byte 257 of the first TAR header. */
+    if (read >= 262 && buffer[257] == 'u' && buffer[258] == 's' && buffer[259] == 't' && buffer[260] == 'a' && buffer[261] == 'r') {
+        terminal_writeln("USTAR SIGNATURE: VALID");
     }
 }
 
@@ -519,7 +716,7 @@ static void command_cd(const char *path) {
         terminal_set_color(terminal_default_color());
         return;
     }
-    
+
     if (node->type != VFS_DIRECTORY) {
         terminal_set_color(terminal_error_color());
         terminal_writeln("cd: not a directory");
@@ -568,6 +765,9 @@ static void execute(char *line) {
     else if (k_strieq(command, "fault")) __asm__ volatile ("ud2");
     else if (k_strieq(command, "reboot")) command_reboot();
     else if (k_strieq(command, "pwd")) command_pwd();
+    else if (k_strieq(command, "fat32")) command_fat32();
+    else if (k_strieq(command, "fatls")) command_fatls();
+    else if (k_strieq(command, "fatread"))command_fatread(args);
     else if (k_strieq(command, "ls")) command_ls();
     else if (k_strieq(command, "cd")) command_cd(args);
     else if (k_strieq(command, "cat")) command_cat(args);
@@ -590,7 +790,9 @@ static int next_input(void) {
 }
 
 NORETURN void shell_run(const BootInfo *boot) {
-    g_boot = boot; g_length = 0; g_cwd = vfs_root();
+    g_boot = boot;
+    g_length = 0;
+    g_cwd = vfs_root();
     prompt();
     for (;;) {
         int input = next_input();
