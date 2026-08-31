@@ -32,6 +32,25 @@ _Static_assert(__builtin_offsetof(InterruptFrame, cs) == 144, "InterruptFrame cs
 _Static_assert(__builtin_offsetof(InterruptFrame, rflags) == 152, "InterruptFrame rflags offset");
 _Static_assert(sizeof(InterruptFrame) == 160, "InterruptFrame size");
 
+typedef struct {
+    bool valid;
+
+    u64 thread_id;
+
+    u64 vector;
+    u64 error_code;
+
+    u64 rip;
+    u64 rax;
+
+    u64 user_rsp;
+    u64 user_ss;
+
+    u64 cr2;
+} UserFaultInfo;
+
+void interrupt_clear_user_fault(void);
+bool interrupt_last_user_fault(UserFaultInfo *info);
 bool interrupt_from_user(const InterruptFrame *frame);
 const InterruptStackFrame * interrupt_user_stack(const InterruptFrame *frame);
 

@@ -18,6 +18,9 @@ bool scheduler_remove(
 bool scheduler_yield(void);
 u64 scheduler_thread_count(void);
 
+bool scheduler_block_current(void);
+bool scheduler_wake(Thread *thread);
+
 /*
  * Permanently terminate the running thread.
  *

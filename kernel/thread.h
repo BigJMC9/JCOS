@@ -28,6 +28,9 @@ typedef struct Thread {
 
     ThreadEntry entry;
     void *argument;
+
+    u64 user_rip;
+    u64 user_rsp;
     
     u64 kernel_stack_physical;
     u64 kernel_stack_base;
@@ -45,6 +48,12 @@ bool thread_prepare_kernel(
     Thread *thread,
     ThreadEntry entry,
     void *argument
+);
+
+bool thread_prepare_user(
+    Thread *thread,
+    u64 user_rip,
+    u64 user_rsp
 );
 
 bool thread_switch(

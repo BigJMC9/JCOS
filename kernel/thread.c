@@ -20,8 +20,15 @@ static NORETURN void thread_kernel_trampoline(void) {
     void *argument = thread->argument;
     entry(argument);
 
-    /* Kernel-thread exit is not implemented yet. */
+    /* Kernel-thread entries must currently terminate explicitly. */
     cpu_halt_forever();
+}
+
+static NORETURN void thread_user_trampoline(void) {
+    Thread *thread = thread_current();
+
+    if (!thread || !thread->user_rip || !thread->user_rsp) cpu_halt_forever();
+    arch_enter_user(thread->user_rip, thread->user_rsp);
 }
 
 bool thread_prepare_kernel(Thread *thread, ThreadEntry entry, void *argument) {
@@ -40,7 +47,7 @@ bool thread_prepare_kernel(Thread *thread, ThreadEntry entry, void *argument) {
      * RSP % 16 == 8 because CALL pushed a
      * return address.
      *
-     * We enter with JMP, so reserve a dummy
+     * Enter with JMP, so reserve a dummy
      * return slot ourselves.
      */
     u64 initial_rsp = thread->kernel_stack_top - sizeof(u64);
@@ -49,6 +56,48 @@ bool thread_prepare_kernel(Thread *thread, ThreadEntry entry, void *argument) {
 
     thread->context.rsp = initial_rsp;
     thread->context.rip = (u64)(void *) thread_kernel_trampoline;
+    thread->user_rip = 0;
+    thread->user_rsp = 0;
+    thread->context_ready = true;
+
+    return true;
+}
+
+bool thread_prepare_user(Thread *thread, u64 user_rip, u64 user_rsp) {
+    if (!g_initialized || !thread || thread == g_current_thread || !thread->id || !thread->address_space || thread->address_space->kernel || thread->state != THREAD_STATE_READY || !thread->owns_kernel_stack || thread->context_ready) return false;
+    if (!thread->kernel_stack_base || !thread->kernel_stack_top || thread->kernel_stack_top <= thread->kernel_stack_base) return false;
+    if (thread->kernel_stack_top & 0xFULL) return false;
+    if (user_rip < ADDRESS_SPACE_USER_BASE || user_rip >= ADDRESS_SPACE_USER_LIMIT) return false;
+    if (user_rsp <= ADDRESS_SPACE_USER_BASE || user_rsp > ADDRESS_SPACE_USER_LIMIT) return false;
+
+    u64 code_page = user_rip & ~(VM_PAGE_SIZE - 1ULL);
+    u64 stack_page = (user_rsp - 1ULL) & ~(VM_PAGE_SIZE - 1ULL);
+
+    frame_t code_frame = FRAME_INVALID;
+    frame_t stack_frame = FRAME_INVALID;
+
+    vm_flags_t code_flags = 0;
+    vm_flags_t stack_flags = 0;
+
+    if (!address_space_query_page(thread->address_space, code_page, &code_frame, &code_flags)) return false;
+    if (!(code_flags & VM_USER)) return false;
+    if (!address_space_query_page(thread->address_space, stack_page, &stack_frame, &stack_flags)) return false;
+    if (!(stack_flags & VM_USER) || !(stack_flags & VM_WRITE)) return false;
+
+    k_memset(&thread->context, 0, sizeof(thread->context));
+
+    thread->entry = 0;
+    thread->argument = 0;
+    thread->user_rip = user_rip;
+    thread->user_rsp = user_rsp;
+
+    /* We JMP into the trampoline rather than CALL it, so synthesize the usual SysV entry alignment. */
+    u64 initial_rsp = thread->kernel_stack_top - sizeof(u64);
+
+    *(u64 *)(u64)initial_rsp = 0;
+
+    thread->context.rsp = initial_rsp;
+    thread->context.rip = (u64)(void *) thread_user_trampoline;
     thread->context_ready = true;
 
     return true;
@@ -219,9 +268,8 @@ bool thread_destroy(Thread *thread) {
         thread == g_current_thread || 
         !thread->id || 
         thread->state == THREAD_STATE_INVALID || 
-        thread->state == THREAD_STATE_RUNNING ||
+        thread->state == THREAD_STATE_RUNNING || 
         thread->on_run_queue) {
-
         return false;
     }
 
@@ -229,25 +277,20 @@ bool thread_destroy(Thread *thread) {
     if (thread->owns_kernel_stack) {
         result = release_kernel_stack(thread->kernel_stack_physical, thread->kernel_stack_size);
     }
-    
+
     k_memset(&thread->context, 0, sizeof(thread->context));
 
     thread->address_space = 0;
-
     thread->entry = 0;
     thread->argument = 0;
-    
     thread->kernel_stack_physical = 0;
     thread->kernel_stack_base = 0;
     thread->kernel_stack_top = 0;
     thread->kernel_stack_size = 0;
-    
     thread->owns_kernel_stack = false;
     thread->context_ready = false;
-
     thread->run_next = 0;
     thread->on_run_queue = false;
-
     thread->id = 0;
     thread->state = THREAD_STATE_DEAD;
 

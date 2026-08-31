@@ -27,7 +27,7 @@ bool scheduler_init(void) {
 }
 
 bool scheduler_add(Thread *thread) {
-    if (!g_initialized || !thread || !thread->id || thread->on_run_queue || thread->state != THREAD_STATE_READY) return false;
+    if (!g_initialized || !thread || !thread->id || thread->on_run_queue || !thread->context_ready || thread->state != THREAD_STATE_READY) return false;
     if (!g_run_head || !g_run_tail || !g_run_count) return false;
 
     /*
@@ -94,10 +94,96 @@ bool scheduler_yield(void) {
     Thread *candidate = current->run_next;
     for (u64 inspected = 0; inspected + 1ULL < g_run_count; ++inspected) {
         if (!candidate) return false;
-        if (candidate != current && candidate->on_run_queue && candidate->state == THREAD_STATE_READY) return thread_switch(candidate);
+        if (candidate != current && candidate->on_run_queue && candidate->context_ready && candidate->state == THREAD_STATE_READY) return thread_switch(candidate);
+
         candidate = candidate->run_next;
     }
     /* No other runnable thread. */
+    return true;
+}
+
+bool scheduler_block_current(void) {
+    if (!g_initialized || !g_run_head || !g_run_tail || g_run_count < 2) return false;
+
+    Thread *blocked = thread_current();
+
+    if (!blocked || !blocked->id || !blocked->on_run_queue || blocked->state != THREAD_STATE_RUNNING || !blocked->run_next) return false;
+
+    /*
+     * Find another runnable thread.
+     *
+     * Its context must already be enterable.
+     */
+    Thread *candidate = blocked->run_next;
+    Thread *chosen = 0;
+
+    for (u64 inspected = 0; inspected + 1ULL < g_run_count; ++inspected) {
+        if (!candidate) return false;
+        if (candidate != blocked && candidate->on_run_queue && candidate->context_ready && candidate->state == THREAD_STATE_READY) {
+
+            chosen = candidate;
+            break;
+        }
+        candidate = candidate->run_next;
+    }
+
+    if (!chosen) return false;
+
+    /*
+     * First install the target thread's:
+     *
+     *   current-thread identity
+     *   CR3
+     *   TSS.RSP0
+     *
+     * thread_activate() temporarily changes
+     * blocked from RUNNING to READY.
+     */
+    if (!thread_activate(chosen)) return false;
+
+    /*
+     * Still executing on blocked's
+     * kernel stack, but chosen is now the
+     * architectural current thread.
+     *
+     * Interrupts must remain disabled across
+     * this transition.
+     */
+    if (!scheduler_unlink(blocked)) cpu_halt_forever();
+
+    blocked->state = THREAD_STATE_BLOCKED;
+
+    /* arch_context_switch() is about to save the continuation at this exact point. */
+    blocked->context_ready = true;
+    arch_context_switch(&blocked->context, &chosen->context);
+
+    /* Reached only after scheduler_wake() made this thread READY again and a later scheduler switch selected it. */
+    return thread_current() == blocked && blocked->state == THREAD_STATE_RUNNING && blocked->on_run_queue;
+}
+
+bool scheduler_wake(Thread *thread) {
+    if (!g_initialized ||
+        !thread ||
+        !thread->id ||
+        thread == thread_current() ||
+        thread->on_run_queue ||
+        thread->run_next ||
+        !thread->context_ready ||
+        thread->state != THREAD_STATE_BLOCKED) {
+
+        return false;
+    }
+
+    /*
+     * scheduler_add() accepts READY threads.
+     * Restore BLOCKED if insertion somehow
+     * fails.
+     */
+    thread->state = THREAD_STATE_READY;
+    if (!scheduler_add(thread)) {
+        thread->state = THREAD_STATE_BLOCKED;
+        return false;
+    }
     return true;
 }
 

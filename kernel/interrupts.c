@@ -6,6 +6,7 @@
 #include "ps2.h"
 #include "thread.h"
 #include "syscall.h"
+#include "scheduler.h"
 
 typedef struct PACKED {
     u16 offset_low;
@@ -26,6 +27,18 @@ static IdtEntry g_idt[256];
 static IdtDescriptor g_idtr;
 static u64 g_counts[256];
 static u64 g_spurious;
+static UserFaultInfo g_last_user_fault;
+
+void interrupt_clear_user_fault(void) {
+    k_memset(&g_last_user_fault, 0, sizeof(g_last_user_fault));
+}
+
+bool interrupt_last_user_fault(UserFaultInfo *info) {
+    if (!info || !g_last_user_fault.valid) return false;
+    *info = g_last_user_fault;
+
+    return true;
+}
 
 bool interrupt_from_user(const InterruptFrame *frame) {
     if (!frame) return false;
@@ -50,6 +63,7 @@ static void idt_set(u8 vector, u64 handler, u16 selector, u8 ist, u8 dpl) {
 
 void idt_init(bool tss_ready) {
     k_memset(g_idt, 0, sizeof(g_idt)); k_memset(g_counts, 0, sizeof(g_counts));
+    k_memset(&g_last_user_fault, 0, sizeof(g_last_user_fault));
     g_spurious = 0;
     u64 table = (u64)(const void *)isr_stub_offsets;
     u16 selector = arch_read_cs();
@@ -59,47 +73,114 @@ void idt_init(bool tss_ready) {
         u8 ist = (tss_ready && vector == 8U) ? 1U : 0U;
         idt_set((u8)vector, handler, selector, ist, 0);
     }
-    idt_set(0x80, table + (s64)isr_stub_offsets[48], selector, 0, 3);
-    idt_set(0xFF, table + (s64)isr_stub_offsets[49], selector, 0, 0);
+    idt_set(0x80, table + (s64)isr_stub_offsets[48], selector, 0, 3); idt_set(0xFF, table + (s64)isr_stub_offsets[49], selector, 0, 0);
     g_idtr.limit = (u16)(sizeof(g_idt) - 1);
     g_idtr.base = (u64)(void *)g_idt;
     arch_load_idt(&g_idtr);
 }
 
-static const char *exception_name(u64 vector) {
+static __attribute__((optnone))
+void exception_write_name(u64 vector) {
     switch (vector) {
-        case 0: return "DIVIDE ERROR";
-        case 1: return "DEBUG";
-        case 2: return "NON-MASKABLE INTERRUPT";
-        case 3: return "BREAKPOINT";
-        case 4: return "OVERFLOW";
-        case 5: return "BOUND RANGE EXCEEDED";
-        case 6: return "INVALID OPCODE";
-        case 7: return "DEVICE NOT AVAILABLE";
-        case 8: return "DOUBLE FAULT";
-        case 10: return "INVALID TSS";
-        case 11: return "SEGMENT NOT PRESENT";
-        case 12: return "STACK-SEGMENT FAULT";
-        case 13: return "GENERAL PROTECTION FAULT";
-        case 14: return "PAGE FAULT";
-        case 16: return "X87 FLOATING-POINT EXCEPTION";
-        case 17: return "ALIGNMENT CHECK";
-        case 18: return "MACHINE CHECK";
-        case 19: return "SIMD FLOATING-POINT EXCEPTION";
-        case 20: return "VIRTUALIZATION EXCEPTION";
-        case 21: return "CONTROL PROTECTION EXCEPTION";
-        case 29: return "VMM COMMUNICATION EXCEPTION";
-        case 30: return "SECURITY EXCEPTION";
-        default: return "RESERVED CPU EXCEPTION";
+        case 0: terminal_write("DIVIDE ERROR"); return;
+        case 1: terminal_write("DEBUG"); return;
+        case 2: terminal_write("NON-MASKABLE INTERRUPT"); return;
+        case 3: terminal_write("BREAKPOINT"); return;
+        case 4: terminal_write("OVERFLOW"); return;
+        case 5: terminal_write("BOUND RANGE EXCEEDED"); return;
+        case 6: terminal_write("INVALID OPCODE"); return;
+        case 7: terminal_write("DEVICE NOT AVAILABLE"); return;
+        case 8: terminal_write("DOUBLE FAULT"); return;
+        case 10: terminal_write("INVALID TSS"); return;
+        case 11: terminal_write("SEGMENT NOT PRESENT"); return;
+        case 12: terminal_write("STACK-SEGMENT FAULT"); return;
+        case 13: terminal_write("GENERAL PROTECTION FAULT"); return;
+        case 14: terminal_write("PAGE FAULT"); return;
+        case 16: terminal_write("X87 FLOATING-POINT EXCEPTION"); return;
+        case 17: terminal_write("ALIGNMENT CHECK"); return;
+        case 18: terminal_write("MACHINE CHECK"); return;
+        case 19: terminal_write("SIMD FLOATING-POINT EXCEPTION"); return;
+        case 20: terminal_write("VIRTUALIZATION EXCEPTION"); return;
+        case 21: terminal_write("CONTROL PROTECTION EXCEPTION"); return;
+        case 29: terminal_write("VMM COMMUNICATION EXCEPTION"); return;
+        case 30: terminal_write("SECURITY EXCEPTION"); return;
+        default: terminal_write("RESERVED CPU EXCEPTION"); return;
     }
+}
+
+static bool user_exception_is_terminable(u64 vector) {
+    /*
+     * Start conservatively.
+     *
+     * #UD proves isolation now.
+     * #PF is the next important case.
+     */
+    return vector == 6ULL || vector == 14ULL;
+}
+
+static NORETURN void user_exception_terminate(const InterruptFrame *frame) {
+    interrupts_disable();
+
+    Thread *thread = thread_current();
+
+    if (!frame || !thread || !thread->id || !thread->on_run_queue || thread->state != THREAD_STATE_RUNNING || scheduler_thread_count() < 2) cpu_halt_forever();
+
+    const InterruptStackFrame *user = interrupt_user_stack(frame);
+
+    k_memset(&g_last_user_fault, 0, sizeof(g_last_user_fault));
+
+    g_last_user_fault.valid = true;
+    g_last_user_fault.thread_id = thread->id;
+    g_last_user_fault.vector = frame->vector;
+    g_last_user_fault.error_code = frame->error_code;
+    g_last_user_fault.rip = frame->rip;
+    g_last_user_fault.rax = frame->rax;
+
+    if (user) {
+        g_last_user_fault.user_rsp = user->rsp;
+        g_last_user_fault.user_ss = user->ss;
+    }
+
+    if (frame->vector == 14ULL) g_last_user_fault.cr2 = arch_read_cr2();
+
+    terminal_set_color(terminal_error_color());
+    terminal_writeln("\nUSER FAULT:");
+    terminal_write("VECTOR: ");
+    terminal_write_u64(frame->vector);
+    terminal_write(" (");
+    exception_write_name(frame->vector);
+    terminal_writeln(")");
+    terminal_write("THREAD: "); terminal_write_u64(thread->id); terminal_putchar('\n'); 
+    terminal_write("RIP: "); terminal_write_hex(frame->rip); terminal_putchar('\n');
+    terminal_write("ERROR CODE: "); terminal_write_hex(frame->error_code); terminal_putchar('\n');
+
+    if (user) { 
+        terminal_write("USER RSP: "); terminal_write_hex(user->rsp); terminal_putchar('\n'); 
+    }
+    if (frame->vector == 14ULL) { 
+        terminal_write("CR2: "); terminal_write_hex(g_last_user_fault.cr2); terminal_putchar('\n'); 
+    }
+
+    terminal_writeln("ACTION: THREAD TERMINATED");
+    terminal_set_color(terminal_default_color());
+
+    /*
+     * This never returns.
+     *
+     * The trap frame and current kernel stack
+     * are deliberately abandoned.
+     */
+    scheduler_exit_current();
 }
 
 static NORETURN void exception_panic(const InterruptFrame *frame) {
     interrupts_disable();
     terminal_set_color(terminal_error_color());
     terminal_writeln("\nCPU EXCEPTION:");
-    terminal_write("VECTOR: "); terminal_write_u64(frame->vector);
-    terminal_write(" ("); terminal_write(exception_name(frame->vector));
+    terminal_write("VECTOR: ");
+    terminal_write_u64(frame->vector);
+    terminal_write(" (");
+    exception_write_name(frame->vector);
     terminal_writeln(")");
     terminal_write("ERROR CODE: "); terminal_write_hex(frame->error_code); terminal_putchar('\n');
     terminal_write("RIP: "); terminal_write_hex(frame->rip); terminal_putchar('\n');
@@ -112,24 +193,12 @@ static NORETURN void exception_panic(const InterruptFrame *frame) {
         const InterruptStackFrame *user = interrupt_user_stack(frame);
         Thread *current = thread_current();
         terminal_write( "THREAD: ");
-        if (current) {
-            terminal_write_u64(current->id);
-        } 
-        else {
-            terminal_write("NONE");
-        }
-        terminal_putchar('\n');
-        terminal_write("RAX: ");
-        terminal_write_hex(frame->rax);
-        terminal_putchar('\n');
+        if (current) terminal_write_u64(current->id);
+        else terminal_write("NONE");
+        terminal_putchar('\n'); terminal_write("RAX: "); terminal_write_hex(frame->rax); terminal_putchar('\n');
         if (user) {
-            terminal_write("USER RSP: ");
-            terminal_write_hex(user->rsp);
-            terminal_putchar('\n');
-
-            terminal_write("USER SS: ");
-            terminal_write_hex(user->ss);
-            terminal_putchar('\n');
+            terminal_write("USER RSP: "); terminal_write_hex(user->rsp); terminal_putchar('\n');
+            terminal_write("USER SS: "); terminal_write_hex(user->ss); terminal_putchar('\n');
         }
     }
     if (frame->vector == 14) {
@@ -144,7 +213,15 @@ void interrupt_dispatch(InterruptFrame *frame) {
     u8 vector = (u8)frame->vector;
     ++g_counts[vector];
 
-    if (frame->vector < 32) exception_panic(frame);
+    if (frame->vector < 32) {
+        if (interrupt_from_user(frame) && user_exception_is_terminable(frame->vector)) {
+            Thread *current = thread_current();
+
+            /* Scheduler-managed user threads can be isolated. Transitional manual Ring3 probes still use the old panic. */
+            if (current && current->on_run_queue && current->state == THREAD_STATE_RUNNING && scheduler_thread_count() >= 2) user_exception_terminate(frame);
+        }
+        exception_panic(frame);
+    }
     if (vector == SYSCALL_VECTOR) {
         /* INT 0x80 entered through the DPL3 syscall gate and already switched to TSS.RSP0. */
         syscall_dispatch(frame);

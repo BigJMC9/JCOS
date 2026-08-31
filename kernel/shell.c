@@ -43,6 +43,9 @@ static volatile bool g_schedtest_failed;
 
 static volatile bool g_exittest_started;
 
+static volatile bool g_blocktest_started;
+static volatile bool g_blocktest_resumed;
+
 static char *trim(char *s) {
     while (*s && k_ascii_space(*s)) ++s;
     char *end = s + k_strlen(s);
@@ -136,8 +139,11 @@ static void command_help(void) {
     terminal_writeln("  threadtest  test thread lifecycle and kernel stacks");
     terminal_writeln("  switchtest  test cooperative thread context switches");
     terminal_writeln("  schedtest   test cooperative round-robin scheduling");
+    terminal_writeln("  blocktest   test thread blocking and wakeup");
     terminal_writeln("  exittest    test permanent current-thread termination");
     terminal_writeln("  syscalltest test Ring3 syscall round-trip");
+    terminal_writeln("  userisotest test recoverable Ring3 fault isolation");
+    terminal_writeln("  userpftest  test recoverable Ring3 page fault");
     terminal_writeln("  cpu         show CPUID information");
     terminal_writeln("  interrupts  show APIC/PIC and keyboard counters");
     terminal_writeln("  acpi        show ACPI discovery results");
@@ -588,7 +594,7 @@ static void command_threadtest(void) {
     terminal_writeln(count_restored ? "PASS" : "FAILED");
 
     bool pass = bootstrap_ok && space_created && created && metadata_ok && stack_mapped && stack_rw && activated && current_switched && state_switched && cr3_switched && rsp0_switched && restored && current_restored && cr3_restored && rsp0_restored && destroyed && count_restored;
-    
+
     terminal_set_color(pass ? terminal_accent_color() : terminal_error_color()); 
     terminal_write("THREAD TEST: ");
     terminal_writeln(pass ? "PASS" : "FAILED");
@@ -896,8 +902,8 @@ static void command_exittest(void) {
 
     PmmStats before = pmm_stats();
 
-    terminal_write("  FREE BEFORE: ");
-    terminal_write_u64(before.free_pages);
+    terminal_write("  FREE BEFORE: "); 
+    terminal_write_u64(before.free_pages); 
     terminal_putchar('\n');
 
     Thread *main_thread = thread_current();
@@ -981,15 +987,15 @@ static void command_exittest(void) {
 
     bool frames_restored = before.free_pages == after.free_pages;
 
-    terminal_write("  FREE AFTER: ");
-    terminal_write_u64(after.free_pages);
-    terminal_putchar('\n');
+    terminal_write("  FREE AFTER: "); 
+    terminal_write_u64(after.free_pages); 
+    terminal_putchar('\n'); 
     terminal_write("  FRAME COUNT RESTORED: ");
     terminal_writeln(frames_restored ? "PASS" : "FAILED");
 
     bool pass = main_ok && created && prepared && queued && queue_two && yielded && worker_started && current_restored && child_dead && queue_restored && reaped && frames_restored;
 
-    terminal_set_color(pass ? terminal_accent_color() : terminal_error_color());
+    terminal_set_color(pass ? terminal_accent_color() : terminal_error_color()); 
     terminal_write("THREAD EXIT TEST: ");
     terminal_writeln(pass ? "PASS" : "FAILED");
     terminal_set_color(terminal_default_color());
@@ -1085,6 +1091,585 @@ static void command_syscalltest(void) {
 
     terminal_write("  ACTIVE THREAD: "); terminal_write_u64(thread_current()->id); terminal_putchar('\n');
     arch_enter_user(user_code, user_stack_top);
+}
+
+static void command_userisotest(void) {
+    const u64 user_code = ADDRESS_SPACE_USER_BASE;
+    const u64 user_stack = ADDRESS_SPACE_USER_BASE + VM_PAGE_SIZE;
+    const u64 user_stack_top = user_stack + VM_PAGE_SIZE;
+
+    terminal_writeln("USER FAULT ISOLATION TEST:");
+
+    PmmStats before = pmm_stats();
+    terminal_write("  FREE BEFORE: "); 
+    terminal_write_u64(before.free_pages); 
+    terminal_putchar('\n');
+
+    Thread *main_thread = thread_current();
+    bool main_ok = main_thread && main_thread->state == THREAD_STATE_RUNNING && main_thread->on_run_queue && scheduler_thread_count() == 1;
+
+    terminal_write("  MAIN THREAD: ");
+    terminal_writeln(main_ok ? "PASS" : "FAILED");
+
+    if (!main_ok) return;
+
+    AddressSpace space;
+    bool space_created = address_space_create(&space);
+
+    terminal_write("  ADDRESS SPACE: ");
+    terminal_writeln(space_created ? "PASS" : "FAILED");
+
+    if (!space_created) return;
+
+    Thread thread;
+    bool thread_created = thread_create(&thread, &space);
+
+    terminal_write("  THREAD CREATE: ");
+    terminal_writeln(thread_created ? "PASS" : "FAILED");
+
+    if (!thread_created) {
+        address_space_destroy(&space);
+        return;
+    }
+
+    frame_t code_frame = frame_alloc();
+    frame_t stack_frame = frame_alloc();
+
+    bool frames_ok = code_frame != FRAME_INVALID && stack_frame != FRAME_INVALID;
+
+    terminal_write("  USER FRAMES: ");
+    terminal_writeln(frames_ok ? "PASS" : "FAILED");
+
+    if (!frames_ok) {
+        if (code_frame != FRAME_INVALID) (void)frame_free(code_frame);
+        if (stack_frame != FRAME_INVALID) (void)frame_free(stack_frame);
+
+        (void)thread_destroy(&thread);
+        address_space_destroy(&space);
+        return;
+    }
+
+    bool code_mapped = address_space_map_page(&space, user_code, code_frame, 0);
+    bool stack_mapped = address_space_map_page(&space, user_stack, stack_frame, VM_WRITE);
+    bool mappings_ok = code_mapped && stack_mapped;
+
+    terminal_write("  USER MAPPINGS: ");
+    terminal_writeln(mappings_ok ? "PASS" : "FAILED");
+
+    if (!mappings_ok) {
+        frame_t ignored = FRAME_INVALID;
+
+        if (code_mapped) (void)address_space_unmap_page(&space, user_code, &ignored);
+        if (stack_mapped) (void)address_space_unmap_page(&space, user_stack, &ignored);
+
+        (void)frame_free(code_frame);
+        (void)frame_free(stack_frame);
+        (void)thread_destroy(&thread);
+        address_space_destroy(&space);
+
+        return;
+    }
+
+    u8 *code = (u8 *)phys_to_virt(frame_to_phys(code_frame));
+
+    if (!code) {
+        terminal_writeln("  PHYSMAP: FAILED");
+        return;
+    }
+
+    /* UD2 */
+    code[0] = 0x0F;
+    code[1] = 0x0B;
+
+    bool prepared = thread_prepare_user(&thread, user_code, user_stack_top);
+
+    terminal_write("  PREPARE USER: ");
+    terminal_writeln(prepared ? "PASS" : "FAILED");
+
+    if (!prepared) {
+        frame_t ignored = FRAME_INVALID;
+        (void)address_space_unmap_page(&space, user_code, &ignored);
+        (void)address_space_unmap_page(&space, user_stack, &ignored);
+        (void)frame_free(code_frame);
+        (void)frame_free(stack_frame);
+        (void)thread_destroy(&thread);
+        address_space_destroy(&space);
+        return;
+    }
+
+    u64 user_thread_id = thread.id;
+    bool queued = scheduler_add(&thread);
+
+    terminal_write("  QUEUE USER: ");
+    terminal_writeln(queued ? "PASS" : "FAILED");
+
+    if (!queued) {
+        (void)thread_destroy(&thread);
+        frame_t ignored = FRAME_INVALID;
+        (void)address_space_unmap_page(&space, user_code, &ignored);
+        (void)address_space_unmap_page(&space, user_stack, &ignored);
+        (void)frame_free(code_frame);
+        (void)frame_free(stack_frame);
+        address_space_destroy(&space);
+        return;
+    }
+
+    interrupt_clear_user_fault();
+
+    /*
+     * main -> user kernel trampoline -> Ring3
+     *
+     * UD2 enters the user thread's RSP0.
+     * The exception path kills that thread and
+     * one-way enters this saved main context.
+     */
+    interrupts_disable();
+
+    bool yielded = scheduler_yield();
+    interrupts_enable();
+
+    UserFaultInfo fault;
+    k_memset(&fault, 0, sizeof(fault));
+
+    bool fault_captured = interrupt_last_user_fault(&fault);
+    bool current_restored = yielded && thread_current() == main_thread && main_thread->state == THREAD_STATE_RUNNING;
+    bool user_dead = thread.state == THREAD_STATE_DEAD && !thread.on_run_queue && !thread.context_ready;
+    bool fault_ok = fault_captured && fault.thread_id == user_thread_id && fault.vector == 6ULL && fault.rip == user_code && fault.user_rsp == user_stack_top && fault.user_ss == 0x1BULL;
+    bool queue_restored = scheduler_thread_count() == 1;
+
+    terminal_write("  SHELL RESUMED: ");
+    terminal_writeln(current_restored ? "PASS" : "FAILED");
+    terminal_write("  USER DEAD: ");
+    terminal_writeln(user_dead ? "PASS" : "FAILED");
+    terminal_write("  FAULT CAPTURED: ");
+    terminal_writeln(fault_ok ? "PASS" : "FAILED");
+    terminal_write("  QUEUE RESTORED: ");
+    terminal_writeln(queue_restored ? "PASS" : "FAILED");
+
+    /* Executing on the bootstrap stack again, so dead kernel stack is safe to release. */
+    bool reaped = thread_destroy(&thread);
+
+    frame_t old_code = FRAME_INVALID;
+    frame_t old_stack = FRAME_INVALID;
+
+    bool code_unmapped = address_space_unmap_page(&space, user_code, &old_code) && old_code == code_frame;
+    bool stack_unmapped = address_space_unmap_page(&space, user_stack, &old_stack) && old_stack == stack_frame;
+    bool code_freed = frame_free(code_frame);
+    bool stack_freed = frame_free(stack_frame);
+
+    address_space_destroy(&space);
+
+    PmmStats after = pmm_stats();
+    bool frames_restored = before.free_pages == after.free_pages;
+
+    terminal_write("  THREAD REAPED: ");
+    terminal_writeln(reaped ? "PASS" : "FAILED");
+    terminal_write("  USER UNMAP: ");
+    terminal_writeln(code_unmapped && stack_unmapped ? "PASS" : "FAILED");
+    terminal_write("  USER FRAMES FREED: ");
+    terminal_writeln(code_freed && stack_freed ? "PASS" : "FAILED");
+    terminal_write("  FREE AFTER: "); 
+    terminal_write_u64(after.free_pages); 
+    terminal_putchar('\n'); 
+    terminal_write("  FRAME COUNT RESTORED: ");
+    terminal_writeln(frames_restored ? "PASS" : "FAILED");
+
+    bool pass = main_ok && space_created && thread_created && frames_ok && mappings_ok && prepared && queued && yielded && current_restored && user_dead && fault_ok && queue_restored && reaped && code_unmapped && stack_unmapped && code_freed && stack_freed && frames_restored;
+
+    terminal_set_color(pass ? terminal_accent_color() : terminal_error_color()); 
+    terminal_write("USER FAULT ISOLATION TEST: ");
+    terminal_writeln(pass ? "PASS" : "FAILED");
+    terminal_set_color(terminal_default_color());
+}
+
+static void command_userpftest(void) {
+    const u64 user_code = ADDRESS_SPACE_USER_BASE;
+    const u64 user_stack = ADDRESS_SPACE_USER_BASE + VM_PAGE_SIZE;
+    const u64 user_stack_top = user_stack + VM_PAGE_SIZE;
+
+    /* Deliberately leave this address unmapped. */
+    const u64 fault_address = ADDRESS_SPACE_USER_BASE + 0x00400000ULL;
+    terminal_writeln("USER PAGE FAULT ISOLATION TEST:");
+    PmmStats before = pmm_stats();
+
+    terminal_write("  FREE BEFORE: "); terminal_write_u64(before.free_pages); terminal_putchar('\n');
+
+    Thread *main_thread = thread_current();
+    bool main_ok = main_thread && main_thread->state == THREAD_STATE_RUNNING && main_thread->on_run_queue && scheduler_thread_count() == 1;
+
+    terminal_write("  MAIN THREAD: ");
+    terminal_writeln(main_ok ? "PASS" : "FAILED");
+
+    if (!main_ok) return;
+
+    AddressSpace space;
+    bool space_created = address_space_create(&space);
+
+    terminal_write("  ADDRESS SPACE: ");
+    terminal_writeln(space_created ? "PASS" : "FAILED");
+
+    if (!space_created) return;
+
+    Thread thread;
+    bool thread_created = thread_create(&thread, &space);
+
+    terminal_write("  THREAD CREATE: ");
+    terminal_writeln(thread_created ? "PASS" : "FAILED");
+
+    if (!thread_created) {
+        address_space_destroy(&space);
+        return;
+    }
+
+    frame_t code_frame = frame_alloc();
+    frame_t stack_frame = frame_alloc();
+
+    bool frames_ok = code_frame != FRAME_INVALID && stack_frame != FRAME_INVALID;
+
+    terminal_write("  USER FRAMES: ");
+    terminal_writeln(frames_ok ? "PASS" : "FAILED");
+
+    if (!frames_ok) {
+        if (code_frame != FRAME_INVALID) (void)frame_free(code_frame);
+        if (stack_frame != FRAME_INVALID) (void)frame_free(stack_frame);
+
+        (void)thread_destroy(&thread);
+        address_space_destroy(&space);
+        return;
+    }
+
+    bool code_mapped = address_space_map_page(&space, user_code, code_frame, 0);
+    bool stack_mapped = address_space_map_page(&space, user_stack, stack_frame, VM_WRITE);
+    bool mappings_ok = code_mapped && stack_mapped;
+
+    terminal_write("  USER MAPPINGS: ");
+    terminal_writeln(mappings_ok ? "PASS" : "FAILED");
+
+    if (!mappings_ok) {
+        frame_t ignored = FRAME_INVALID;
+        if (code_mapped) (void)address_space_unmap_page(&space, user_code, &ignored);
+        if (stack_mapped) (void)address_space_unmap_page(&space, user_stack, &ignored);
+        (void)frame_free(code_frame);
+        (void)frame_free(stack_frame);
+        (void)thread_destroy(&thread);
+        address_space_destroy(&space);
+        return;
+    }
+
+    /* Prove that the intended fault address really is absent before entering Ring3. */
+    frame_t unexpected_frame = FRAME_INVALID;
+    bool fault_unmapped = !address_space_query_page(&space, fault_address, &unexpected_frame, 0);
+
+    terminal_write("  FAULT ADDRESS UNMAPPED: ");
+    terminal_writeln(fault_unmapped ? "PASS" : "FAILED");
+
+    if (!fault_unmapped) {
+        frame_t ignored = FRAME_INVALID;
+        (void)address_space_unmap_page(&space, user_code, &ignored);
+        (void)address_space_unmap_page(&space, user_stack, &ignored);
+        (void)frame_free(code_frame);
+        (void)frame_free(stack_frame);
+        (void)thread_destroy(&thread);
+        address_space_destroy(&space);
+        return;
+    }
+
+    u8 *code = (u8 *)phys_to_virt(frame_to_phys(code_frame));
+
+    if (!code) {
+        terminal_writeln("  PHYSMAP: FAILED");
+        return;
+    }
+
+    /*
+     * mov rax, moffs64
+     *
+     *   48 A1 <64-bit address>
+     *
+     * The memory operand is deliberately
+     * unmapped, so this instruction must #PF.
+     *
+     * UD2 follows as a guard and must never
+     * execute.
+     */
+    code[0] = 0x48;
+    code[1] = 0xA1;
+    for (u32 i = 0; i < 8U; ++i) code[2U + i] = (u8)(fault_address >> (i * 8U));
+    code[10] = 0x0F;
+    code[11] = 0x0B;
+
+    bool prepared = thread_prepare_user(&thread, user_code, user_stack_top);
+
+    terminal_write("  PREPARE USER: ");
+    terminal_writeln(prepared ? "PASS" : "FAILED");
+
+    if (!prepared) {
+        frame_t ignored = FRAME_INVALID;
+        (void)address_space_unmap_page(&space, user_code, &ignored);
+        (void)address_space_unmap_page(&space, user_stack, &ignored);
+        (void)frame_free(code_frame);
+        (void)frame_free(stack_frame);
+        (void)thread_destroy(&thread);
+        address_space_destroy(&space);
+
+        return;
+    }
+
+    u64 user_thread_id = thread.id;
+    bool queued = scheduler_add(&thread);
+
+    terminal_write("  QUEUE USER: ");
+    terminal_writeln(queued ? "PASS" : "FAILED");
+
+    if (!queued) {
+        (void)thread_destroy(&thread);
+        frame_t ignored = FRAME_INVALID;
+        (void)address_space_unmap_page(&space, user_code, &ignored);
+        (void)address_space_unmap_page(&space, user_stack, &ignored);
+        (void)frame_free(code_frame);
+        (void)frame_free(stack_frame);
+        address_space_destroy(&space);
+
+        return;
+    }
+
+    interrupt_clear_user_fault();
+
+    /*
+     * main -> user -> #PF
+     *
+     * the recoverable exception path kills
+     * the user thread and restores main.
+     */
+    interrupts_disable();
+
+    bool yielded = scheduler_yield();
+    interrupts_enable();
+
+    UserFaultInfo fault;
+
+    k_memset(&fault, 0, sizeof(fault));
+
+    bool fault_captured = interrupt_last_user_fault(&fault);
+    bool current_restored = yielded && thread_current() == main_thread && main_thread->state == THREAD_STATE_RUNNING;
+    bool user_dead = thread.state == THREAD_STATE_DEAD && !thread.on_run_queue && !thread.context_ready;
+    bool fault_identity_ok = fault_captured && fault.thread_id == user_thread_id && fault.vector == 14ULL && fault.rip == user_code && fault.cr2 == fault_address && fault.user_rsp == user_stack_top && fault.user_ss == 0x1BULL;
+
+    /*
+     * Lower page-fault error-code bits:
+     *
+     * bit 0 P   = 0  not present
+     * bit 1 W/R = 0  read
+     * bit 2 U/S = 1  user
+     */
+    bool error_bits_ok = fault_captured && (fault.error_code & 0x7ULL) == 0x4ULL;
+    bool queue_restored = scheduler_thread_count() == 1;
+
+    terminal_write("  SHELL RESUMED: ");
+    terminal_writeln(current_restored ? "PASS" : "FAILED");
+    terminal_write("  USER DEAD: ");
+    terminal_writeln(user_dead ? "PASS" : "FAILED");
+    terminal_write("  PAGE FAULT CAPTURED: ");
+    terminal_writeln(fault_identity_ok ? "PASS" : "FAILED");
+    terminal_write("  CR2: "); terminal_write_hex(fault.cr2); terminal_putchar('\n'); terminal_write("  ERROR CODE: "); terminal_write_hex(fault.error_code); terminal_putchar('\n'); terminal_write("  PF ERROR BITS: ");
+    terminal_writeln(error_bits_ok ? "PASS" : "FAILED");
+    terminal_write("  QUEUE RESTORED: ");
+    terminal_writeln(queue_restored ? "PASS" : "FAILED");
+
+    bool reaped = thread_destroy(&thread);
+
+    frame_t old_code = FRAME_INVALID;
+    frame_t old_stack = FRAME_INVALID;
+
+    bool code_unmapped = address_space_unmap_page(&space, user_code, &old_code) && old_code == code_frame;
+    bool stack_unmapped = address_space_unmap_page(&space, user_stack, &old_stack) && old_stack == stack_frame;
+    bool code_freed = frame_free(code_frame);
+    bool stack_freed = frame_free(stack_frame);
+
+    address_space_destroy(&space);
+
+    PmmStats after = pmm_stats();
+    bool frames_restored = before.free_pages == after.free_pages;
+
+    terminal_write("  THREAD REAPED: ");
+    terminal_writeln(reaped ? "PASS" : "FAILED");
+    terminal_write("  USER UNMAP: ");
+    terminal_writeln(code_unmapped && stack_unmapped ? "PASS" : "FAILED");
+    terminal_write("  USER FRAMES FREED: ");
+    terminal_writeln(code_freed && stack_freed ? "PASS" : "FAILED");
+    terminal_write("  FREE AFTER: "); terminal_write_u64(after.free_pages); terminal_putchar('\n'); terminal_write("  FRAME COUNT RESTORED: ");
+    terminal_writeln(frames_restored ? "PASS" : "FAILED");
+
+    bool pass = main_ok && space_created && thread_created && frames_ok && mappings_ok && fault_unmapped && prepared && queued && yielded && current_restored && user_dead && fault_identity_ok && error_bits_ok && queue_restored && reaped && code_unmapped && stack_unmapped && code_freed && stack_freed && frames_restored;
+
+    terminal_set_color(pass ? terminal_accent_color() : terminal_error_color()); terminal_write("USER PAGE FAULT ISOLATION TEST: ");
+    terminal_writeln(pass ? "PASS" : "FAILED");
+    terminal_set_color(terminal_default_color());
+}
+
+static void blocktest_worker(void *argument) {
+    (void)argument;
+    g_blocktest_started = true;
+
+    /* This call does not return until main wakes it and schedules it again. */
+    if (!scheduler_block_current()) cpu_halt_forever();
+    g_blocktest_resumed = true;
+
+    /* Prove that a resumed blocked thread can subsequently terminate normally. */
+    scheduler_exit_current();
+}
+
+static void command_blocktest(void) {
+    terminal_writeln("THREAD BLOCK/WAKE TEST:");
+
+    PmmStats before = pmm_stats();
+
+    terminal_write("  FREE BEFORE: ");
+    terminal_write_u64(before.free_pages);
+    terminal_putchar('\n');
+
+    Thread *main_thread = thread_current();
+    bool main_ok = main_thread && main_thread->state == THREAD_STATE_RUNNING && main_thread->on_run_queue && scheduler_thread_count() == 1;
+
+    terminal_write("  MAIN THREAD: ");
+    terminal_writeln(main_ok ? "PASS" : "FAILED");
+
+    if (!main_ok) return;
+
+    Thread worker;
+    bool created = thread_create(&worker, address_space_kernel());
+
+    terminal_write("  CREATE: ");
+    terminal_writeln(created ? "PASS" : "FAILED");
+
+    if (!created) return;
+
+    bool prepared = thread_prepare_kernel(&worker, blocktest_worker, 0);
+
+    terminal_write("  PREPARE: ");
+    terminal_writeln(prepared ? "PASS" : "FAILED");
+
+    if (!prepared) {
+        (void)thread_destroy(&worker);
+        return;
+    }
+
+    bool queued = scheduler_add(&worker);
+
+    terminal_write("  QUEUE: ");
+    terminal_writeln(queued ? "PASS" : "FAILED");
+
+    if (!queued) {
+        (void)thread_destroy(&worker);
+
+        return;
+    }
+
+    g_blocktest_started = false;
+    g_blocktest_resumed = false;
+
+    /*
+     * main -> worker
+     *
+     * Worker blocks itself, which switches
+     * straight back to this saved main context.
+     */
+    interrupts_disable();
+
+    bool first_yield = scheduler_yield();
+    interrupts_enable();
+
+    bool current_after_block = first_yield && thread_current() == main_thread && main_thread->state == THREAD_STATE_RUNNING;
+    bool worker_started = g_blocktest_started;
+    bool worker_blocked = worker.state == THREAD_STATE_BLOCKED && !worker.on_run_queue && worker.context_ready;
+    bool not_resumed_yet = !g_blocktest_resumed;
+    bool queue_one = scheduler_thread_count() == 1;
+
+    terminal_write("  FIRST YIELD: ");
+    terminal_writeln(first_yield ? "PASS" : "FAILED");
+    terminal_write("  WORKER STARTED: ");
+    terminal_writeln(worker_started ? "PASS" : "FAILED");
+    terminal_write("  WORKER BLOCKED: ");
+    terminal_writeln(worker_blocked ? "PASS" : "FAILED");
+    terminal_write("  NOT RESUMED YET: ");
+    terminal_writeln(not_resumed_yet ? "PASS" : "FAILED");
+    terminal_write("  MAIN RESTORED: ");
+    terminal_writeln(current_after_block ? "PASS" : "FAILED");
+    terminal_write("  RUN QUEUE COUNT 1: ");
+    terminal_writeln(queue_one ? "PASS" : "FAILED");
+
+    /* If the blocking phase failed, clean up without attempting the wake phase. */
+    if (!first_yield || !worker_started || !worker_blocked || !not_resumed_yet || !current_after_block || !queue_one) {
+        if (worker.on_run_queue) (void)scheduler_remove(&worker);
+        (void)thread_destroy(&worker);
+        return;
+    }
+
+    /*
+     * Wake worker while scheduling remains
+     * quiescent, then yield to it.
+     *
+     * Worker resumes after its block call,
+     * records RESUMED, exits, and restores
+     * main's saved context.
+     */
+    interrupts_disable();
+
+    bool woke = scheduler_wake(&worker);
+    bool wake_state_ok = woke && worker.state == THREAD_STATE_READY && worker.on_run_queue && scheduler_thread_count() == 2;
+    bool second_yield = woke && scheduler_yield();
+
+    interrupts_enable();
+
+    bool worker_resumed = g_blocktest_resumed;
+    bool worker_dead = worker.state == THREAD_STATE_DEAD && !worker.on_run_queue && !worker.context_ready;
+    bool main_restored = second_yield && thread_current() == main_thread && main_thread->state == THREAD_STATE_RUNNING;
+    bool queue_restored = scheduler_thread_count() == 1;
+
+    terminal_write("  WAKE: ");
+    terminal_writeln(woke ? "PASS" : "FAILED");
+    terminal_write("  WAKE -> READY: ");
+    terminal_writeln(wake_state_ok ? "PASS" : "FAILED");
+    terminal_write("  SECOND YIELD: ");
+    terminal_writeln(second_yield ? "PASS" : "FAILED");
+    terminal_write("  WORKER RESUMED: ");
+    terminal_writeln(worker_resumed ? "PASS" : "FAILED");
+    terminal_write("  WORKER DEAD: ");
+    terminal_writeln(worker_dead ? "PASS" : "FAILED");
+    terminal_write("  MAIN RESTORED AGAIN: ");
+    terminal_writeln(main_restored ? "PASS" : "FAILED");
+    terminal_write("  QUEUE RESTORED: ");
+    terminal_writeln(queue_restored ? "PASS" : "FAILED");
+
+    /*
+     * Normal success path leaves the worker
+     * DEAD and off the run queue.
+     *
+     * If the second phase failed before running
+     * it, it may instead still be READY.
+     */
+    if (worker.on_run_queue && thread_current() != &worker) (void)scheduler_remove(&worker);
+
+    bool reaped = thread_destroy(&worker);
+
+    terminal_write("  REAP: ");
+    terminal_writeln(reaped ? "PASS" : "FAILED");
+
+    PmmStats after = pmm_stats();
+    bool frames_restored = before.free_pages == after.free_pages;
+
+    terminal_write("  FREE AFTER: ");
+    terminal_write_u64(after.free_pages);
+    terminal_putchar('\n');
+    terminal_write("  FRAME COUNT RESTORED: ");
+    terminal_writeln(frames_restored ? "PASS" : "FAILED");
+
+    bool pass = main_ok && created && prepared && queued && first_yield && worker_started && worker_blocked && not_resumed_yet && current_after_block && queue_one && woke && wake_state_ok && second_yield && worker_resumed && worker_dead && main_restored && queue_restored && reaped && frames_restored;
+
+    terminal_set_color(pass ? terminal_accent_color() : terminal_error_color());
+    terminal_write("THREAD BLOCK/WAKE TEST: ");
+    terminal_writeln(pass ? "PASS" : "FAILED");
+    terminal_set_color(terminal_default_color());
 }
 
 static void command_cpu(void) {
@@ -1780,8 +2365,11 @@ static void execute(char *line) {
     else if (k_strieq(command, "threadtest")) command_threadtest();
     else if (k_strieq(command, "switchtest")) command_switchtest();
     else if (k_strieq(command, "schedtest")) command_schedtest();
+    else if (k_strieq(command, "blocktest")) command_blocktest();
     else if (k_strieq(command, "exittest")) command_exittest();
     else if (k_strieq(command, "syscalltest")) command_syscalltest();
+    else if (k_strieq(command, "userisotest")) command_userisotest();
+    else if (k_strieq(command, "userpftest")) command_userpftest();
     else if (k_strieq(command, "cpu")) command_cpu();
     else if (k_strieq(command, "interrupts")) command_interrupts();
     else if (k_strieq(command, "acpi")) command_acpi();
