@@ -25,6 +25,16 @@ static IdtDescriptor g_idtr;
 static u64 g_counts[256];
 static u64 g_spurious;
 
+bool interrupt_from_user(const InterruptFrame *frame) {
+    if (!frame) return false;
+    return(frame->cs & 3ULL) == 3ULL;
+}
+
+const InterruptStackFrame * interrupt_user_stack( const InterruptFrame *frame) {
+    if (!interrupt_from_user(frame)) return 0;
+    return (const InterruptStackFrame *) ((const u8 *)frame + sizeof(InterruptFrame));
+}
+
 static void idt_set(u8 vector, u64 handler, u16 selector, u8 ist) {
     IdtEntry *entry = &g_idt[vector];
     entry->offset_low = (u16)handler;

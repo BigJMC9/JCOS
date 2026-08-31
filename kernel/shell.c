@@ -17,6 +17,8 @@
 #include "block.h"
 #include "gpt.h"
 #include "fat32.h"
+#include "thread.h"
+#include "gdt.h"
 
 #define INPUT_CAPACITY 128U
 
@@ -116,6 +118,7 @@ static void command_help(void) {
     terminal_writeln("  frametest   test PMM allocation/free/reuse");
     terminal_writeln("  vmmtest     test x86-64 page-table operations");
     terminal_writeln("  astest      test address-space ownership/sharing");
+    terminal_writeln("  threadtest  test thread lifecycle and kernel stacks");
     terminal_writeln("  cpu         show CPUID information");
     terminal_writeln("  interrupts  show APIC/PIC and keyboard counters");
     terminal_writeln("  acpi        show ACPI discovery results");
@@ -453,6 +456,378 @@ static void command_astest(void) {
     terminal_write("ADDRESS SPACE TEST: ");
     terminal_writeln(pass ? "PASS" : "FAILED");
     terminal_set_color(terminal_default_color());
+}
+
+static void command_threadtest(void) {
+    terminal_writeln("THREAD TEST:");
+
+    PmmStats before =
+        pmm_stats();
+
+    terminal_write("  FREE BEFORE: ");
+    terminal_write_u64(before.free_pages);
+    terminal_putchar('\n');
+
+
+    Thread *current =
+        thread_current();
+
+    bool bootstrap_ok =
+        current &&
+        current->id == 1 &&
+        current->state ==
+            THREAD_STATE_RUNNING &&
+        current->address_space ==
+            address_space_kernel() &&
+        current->kernel_stack_top ==
+            gdt_rsp0() &&
+        !current->owns_kernel_stack;
+
+    terminal_write(
+        "  BOOTSTRAP THREAD: "
+    );
+
+    terminal_writeln(
+        bootstrap_ok
+            ? "PASS"
+            : "FAILED"
+    );
+
+
+    AddressSpace space;
+
+    bool space_created =
+        address_space_create(
+            &space
+        );
+
+    terminal_write(
+        "  ADDRESS SPACE: "
+    );
+
+    terminal_writeln(
+        space_created
+            ? "PASS"
+            : "FAILED"
+    );
+
+    if (!space_created)
+        return;
+
+
+    Thread thread;
+
+    bool created =
+        thread_create(
+            &thread,
+            &space
+        );
+
+    terminal_write(
+        "  CREATE: "
+    );
+
+    terminal_writeln(
+        created
+            ? "PASS"
+            : "FAILED"
+    );
+
+    if (!created) {
+        address_space_destroy(
+            &space
+        );
+
+        return;
+    }
+
+
+    terminal_write("  ID: ");
+    terminal_write_u64(thread.id);
+
+    terminal_write("  STACK PHYS: ");
+    terminal_write_hex(
+        thread.kernel_stack_physical
+    );
+
+    terminal_putchar('\n');
+
+    terminal_write(
+        "  STACK BASE: "
+    );
+
+    terminal_write_hex(
+        thread.kernel_stack_base
+    );
+
+    terminal_write(
+        "  TOP: "
+    );
+
+    terminal_write_hex(
+        thread.kernel_stack_top
+    );
+
+    terminal_putchar('\n');
+
+
+    bool metadata_ok =
+        thread.id != current->id &&
+        thread.address_space == &space &&
+        thread.state ==
+            THREAD_STATE_READY &&
+        thread.kernel_stack_size ==
+            THREAD_KERNEL_STACK_SIZE &&
+        thread.owns_kernel_stack;
+
+    terminal_write(
+        "  METADATA: "
+    );
+
+    terminal_writeln(
+        metadata_ok
+            ? "PASS"
+            : "FAILED"
+    );
+
+
+    /*
+     * The stack is reached through the shared
+     * supervisor-only physical direct map.
+     */
+    frame_t first_frame =
+        FRAME_INVALID;
+
+    vm_flags_t first_flags =
+        0;
+
+    bool first_mapped =
+        address_space_query_page(
+            &space,
+            thread.kernel_stack_base,
+            &first_frame,
+            &first_flags) &&
+        first_frame ==
+            phys_to_frame(
+                thread.kernel_stack_physical) &&
+        (first_flags & VM_WRITE) &&
+        !(first_flags & VM_USER);
+
+
+    u64 last_virtual =
+        thread.kernel_stack_top -
+        FRAME_SIZE;
+
+    u64 last_physical =
+        thread.kernel_stack_physical +
+        thread.kernel_stack_size -
+        FRAME_SIZE;
+
+    frame_t last_frame =
+        FRAME_INVALID;
+
+    vm_flags_t last_flags =
+        0;
+
+    bool last_mapped =
+        address_space_query_page(
+            &space,
+            last_virtual,
+            &last_frame,
+            &last_flags) &&
+        last_frame ==
+            phys_to_frame(
+                last_physical) &&
+        (last_flags & VM_WRITE) &&
+        !(last_flags & VM_USER);
+
+    bool stack_mapped =
+        first_mapped &&
+        last_mapped;
+
+    terminal_write(
+        "  STACK PHYSMAP: "
+    );
+
+    terminal_writeln(
+        stack_mapped
+            ? "PASS"
+            : "FAILED"
+    );
+
+
+    /*
+     * Touch both ends of the allocated stack.
+     */
+    volatile u64 *first_word =
+        (volatile u64 *)(u64)
+            thread.kernel_stack_base;
+
+    volatile u64 *last_word =
+        (volatile u64 *)(u64)
+            (thread.kernel_stack_top -
+             sizeof(u64));
+
+    const u64 marker =
+        0x4A434F5354485244ULL;
+
+    *first_word = marker;
+    *last_word = ~marker;
+
+    bool stack_rw =
+        *first_word == marker &&
+        *last_word == ~marker;
+
+    terminal_write(
+        "  STACK READ/WRITE: "
+    );
+
+    terminal_writeln(
+        stack_rw
+            ? "PASS"
+            : "FAILED"
+    );
+
+
+    /*
+     * Simulate the scheduler's future RSP0 update.
+     * RSP0 is only consumed on CPL3 -> CPL0 entry.
+     */
+    u64 old_rsp0 =
+        gdt_rsp0();
+
+    gdt_set_rsp0(
+        thread.kernel_stack_top
+    );
+
+    bool rsp0_installed =
+        gdt_rsp0() ==
+        thread.kernel_stack_top;
+
+    gdt_set_rsp0(
+        old_rsp0
+    );
+
+    bool rsp0_restored =
+        gdt_rsp0() ==
+        old_rsp0;
+
+    terminal_write(
+        "  TSS RSP0 INSTALL: "
+    );
+
+    terminal_writeln(
+        rsp0_installed
+            ? "PASS"
+            : "FAILED"
+    );
+
+    terminal_write(
+        "  TSS RSP0 RESTORE: "
+    );
+
+    terminal_writeln(
+        rsp0_restored
+            ? "PASS"
+            : "FAILED"
+    );
+
+
+    bool current_unchanged =
+        thread_current() ==
+        current;
+
+    terminal_write(
+        "  CURRENT UNCHANGED: "
+    );
+
+    terminal_writeln(
+        current_unchanged
+            ? "PASS"
+            : "FAILED"
+    );
+
+
+    bool destroyed =
+        thread_destroy(
+            &thread
+        );
+
+    address_space_destroy(
+        &space
+    );
+
+
+    PmmStats after =
+        pmm_stats();
+
+    bool count_restored =
+        before.free_pages ==
+        after.free_pages;
+
+    terminal_write(
+        "  DESTROY: "
+    );
+
+    terminal_writeln(
+        destroyed
+            ? "PASS"
+            : "FAILED"
+    );
+
+    terminal_write(
+        "  FREE AFTER: "
+    );
+
+    terminal_write_u64(
+        after.free_pages
+    );
+
+    terminal_putchar('\n');
+
+    terminal_write(
+        "  FRAME COUNT RESTORED: "
+    );
+
+    terminal_writeln(
+        count_restored
+            ? "PASS"
+            : "FAILED"
+    );
+
+
+    bool pass =
+        bootstrap_ok &&
+        space_created &&
+        created &&
+        metadata_ok &&
+        stack_mapped &&
+        stack_rw &&
+        rsp0_installed &&
+        rsp0_restored &&
+        current_unchanged &&
+        destroyed &&
+        count_restored;
+
+    terminal_set_color(
+        pass
+            ? terminal_accent_color()
+            : terminal_error_color()
+    );
+
+    terminal_write(
+        "THREAD TEST: "
+    );
+
+    terminal_writeln(
+        pass
+            ? "PASS"
+            : "FAILED"
+    );
+
+    terminal_set_color(
+        terminal_default_color()
+    );
 }
 
 static void command_cpu(void) {
@@ -1051,6 +1426,7 @@ static void execute(char *line) {
     else if (k_strieq(command, "frametest")) command_frametest();
     else if (k_strieq(command, "vmmtest")) command_vmmtest();
     else if (k_strieq(command, "astest")) command_astest();
+    else if (k_strieq(command, "threadtest")) command_threadtest();
     else if (k_strieq(command, "cpu")) command_cpu();
     else if (k_strieq(command, "interrupts")) command_interrupts();
     else if (k_strieq(command, "acpi")) command_acpi();

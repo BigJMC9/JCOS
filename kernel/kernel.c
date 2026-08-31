@@ -21,6 +21,7 @@
 #include "gpt.h"
 #include "partition.h"
 #include "fat32.h"
+#include "thread.h"
 #include "splash.h"
 
 #define CR4_LA57 (1ULL << 12)
@@ -421,6 +422,21 @@ void kernel_main(BootInfo *boot) {
     /* If this serial message appears, we have successfully executed code after MOV CR3. */
     serial_write("JA OS: JCOS PAGE TABLES ACTIVE.\n");
 
+    bool thread_ok = thread_system_init(
+        kernel_space, 
+        boot->kernel_stack_base, 
+        boot->kernel_stack_size, 
+        boot->kernel_stack_top
+    );
+
+    if (!thread_ok) {
+        serial_write("JA OS: thread initialization failed.\n");
+        terminal_set_color(terminal_error_color());
+        terminal_writeln("THREAD INITIALIZATION FAILED.");
+        terminal_set_color(terminal_default_color());
+        cpu_halt_forever();
+    }
+
     splash_progress(85);
     bool keyboard_ok = (!acpi->i8042_known || acpi->i8042_present) ? ps2_init() : false;
     splash_progress(95);
@@ -474,6 +490,7 @@ void kernel_main(BootInfo *boot) {
     terminal_write("BLOCK DEVICES: "); terminal_write_u64(block_device_count()); terminal_putchar('\n');
     terminal_write("AHCI: ");
     terminal_writeln( ahci_ok ? "DETECTED" : "NOT DETECTED");
+    terminal_write("THREADS: "); terminal_writeln( thread_ok ? "READY" : "FAILED");
     terminal_write("PS/2: "); terminal_write(keyboard_ok ? "DETECTED" : "NOT DETECTED");
     terminal_write("  COM1: ");
     terminal_writeln(serial_available() ? "READY" : "NOT DETECTED");
