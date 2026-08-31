@@ -1,13 +1,8 @@
-/*
- * Excess of comments due to flags and 
- * reminder of unfamiliar ahci practices and
- * data structures.
- */
-
 #include "ahci.h"
 #include "pmm.h"
 #include "lib.h"
 #include "block.h"
+#include "physmap.h"
 
 /* AHCI Generic Host Control registers. */
 #define AHCI_GHC_AE (1U << 31)
@@ -189,6 +184,40 @@ static volatile AhciHbaMemory *g_hba;
 static AhciInfo g_info;
 static AhciPortState g_ports[AHCI_MAX_PORTS];
 static u32 g_registered_disks;
+static bool g_use_phys_map;
+
+static void *ahci_dma_cpu_pointer(u64 physical) {
+    if (!physical) return 0;
+    if (g_use_phys_map) return phys_to_virt(physical);
+
+    /*
+     * Bootstrap path.
+     *
+     * AHCI initializes before JCOS installs its
+     * own CR3, so DMA RAM is initially accessed
+     * through the low identity mapping.
+     */
+    return (void *)(u64)physical;
+}
+
+bool ahci_enable_phys_map_access(void) {
+    /* Ensure every initialized port's DMA pages fit in the physmap window. */
+    for (u32 i = 0; i < AHCI_MAX_PORTS; ++i) {
+
+        AhciPortState *state = &g_ports[i];
+
+        if (!state->initialized) continue;
+        if (!phys_to_virt(state->command_list_phys) || !phys_to_virt(state->fis_phys) || !phys_to_virt(state->command_table_phys) || !phys_to_virt(state->identify_phys) || !phys_to_virt(state->io_buffer_phys)) return false;
+    }
+
+    g_use_phys_map = true;
+
+    return true;
+}
+
+bool ahci_phys_map_access_enabled(void) {
+    return g_use_phys_map;
+}
 
 bool ahci_port_dma_info(u32 port_number, u64 *command_list, u64 *fis, u64 *command_table, u64 *identify_buffer) {
     if (port_number >= AHCI_MAX_PORTS) return false;
@@ -229,7 +258,7 @@ static const PciDevice *find_controller(void) {
         if (device->class_code != PCI_CLASS_MASS_STORAGE) continue;
         if (device->subclass != PCI_SUBCLASS_SATA) continue;
         if (device->prog_if != PCI_PROGIF_AHCI) continue;
-        
+
         return device;
     }
     return 0;
@@ -237,8 +266,8 @@ static const PciDevice *find_controller(void) {
 
 static AhciDeviceType identify_port( volatile AhciHbaPort *port) {
     u32 ssts = port->ssts;
-    u32 det = ssts & AHCI_SSTS_DET_MASK; // DET=3 device is physically present + communication established.
-    u32 ipm = (ssts & AHCI_SSTS_IPM_MASK) >> 8; // IPM=1 means the interface is active.
+    u32 det = ssts & AHCI_SSTS_DET_MASK; /* DET=3 device is physically present + communication established. */
+    u32 ipm = (ssts & AHCI_SSTS_IPM_MASK) >> 8; /* IPM=1 means the interface is active. */
 
     if (det != AHCI_SSTS_DET_PRESENT || ipm != AHCI_SSTS_IPM_ACTIVE) return AHCI_DEVICE_NONE;
     switch (port->sig) {
@@ -272,7 +301,8 @@ static bool ahci_start_port(volatile AhciHbaPort *port) {
     }
     if (port->cmd & AHCI_PXCMD_CR) return false;
 
-    port->cmd |= AHCI_PXCMD_FRE; port->cmd |= AHCI_PXCMD_ST;
+    port->cmd |= AHCI_PXCMD_FRE;
+    port->cmd |= AHCI_PXCMD_ST;
     return true;
 }
 
@@ -290,6 +320,10 @@ static bool ahci_wait_ready(volatile AhciHbaPort *port) {
 static bool ahci_allocate_port_memory(AhciPortState *state) {
     if (!state) return false;
 
+    /*
+    * Allocate physical DMA pages. The HBA receives
+    * physical addresses; the CPU uses ahci_dma_cpu_pointer().
+    */
     state->command_list_phys = pmm_alloc_page();
     state->fis_phys = pmm_alloc_page();
     state->command_table_phys = pmm_alloc_page();
@@ -298,15 +332,31 @@ static bool ahci_allocate_port_memory(AhciPortState *state) {
 
     if (!state->command_list_phys || !state->fis_phys || !state->command_table_phys || !state->identify_phys || !state->io_buffer_phys) return false;
 
-    k_memset((void *)(u64)state->command_list_phys, 0, AHCI_DMA_PAGE_SIZE);
-    k_memset((void *)(u64)state->fis_phys, 0, AHCI_DMA_PAGE_SIZE);
-    k_memset((void *)(u64)state->command_table_phys, 0, AHCI_DMA_PAGE_SIZE);
-    k_memset((void *)(u64)state->identify_phys, 0, AHCI_DMA_PAGE_SIZE);
-    k_memset((void *)(u64)state->io_buffer_phys, 0, AHCI_DMA_PAGE_SIZE);
+    /*
+     * Obtain CPU-visible pointers.
+     *
+     * During early AHCI initialization these are
+     * identity addresses.
+     *
+     * After ahci_enable_phys_map_access(), these
+     * become FFFF8000... direct-map addresses.
+     */
+    void *command_list = ahci_dma_cpu_pointer(state->command_list_phys);
+    void *fis = ahci_dma_cpu_pointer(state->fis_phys);
+    void *command_table = ahci_dma_cpu_pointer(state->command_table_phys);
+    void *identify = ahci_dma_cpu_pointer(state->identify_phys);
+    void *io_buffer = ahci_dma_cpu_pointer(state->io_buffer_phys);
+
+    if (!command_list || !fis || !command_table || !identify || !io_buffer) return false;
+
+    k_memset(command_list, 0, AHCI_DMA_PAGE_SIZE);
+    k_memset(fis, 0, AHCI_DMA_PAGE_SIZE);
+    k_memset(command_table, 0, AHCI_DMA_PAGE_SIZE);
+    k_memset(identify, 0, AHCI_DMA_PAGE_SIZE);
+    k_memset(io_buffer, 0, AHCI_DMA_PAGE_SIZE);
 
     return true;
 }
-
 static void ahci_program_port_memory(AhciPortState *state) {
     volatile AhciHbaPort *port = state->regs;
 
@@ -314,9 +364,11 @@ static void ahci_program_port_memory(AhciPortState *state) {
     u64 fis = state->fis_phys;
 
     /* Command List Base Address */
-    port->clb = (u32)(command_list & 0xFFFFFFFFULL); port->clbu = (u32)(command_list >> 32);
+    port->clb = (u32)(command_list & 0xFFFFFFFFULL);
+    port->clbu = (u32)(command_list >> 32);
     /* Received FIS Base Address */
-    port->fb = (u32)(fis & 0xFFFFFFFFULL); port->fbu = (u32)(fis >> 32);
+    port->fb = (u32)(fis & 0xFFFFFFFFULL);
+    port->fbu = (u32)(fis >> 32);
 }
 
 static bool ahci_prepare_port(u32 port_number) {
@@ -324,13 +376,15 @@ static bool ahci_prepare_port(u32 port_number) {
 
     AhciPortState *state = &g_ports[port_number];
     k_memset(state, 0, sizeof(*state));
-    state->port_number = port_number; state->regs = &g_hba->ports[port_number];
+    state->port_number = port_number;
+    state->regs = &g_hba->ports[port_number];
 
     if (!ahci_stop_port(state->regs)) return false;
     if (!ahci_allocate_port_memory(state)) return false;
 
     ahci_program_port_memory(state);
-    state->regs->is = 0xFFFFFFFFU; state->regs->serr = 0xFFFFFFFFU;
+    state->regs->is = 0xFFFFFFFFU;
+    state->regs->serr = 0xFFFFFFFFU;
 
     if (!ahci_start_port(state->regs)) return false;
 
@@ -339,7 +393,7 @@ static bool ahci_prepare_port(u32 port_number) {
 }
 
 static void ata_copy_string(char *destination, u32 destination_size, const u16 *words, u32 first_word, u32 word_count) {
-    
+
     if (!destination || destination_size == 0 || !words) return;
     u32 output = 0;
 
@@ -365,9 +419,7 @@ static void ahci_parse_identify(AhciPortInfo *info, const u16 *words) {
 
     /* ATA IDENTIFY word 83 bit 10: 48-bit LBA supported. */
     info->lba48 = (words[83] & (1U << 10)) != 0;
-    if (info->lba48) {
-        info->sector_count = ((u64)words[100]) | ((u64)words[101] << 16) | ((u64)words[102] << 32) | ((u64)words[103] << 48);
-    }
+    if (info->lba48) info->sector_count = ((u64)words[100]) | ((u64)words[101] << 16) | ((u64)words[102] << 32) | ((u64)words[103] << 48);
     else info->sector_count = ((u64)words[60]) | ((u64)words[61] << 16);
 
     /* Standard ATA logical sector is 512 bytes. */
@@ -404,14 +456,16 @@ static bool ahci_identify_port(u32 port_number, AhciPortInfo *info) {
     if ((port->ci | port->sact) & slot_mask) return false;
 
     /* Command list contains 32 headers + Command table for slot zero. */
-    AhciCommandHeader *headers = (AhciCommandHeader *)(u64) state->command_list_phys;
+    AhciCommandHeader *headers = (AhciCommandHeader *) ahci_dma_cpu_pointer(state->command_list_phys);
+    AhciCommandTable *table = (AhciCommandTable *) ahci_dma_cpu_pointer(state->command_table_phys);
+    void *identify_buffer = ahci_dma_cpu_pointer(state->identify_phys);
+
+    if (!headers || !table || !identify_buffer) return false;
+
     AhciCommandHeader *header = &headers[AHCI_COMMAND_SLOT];
-    AhciCommandTable *table = (AhciCommandTable *)(u64) state->command_table_phys;
 
     /* Clear everything before command. */
-    k_memset(header, 0, sizeof(*header)); 
-    k_memset(table, 0, sizeof(*table)); 
-    k_memset((void *)(u64)state->identify_phys, 0, 512);
+    k_memset(header, 0, sizeof(*header)); k_memset(table, 0, sizeof(*table)); k_memset(identify_buffer, 0, 512);
 
     /*
      * Register H2D FIS is 20 bytes:
@@ -461,7 +515,7 @@ static bool ahci_identify_port(u32 port_number, AhciPortInfo *info) {
 
     ahci_dma_barrier();
 
-    const u16 *identify = (const u16 *)(u64) state->identify_phys;
+    const u16 *identify = (const u16 *) identify_buffer;
 
     ahci_parse_identify(info, identify);
 
@@ -482,19 +536,21 @@ static bool ahci_read_one_sector(AhciPortState *state, u64 lba, void *destinatio
     /* Slot zero must not already be in use. */
     if ((port->ci | port->sact) & slot_mask) return false;
 
-    AhciCommandHeader *headers = (AhciCommandHeader *)(u64) state->command_list_phys;
+    AhciCommandHeader *headers = (AhciCommandHeader *) ahci_dma_cpu_pointer(state->command_list_phys);
+    AhciCommandTable *table = (AhciCommandTable *) ahci_dma_cpu_pointer(state->command_table_phys);
+
+    void *io_buffer = ahci_dma_cpu_pointer(state->io_buffer_phys);
+
+    if (!headers || !table || !io_buffer) return false;
+
     AhciCommandHeader *header = &headers[AHCI_COMMAND_SLOT];
-    AhciCommandTable *table = (AhciCommandTable *)(u64) state->command_table_phys;
 
     /* Fresh command. */
-    k_memset(header, 0, sizeof(*header));
-    k_memset(table, 0, sizeof(*table));
+    k_memset(header, 0, sizeof(*header)); k_memset(table, 0, sizeof(*table));
 
-    /* Not required, but useful while bringing the driver up. */
-    k_memset((void *)(u64)state->io_buffer_phys, 0, state->logical_sector_size);
+    /* Clear the bounce buffer for deterministic debugging. */
+    k_memset(io_buffer, 0, state->logical_sector_size);
 
-    
-    
     /* Command FIS is 20 bytes = 5 DWORDs. W=0 because it is READ, device -> RAM. */ 
     header->flags = 5U;
     header->prdt_length = 1U;
@@ -506,7 +562,6 @@ static bool ahci_read_one_sector(AhciPortState *state, u64 lba, void *destinatio
 
     prdt->dba = (u32)(state->io_buffer_phys & 0xFFFFFFFFULL);
     prdt->dbau = (u32)(state->io_buffer_phys >> 32);
-
     prdt->dbc_i = state->logical_sector_size - 1U;
 
     /* Construct 48-bit ATA READ DMA EXT FIS. */
@@ -528,7 +583,8 @@ static bool ahci_read_one_sector(AhciPortState *state, u64 lba, void *destinatio
     fis->device = ATA_DEVICE_LBA;
 
     /* Exactly one sector. READ DMA EXT uses a 16-bit count. */
-    fis->count_low = 1U; fis->count_high = 0U;
+    fis->count_low = 1U;
+    fis->count_high = 0U;
 
     /* Clear stale AHCI status. */
     port->is = 0xFFFFFFFFU;
@@ -553,7 +609,7 @@ static bool ahci_read_one_sector(AhciPortState *state, u64 lba, void *destinatio
     /* Make sure data written through DMA is visible before the CPU copies it. */
     ahci_dma_barrier();
 
-    k_memcpy(destination, (const void *)(u64) state->io_buffer_phys, state->logical_sector_size);
+    k_memcpy(destination, io_buffer, state->logical_sector_size);
 
     return true;
 }
@@ -571,11 +627,7 @@ static bool ahci_block_read(BlockDevice *device, u64 lba, u32 count, void *buffe
 
     u8 *output = (u8 *)buffer;
 
-    /*
-     * First implementation:
-     * one AHCI command per sector.
-     * Slow but extremely easy to debug.
-     */
+    /* First implementation: one AHCI command per sector. Slow but extremely easy to debug. */
     for (u32 i = 0; i < count; ++i) {
 
         u64 current_lba = lba + (u64)i;
@@ -607,7 +659,10 @@ static bool ahci_register_disk(u32 port_number, AhciPortInfo *info) {
 
     char name[4];
 
-    name[0] = 's'; name[1] = 'd'; name[2] = (char)('a' + g_registered_disks); name[3] = 0;
+    name[0] = 's';
+    name[1] = 'd';
+    name[2] = (char)('a' + g_registered_disks);
+    name[3] = 0;
 
     /*
      * READ-ONLY for now.
@@ -626,6 +681,7 @@ static bool ahci_register_disk(u32 port_number, AhciPortInfo *info) {
 }
 
 bool ahci_init(void) {
+    g_use_phys_map = false;
     g_registered_disks = 0;
     zero_info();
     g_controller = 0; g_hba = 0;
@@ -650,17 +706,19 @@ bool ahci_init(void) {
     pci_enable_memory_space(controller); pci_enable_bus_master(controller);
 
     /*
-     * For the current JCOS paging setup, treat the physical
-     * MMIO address as directly accessible.
-     *
-     * Once JCOS owns its page tables, this should become:
-     *
-     *     g_hba = mmio_map(abar.base, ...);
-     */
+    * ABAR remains identity-mapped for now.
+    * Replace this with a dedicated MMIO mapping later.
+    */
     volatile AhciHbaMemory *hba = (volatile AhciHbaMemory *)(u64)abar.base;
     /* Enable AHCI mode. */
     hba->ghc |= AHCI_GHC_AE;
-    g_controller = controller; g_hba = hba; g_info.pci_address = controller->address; g_info.abar = abar.base; g_info.capabilities = hba->cap; g_info.version = hba->vs; g_info.ports_implemented = hba->pi;
+    g_controller = controller;
+    g_hba = hba;
+    g_info.pci_address = controller->address;
+    g_info.abar = abar.base;
+    g_info.capabilities = hba->cap;
+    g_info.version = hba->vs;
+    g_info.ports_implemented = hba->pi;
     g_info.hardware_port_count = (hba->cap & 0x1FU) + 1U; /* CAP.NP is zero-based: 0 => 1 port, 5 => 6 ports */
 
     if (g_info.hardware_port_count > AHCI_MAX_PORTS) {g_info.hardware_port_count = AHCI_MAX_PORTS; }
@@ -675,7 +733,9 @@ bool ahci_init(void) {
 
         volatile AhciHbaPort *port = &hba->ports[i];
 
-        info->signature = port->sig; info->sata_status = port->ssts; info->type = identify_port(port);
+        info->signature = port->sig;
+        info->sata_status = port->ssts;
+        info->type = identify_port(port);
 
         if (info->type == AHCI_DEVICE_NONE) continue;
 
@@ -683,11 +743,7 @@ bool ahci_init(void) {
 
         ++g_info.active_port_count;
 
-        /*
-        * For now, only initialize normal SATA disks.
-        * Port 2 QEMU is SATAPI, so leave that device alone.
-        */
-        if (info->type == AHCI_DEVICE_SATA) {
+        /* Only ATA SATA disks are supported for now. */        if (info->type == AHCI_DEVICE_SATA) {
             info->command_engine_ready = ahci_prepare_port(i);
 
             if (!info->command_engine_ready) continue;

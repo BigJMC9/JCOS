@@ -37,6 +37,12 @@ bool vmm_unmap_page(VmPageMap *map, u64 virtual_address, frame_t *old_frame);
 
 bool vmm_query_page(const VmPageMap *map, u64 virtual_address, frame_t *frame, vm_flags_t *flags);
 
+bool vmm_map_range(VmPageMap *map, u64 virtual_address, u64 physical_address, u64 size, vm_flags_t flags);
+
 bool vmm_identity_map_range(VmPageMap *map, u64 physical_address, u64 size, vm_flags_t flags);
+
+void vmm_enable_phys_map_access(void);
+
+bool vmm_phys_map_access_enabled(void);
 
 #endif

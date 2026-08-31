@@ -28,12 +28,12 @@ bool pmm_init(
     const BootInfo *boot
 );
 
-/*
- * New architecture-facing frame API.
- *
- * frame_t is a physical FRAME NUMBER,
- * not a physical address.
- */
+/* Move PMM metadata access away from the temporary low identity mapping. */
+bool pmm_enable_phys_map_access(void);
+
+bool pmm_phys_map_access_enabled(void);
+
+/* frame_t is a physical frame number, not an address. */
 frame_t frame_alloc(void);
 
 bool frame_free(

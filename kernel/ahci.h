@@ -53,6 +53,7 @@ typedef struct {
     AhciPortInfo ports[AHCI_MAX_PORTS];
 } AhciInfo;
 
+/* Return device-visible physical DMA addresses. */
 bool ahci_port_dma_info(
     u32 port_number,
     u64 *command_list,
@@ -65,5 +66,13 @@ bool ahci_init(void);
 
 const AhciInfo *ahci_get(void);
 const char *ahci_device_type_name( AhciDeviceType type);
+
+
+/*
+ * Switch CPU-side DMA-buffer access to the physmap.
+ * Device-facing DMA addresses remain physical.
+ */
+bool ahci_enable_phys_map_access(void);
+bool ahci_phys_map_access_enabled(void);
 
 #endif

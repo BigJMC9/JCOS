@@ -1,5 +1,6 @@
 #include "pmm.h"
 #include "lib.h"
+#include "physmap.h"
 
 #define EFI_CONVENTIONAL_MEMORY 7U
 
@@ -35,6 +36,7 @@ static frame_t g_bitmap_first_frame;
 static u64 g_bitmap_page_count;
 static u64 g_next_hint;
 static bool g_initialized;
+static bool g_use_phys_map;
 
 /* Alignment helpers. */
 static bool align_up_page(u64 value, u64 *result) {
@@ -112,6 +114,8 @@ frame_t phys_to_frame(u64 physical) {
 
 bool pmm_init(const BootInfo *boot) {
     g_initialized = false;
+    g_use_phys_map = false;
+
     g_bitmap = 0;
     g_base_frame = FRAME_INVALID;
     g_bitmap_first_frame = FRAME_INVALID;
@@ -279,6 +283,43 @@ bool pmm_init(const BootInfo *boot) {
     return true;
 }
 
+bool pmm_enable_phys_map_access(void) {
+    if (!g_initialized ||
+        !g_bitmap ||
+        !g_stats.bitmap_physical ||
+        !g_stats.bitmap_pages) {
+
+        return false;
+    }
+
+    void *direct =
+        phys_to_virt(
+            g_stats.bitmap_physical
+        );
+
+    if (!direct)
+        return false;
+
+    /*
+     * From this point onward frame_alloc() and
+     * frame_free() access the allocator bitmap
+     * through the high-half physical direct map.
+     */
+    g_bitmap =
+        (u8 *)direct;
+
+    g_use_phys_map =
+        true;
+
+    return true;
+}
+
+
+bool pmm_phys_map_access_enabled(void) {
+    return
+        g_use_phys_map;
+}
+
 frame_t frame_alloc(void) {
     if (!g_initialized || !g_bitmap || !g_bitmap_bits || !g_stats.free_pages) return FRAME_INVALID;
 
@@ -326,13 +367,7 @@ bool frame_free(frame_t frame) {
     return true;
 }
 
-/*
- * Compatibility contiguous allocator.
- *
- * Nothing currently requires this except keeping
- * the old PMM interface intact, but make it correct
- * rather than silently changing its semantics.
- */
+/* Compatibility API: allocate a contiguous physical run. */
 u64 pmm_alloc_pages(u64 count) {
     if (!g_initialized || !count || count > g_stats.free_pages || count > g_bitmap_bits) return 0;
 

@@ -1,5 +1,6 @@
 #include "vmm.h"
 #include "lib.h"
+#include "physmap.h"
 
 #define PAGE_TABLE_ENTRIES 512U
 
@@ -16,6 +17,18 @@
  * physical-address field.
  */
 #define PTE_ADDRESS_MASK 0x000FFFFFFFFFF000ULL
+
+/*
+ * Zero-initialized deliberately.
+ *
+ * Before JCOS has switched to its own page map,
+ * paging structures are accessed through the
+ * inherited low identity mappings.
+ *
+ * After the physical direct map has been proven
+ * active, this becomes true.
+ */
+static bool g_use_phys_map;
 
 static bool page_aligned(u64 address) {
     return
@@ -58,22 +71,25 @@ static u32 pt_index(u64 address) {
 }
 
 /*
- * Stage 1 assumption:
- *
- * Physical RAM allocated through PMM is still
- * directly accessible at its physical address
- * using the mappings inherited from UEFI.
- *
- * When JCOS gets its own physical direct map,
- * we'll need to use that instead of the current
- * boot mappings.
+ * Before the CR3 switch, page tables use bootstrap
+ * identity mappings. Afterwards they use the physmap.
  */
 static u64 *table_pointer(frame_t frame) {
     u64 physical = frame_to_phys(frame);
 
     if (!physical) return 0;
+    if (g_use_phys_map) return (u64 *)phys_to_virt(physical);
 
+    /* Bootstrap access before the physmap is active. */
     return (u64 *)(u64)physical;
+}
+
+void vmm_enable_phys_map_access(void) {
+    g_use_phys_map =true;
+}
+
+bool vmm_phys_map_access_enabled(void) {
+    return g_use_phys_map;
 }
 
 static frame_t entry_frame(u64 entry) {
@@ -125,21 +141,13 @@ static bool existing_table(u64 *parent, u32 index, frame_t *frame_out, u64 **tab
 
     if (!(entry & PTE_PRESENT)) return false;
 
-    /*
-     * Stage 1 only supports 4 KiB mappings.
-     *
-     * Encountering a 1 GiB or 2 MiB huge-page
-     * entry means this isn't one of the ordinary
-     * child page tables.
-     */
+    /* Only 4 KiB mappings are supported. */
     if (entry & PTE_HUGE) return false;
 
     frame_t frame = entry_frame(entry);
-
     if (frame == FRAME_INVALID) return false;
 
     u64 *table = table_pointer(frame);
-
     if (!table) return false;
 
     *frame_out = frame;
@@ -554,61 +562,74 @@ bool vmm_unmap_page(VmPageMap *map, u64 virtual_address, frame_t *old_frame) {
     return true;
 }
 
-bool vmm_identity_map_range(VmPageMap *map, u64 physical_address, u64 size, vm_flags_t flags) {
+bool vmm_map_range(VmPageMap *map, u64 virtual_address, u64 physical_address, u64 size, vm_flags_t flags) {
     if (!map) return false;
     if (!size) return true;
 
-    /* Inclusive final byte. */
-    if (physical_address > ~0ULL - (size - 1ULL)) return false;
+    /* Range mappings must start on page boundaries. */
+    if ((virtual_address & (VM_PAGE_SIZE - 1ULL)) != 0) return false;
+    if ((physical_address & (VM_PAGE_SIZE - 1ULL)) != 0) return false;
 
-    u64 last_byte = physical_address + size - 1ULL;
-    u64 first_page = physical_address & ~(VM_PAGE_SIZE - 1ULL);
-    u64 last_page = last_byte & ~(VM_PAGE_SIZE - 1ULL);
-    u64 page = first_page;
+    /* Avoid overflow while calculating how many pages cover the requested byte count. */
+    if (size > ~0ULL - (VM_PAGE_SIZE - 1ULL)) return false;
 
-    for (;;) {
+    u64 page_count = (size + VM_PAGE_SIZE - 1ULL) / VM_PAGE_SIZE;
 
-        /*
-         * Deliberately leave virtual address zero
-         * unmapped. This will eventually help
-         * catch NULL dereferences.
-         *
-         * Nothing JCOS currently requires lives
-         * in physical page zero.
-         */
-        if (page != 0) {
+    if (!page_count) return false;
+    if (page_count > ~0ULL / VM_PAGE_SIZE) return false;
 
-            frame_t expected = phys_to_frame(page);
+    u64 span = page_count * VM_PAGE_SIZE;
 
-            if (expected == FRAME_INVALID) return false;
+    if (virtual_address > ~0ULL - (span - 1ULL)) return false;
+    if (physical_address > ~0ULL - (span - 1ULL)) return false;
+    for (u64 i = 0; i < page_count; ++i) {
 
-            /*
-             * The function is idempotent.
-             *
-             * This matters because explicit
-             * framebuffer/MMIO mappings may
-             * overlap UEFI descriptors.
-             */
-            frame_t existing = FRAME_INVALID;
+        u64 virtual_page = virtual_address + i * VM_PAGE_SIZE;
 
-            vm_flags_t existing_flags = 0;
+        u64 physical_page = physical_address + i * VM_PAGE_SIZE;
 
-            if (vmm_query_page(map, page, &existing, &existing_flags)) {
-                if (existing != expected) return false;
+        frame_t expected = phys_to_frame(physical_page);
 
-                /* Existing mapping must provide at least the requested public permissions. */
-                if ((existing_flags & flags) != flags) return false;
-            } else {
+        if (expected == FRAME_INVALID) return false;
 
-                if (!vmm_map_page(map, page, expected, flags)) return false;
-            }
+        /* Allow the same range to be requested more than once, provided it refers to the same physical frame and has sufficient rights. */
+        frame_t existing = FRAME_INVALID;
+
+        vm_flags_t existing_flags = 0;
+
+        if (vmm_query_page(map, virtual_page, &existing, &existing_flags)) {
+            if (existing != expected) return false;
+            if ((existing_flags & flags) != flags) return false;
+
+            continue;
         }
 
-        if (page == last_page) break;
-        if (page > ~0ULL - VM_PAGE_SIZE) return false;
-
-        page += VM_PAGE_SIZE;
+        if (!vmm_map_page(map, virtual_page, expected, flags)) return false;
     }
 
     return true;
+}
+
+bool vmm_identity_map_range(VmPageMap *map, u64 physical_address, u64 size, vm_flags_t flags) {
+    if (!size) return true;
+
+    /* Keep physical page zero unmapped. */
+    u64 first = physical_address;
+    u64 offset = first & (VM_PAGE_SIZE - 1ULL);
+    u64 aligned = first & ~(VM_PAGE_SIZE - 1ULL);
+
+    if (size > ~0ULL - offset) return false;
+    u64 adjusted_size = size + offset;
+
+    /* Do not map physical page zero. */
+    if (!aligned) {
+        if (adjusted_size <= VM_PAGE_SIZE) return true;
+
+        aligned = VM_PAGE_SIZE;
+
+        adjusted_size -= VM_PAGE_SIZE;
+    }
+
+    return
+        vmm_map_range(map, aligned, aligned, adjusted_size, flags);
 }

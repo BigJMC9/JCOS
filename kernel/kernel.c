@@ -7,6 +7,7 @@
 #include "interrupts.h"
 #include "pmm.h"
 #include "vmm.h"
+#include "physmap.h"
 #include "ps2.h"
 #include "serial.h"
 #include "shell.h"
@@ -22,6 +23,7 @@
 #include "splash.h"
 
 #define CR4_LA57 (1ULL << 12)
+#define DIRECT_MAP_MIN_PHYSICAL 0x100000ULL
 
 static VmPageMap g_kernel_page_map;
 
@@ -29,37 +31,37 @@ static void boot_delay(void) {
     for (volatile u64 i = 0; i < 50000000ULL; ++i) arch_pause();
 }
 
-static bool map_uefi_memory(VmPageMap *map, const BootInfo *boot) {
+static bool map_physical_direct_map(VmPageMap *map, const BootInfo *boot) {
     if (!map || !boot || !boot->memory_map || !boot->memory_map_size || boot->memory_map_descriptor_size < sizeof(BootMemoryDescriptor)) return false;
     for (u64 offset = 0; offset + sizeof(BootMemoryDescriptor) <= boot->memory_map_size; offset += boot->memory_map_descriptor_size) {
 
         const BootMemoryDescriptor *descriptor = (const BootMemoryDescriptor *)(u64)(boot->memory_map + offset);
 
-        if (!descriptor->number_of_pages) continue;
-
-        /*
-        * For the bootstrap identity map, only need
-        * ordinary physical RAM to remain directly
-        * addressable.
-        *
-        * Important MMIO regions are mapped explicitly
-        * below.
-        */
         if (descriptor->type != 7U) continue;
+        if (!descriptor->number_of_pages) continue;
         if (descriptor->number_of_pages > ~0ULL / VM_PAGE_SIZE) return false;
 
         u64 bytes = descriptor->number_of_pages * VM_PAGE_SIZE;
+        u64 physical = descriptor->physical_start;
 
-        /*
-         * Bootstrap stage:
-         *
-         * Identity-map every UEFI-described
-         * physical region writable and supervisor
-         * only.
-         *
-         * Will tighten permissions later.
-         */
-        if (!vmm_identity_map_range(map, descriptor->physical_start, bytes, VM_WRITE)) return false;
+        if (physical > ~0ULL - bytes) return false;
+
+        u64 end = physical + bytes;
+
+        /* PML4 must have no low alias and a valid physmap alias. */
+        if (end <= DIRECT_MAP_MIN_PHYSICAL) continue;
+        if (physical < DIRECT_MAP_MIN_PHYSICAL) physical = DIRECT_MAP_MIN_PHYSICAL;
+
+        u64 size = end - physical;
+
+        if (!size) continue;
+        if (physical >= PHYS_MAP_SIZE) return false;
+        if (size > PHYS_MAP_SIZE - physical) return false;
+
+        u64 virtual_address = 0;
+
+        if (!physmap_virtual_address(physical, &virtual_address)) return false;
+        if (!vmm_map_range(map, virtual_address, physical, size, VM_WRITE)) return false;
     }
 
     return true;
@@ -76,7 +78,6 @@ static bool identity_mapping_valid(const VmPageMap *map, u64 address) {
     if (!map || !address) return false;
 
     u64 page = address & ~(VM_PAGE_SIZE - 1ULL);
-
     frame_t expected = phys_to_frame(page);
 
     if (expected == FRAME_INVALID) return false;
@@ -93,22 +94,15 @@ static bool build_kernel_page_map(VmPageMap *map, const BootInfo *boot, const Ac
     if (!map || !boot) return false;
     if (!vmm_page_map_create(map)) return false;
 
-    /*
-     * First map everything represented in the
-     * firmware memory map.
-     *
-     * This includes conventional RAM, loader
-     * allocations, ACPI ranges, etc.
-     */
-    if (!map_uefi_memory(map, boot)) goto fail;
+    /* PMM bitmap must exist only through its physmap alias. */
+    if (!map_physical_direct_map(map, boot)) {
+        serial_write("PAGING: direct map build FAILED\n");
+        goto fail;
+    }
 
-    /*
-     * Explicitly map critical boot objects too.
-     *
-     * vmm_identity_map_range() is idempotent, so
-     * overlap with UEFI descriptors is fine.
-     */
+    serial_write("PAGING: direct map built\n");
 
+    /* Explicit low identity mappings required by the currently running kernel follow. */
     if (!map_optional_range(map, (u64)boot, sizeof(BootInfo))) goto fail;
     if (!map_optional_range(map, boot->memory_map, boot->memory_map_size)) goto fail;
     if (!map_optional_range(map, boot->kernel_base, boot->kernel_size)) goto fail;
@@ -140,12 +134,14 @@ static bool build_kernel_page_map(VmPageMap *map, const BootInfo *boot, const Ac
     }
 
     /*
-     * AHCI HBA MMIO.
-     *
-     * AHCI DMA pages come from
-     * conventional memory and are already
-     * identity-mapped by map_uefi_memory().
-     */
+    * AHCI HBA MMIO.
+    * The ABAR itself remains identity-mapped for now.
+    *
+    * AHCI DMA RAM does NOT need identity mappings:
+    *
+    *   device -> physical addresses
+    *   CPU    -> physical direct map
+    */
     if (ahci && ahci->initialized && ahci->abar) {
         if (!vmm_identity_map_range(map, ahci->abar, VM_PAGE_SIZE, VM_WRITE)) goto fail;
     }
@@ -163,12 +159,44 @@ static bool build_kernel_page_map(VmPageMap *map, const BootInfo *boot, const Ac
     if (!identity_mapping_valid(map, boot->kernel_stack_base)) goto fail;
     if (!identity_mapping_valid(map, (u64)boot)) goto fail;
     if (!identity_mapping_valid(map, boot->memory_map)) goto fail;
-    if (!identity_mapping_valid(map, frame_to_phys(map->root_frame))) goto fail;
+
+    /* The PML4 itself came from PMM conventional memory, so it must also be accessible through the direct map. */
+    u64 root_physical = frame_to_phys(map->root_frame);
+    if (!root_physical) goto fail;
+
+    if (vmm_query_page(map, root_physical, 0, 0)) {
+        serial_write( "PAGING: PML4 unexpectedly identity mapped\n");
+        goto fail;
+    } 
+
+    u64 root_direct = 0;
+    if (!physmap_virtual_address(root_physical, &root_direct)) goto fail;
+
+    frame_t direct_frame = FRAME_INVALID;
+    if (!vmm_query_page(map, root_direct, &direct_frame, 0)) goto fail;
+    if (direct_frame != map->root_frame) goto fail;
     if (boot->initrd_base && !identity_mapping_valid(map, boot->initrd_base)) goto fail;
     if (boot->framebuffer_base && !identity_mapping_valid(map, boot->framebuffer_base)) goto fail;
     if (ahci && ahci->initialized && ahci->abar && !identity_mapping_valid(map, ahci->abar)) goto fail;
     if (acpi && acpi->lapic_address && !identity_mapping_valid(map, acpi->lapic_address)) goto fail;
 
+    /* PMM bitmap */
+    PmmStats pmm = pmm_stats();
+    if (!pmm.bitmap_physical) goto fail;
+
+    /* Low alias must NOT exist */
+    if (vmm_query_page(map, pmm.bitmap_physical, 0, 0)) {
+        serial_write("PAGING: PMM bitmap unexpectedly identity mapped\n");
+        goto fail;
+    }
+
+    /* Direct-map alias must exist */
+    u64 bitmap_direct = 0;
+    if (!physmap_virtual_address(pmm.bitmap_physical, &bitmap_direct)) goto fail;
+
+    frame_t bitmap_frame = FRAME_INVALID;
+    if (!vmm_query_page(map, bitmap_direct, &bitmap_frame, 0)) goto fail;
+    if (bitmap_frame != phys_to_frame(pmm.bitmap_physical)) goto fail;
     /*
     * ACPI reset register, if lives in System
     * Memory rather than a I/O port.
@@ -204,8 +232,6 @@ void kernel_main(BootInfo *boot) {
     splash_progress(10);
 
     bool gdt_ok = gdt_init(boot->kernel_stack_top);
-
-    serial_write("BOOT: returned from GDT init\n");
 
     if (!gdt_ok) {
         serial_write("JA OS: GDT/TSS initialization failed.\n");
@@ -282,17 +308,97 @@ void kernel_main(BootInfo *boot) {
 
             if (new_cr3) {
 
-                /*
-                * Important instruction!! >:|
-                *
-                * After this returns, the CPU is
-                * executing exclusively through
-                * JCOS-created page tables.
-                */
-
+                /* Switch to the JCOS-owned page tables. */
                 arch_write_cr3(new_cr3);
                 u64 active_cr3 = arch_read_cr3() & ~0xFFFULL;
                 paging_ok = active_cr3 == new_cr3;
+
+                if (paging_ok) {
+                    u64 root_physical = frame_to_phys(g_kernel_page_map.root_frame);
+                    u64 root_direct = 0;
+                    if (!physmap_virtual_address(root_physical, &root_direct)) {
+                        paging_ok = false;
+                    } 
+                    else {
+                        volatile const u64 *direct = (volatile const u64 *)(u64) root_direct;
+                        volatile u64 probe = direct[0];
+                        (void)probe;
+                    }
+                }
+
+                if (paging_ok) {
+
+                    vmm_enable_phys_map_access();
+
+                    /* Move PMM metadata to the physmap and probe alloc/free. */
+                    if (paging_ok) {
+
+                        PmmStats before = pmm_stats();
+
+                        u64 bitmap_physical = before.bitmap_physical;
+                        u64 bitmap_direct = 0;
+
+                        if (!bitmap_physical || !physmap_virtual_address(bitmap_physical, &bitmap_direct)) {
+                            paging_ok = false;
+                        } 
+                        else {
+                            frame_t mapped = FRAME_INVALID;
+
+                            if (!vmm_query_page(&g_kernel_page_map, bitmap_direct, &mapped, 0)) paging_ok = false;
+                            else if (mapped != phys_to_frame(bitmap_physical)) paging_ok = false;
+                        }
+
+                        /* Only change g_bitmap after the mapping has been structurally verified. */
+                        if (paging_ok && !pmm_enable_phys_map_access()) paging_ok = false;
+
+                        if (paging_ok) {
+                            PmmStats probe_before = pmm_stats();
+                            frame_t probe = frame_alloc();
+
+                            if (probe == FRAME_INVALID) {
+                                paging_ok = false;
+                            } 
+                            else {
+                                bool freed = frame_free(probe);
+                                PmmStats probe_after = pmm_stats();
+
+                                if (!freed || probe_before.free_pages != probe_after.free_pages) paging_ok = false;
+                            }
+                        }
+                    }
+                    u64 root_physical = frame_to_phys(g_kernel_page_map.root_frame);
+                    u64 root_direct = 0;
+
+                    if (!physmap_virtual_address(root_physical, &root_direct)) {
+                        paging_ok = false;
+                    } 
+                    else {
+                        frame_t mapped = FRAME_INVALID;
+
+                        /* VMM now walks page tables through the physmap. */
+                        if (!vmm_query_page(&g_kernel_page_map, root_direct, &mapped, 0)) paging_ok = false;
+                        else if (mapped != g_kernel_page_map.root_frame) paging_ok = false;
+                    }
+                }
+                /* ------------------------------------------------ Move AHCI CPU-side DMA accesses onto the physical direct map. ------------------------------------------------ */
+                if (paging_ok && ahci_ok) {
+                    if (!ahci_enable_phys_map_access()) {
+                        paging_ok = false;
+                    } 
+                    else if (!boot_disk || boot_disk->block_size != 512U) {
+                        /* AHCI claimed initialization succeeded, so the expected SATA block device should already exist. */
+                        paging_ok = false;
+
+                    } 
+                    else {
+                        /*
+                        * Switch CPU-side AHCI DMA access to physmap,
+                        * then perform a real DMA read as a runtime probe.
+                        */
+                        u8 sector_probe[512];
+                        if (!block_read(boot_disk, 0, 1, sector_probe)) paging_ok = false;
+                    }
+                }
             }
         }
     }
@@ -327,13 +433,26 @@ void kernel_main(BootInfo *boot) {
     arch_store_gdt(&gdtr);
 
     terminal_clear(); terminal_set_color(terminal_accent_color());
-    terminal_writeln("JA OS V5 - INTERACTIVE X86_64 KERNEL");
+    terminal_writeln("JA OS - INTERACTIVE X86_64 KERNEL");
     terminal_set_color(terminal_default_color());
     terminal_writeln("UEFI BOOT SERVICES EXITED. FRAMEBUFFER + SERIAL CONSOLES ONLINE.");
     terminal_write("IDT: READY  GDT/TSS: "); terminal_write(gdt_ok ? "READY" : "FAILED"); terminal_write("  PMM: ");
     terminal_writeln(pmm_ok ? "READY" : "FAILED");
     terminal_write("PAGING: ");
     terminal_writeln(paging_ok ? "JCOS CR3 ACTIVE" : "FAILED");
+    terminal_write("  PHYS MAP: ");
+    terminal_writeln(vmm_phys_map_access_enabled() ? "ACTIVE" : "INACTIVE");
+    terminal_write("  PMM PHYS MAP: ");
+    terminal_writeln(pmm_phys_map_access_enabled() ? "ACTIVE" : "INACTIVE");
+    terminal_writeln("  LOW PMM IDENTITY: OFF");
+    terminal_write("  PHYS MAP BASE: "); terminal_write_hex(PHYS_MAP_BASE); terminal_putchar('\n');
+    terminal_write("  AHCI DMA PHYS MAP: ");
+    terminal_writeln(ahci_phys_map_access_enabled() ? "ACTIVE" : "INACTIVE");
+
+    u64 root_physical = frame_to_phys(g_kernel_page_map.root_frame);
+    u64 root_direct = 0;
+
+    if (physmap_virtual_address(root_physical, &root_direct)) { terminal_write("  PML4 DIRECT: "); terminal_write_hex(root_direct); terminal_putchar('\n'); }
     terminal_write("  CS: "); terminal_write_hex(arch_read_cs()); 
     terminal_write("  TR: "); terminal_write_hex(arch_read_tr()); terminal_putchar('\n'); 
     terminal_write("  RSP0: "); terminal_write_hex(gdt_rsp0()); terminal_putchar('\n'); 
