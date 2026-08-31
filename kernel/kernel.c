@@ -8,6 +8,7 @@
 #include "pmm.h"
 #include "vmm.h"
 #include "physmap.h"
+#include "address_space.h"
 #include "ps2.h"
 #include "serial.h"
 #include "shell.h"
@@ -24,8 +25,6 @@
 
 #define CR4_LA57 (1ULL << 12)
 #define DIRECT_MAP_MIN_PHYSICAL 0x100000ULL
-
-static VmPageMap g_kernel_page_map;
 
 static void boot_delay(void) {
     for (volatile u64 i = 0; i < 50000000ULL; ++i) arch_pause();
@@ -92,7 +91,6 @@ static bool identity_mapping_valid(const VmPageMap *map, u64 address) {
 
 static bool build_kernel_page_map(VmPageMap *map, const BootInfo *boot, const AcpiInfo *acpi, const AhciInfo *ahci) {
     if (!map || !boot) return false;
-    if (!vmm_page_map_create(map)) return false;
 
     /* PMM bitmap must exist only through its physmap alias. */
     if (!map_physical_direct_map(map, boot)) {
@@ -298,105 +296,111 @@ void kernel_main(BootInfo *boot) {
     * Refuse to switch if firmware somehow entered
     * the kernel with CR4.LA57 enabled.
     */
+    AddressSpace *kernel_space = 0;
+
     if (!(arch_read_cr4() & CR4_LA57)) {
 
         const AhciInfo *ahci = ahci_get();
 
-        if (build_kernel_page_map(&g_kernel_page_map, boot, acpi, ahci)) {
+        if (address_space_kernel_init()) {
+            kernel_space = address_space_kernel();
 
-            new_cr3 = frame_to_phys(g_kernel_page_map.root_frame);
+            if (kernel_space && build_kernel_page_map(&kernel_space->page_map,boot, acpi, ahci)) {
+                VmPageMap *kernel_map = &kernel_space->page_map;
+                new_cr3 = address_space_cr3(kernel_space);
 
-            if (new_cr3) {
+                if (new_cr3) {
 
-                /* Switch to the JCOS-owned page tables. */
-                arch_write_cr3(new_cr3);
-                u64 active_cr3 = arch_read_cr3() & ~0xFFFULL;
-                paging_ok = active_cr3 == new_cr3;
+                    /* Switch to the JCOS-owned page tables. */
+                    arch_write_cr3(new_cr3);
+                    u64 active_cr3 = arch_read_cr3() & ~0xFFFULL;
+                    paging_ok = active_cr3 == new_cr3;
 
-                if (paging_ok) {
-                    u64 root_physical = frame_to_phys(g_kernel_page_map.root_frame);
-                    u64 root_direct = 0;
-                    if (!physmap_virtual_address(root_physical, &root_direct)) {
-                        paging_ok = false;
-                    } 
-                    else {
-                        volatile const u64 *direct = (volatile const u64 *)(u64) root_direct;
-                        volatile u64 probe = direct[0];
-                        (void)probe;
+                    if (paging_ok) {
+                        u64 root_physical = frame_to_phys(kernel_map->root_frame);
+                        u64 root_direct = 0;
+                        if (!physmap_virtual_address(root_physical, &root_direct)) {
+                            paging_ok = false;
+                        } 
+                        else {
+                            volatile const u64 *direct = (volatile const u64 *)(u64) root_direct;
+                            volatile u64 probe = direct[0];
+                            (void)probe;
+                        }
                     }
-                }
 
-                if (paging_ok) {
-
-                    vmm_enable_phys_map_access();
-
-                    /* Move PMM metadata to the physmap and probe alloc/free. */
                     if (paging_ok) {
 
-                        PmmStats before = pmm_stats();
+                        vmm_enable_phys_map_access();
 
-                        u64 bitmap_physical = before.bitmap_physical;
-                        u64 bitmap_direct = 0;
+                        /* Move PMM metadata to the physmap and probe alloc/free. */
+                        if (paging_ok) {
 
-                        if (!bitmap_physical || !physmap_virtual_address(bitmap_physical, &bitmap_direct)) {
+                            PmmStats before = pmm_stats();
+
+                            u64 bitmap_physical = before.bitmap_physical;
+                            u64 bitmap_direct = 0;
+
+                            if (!bitmap_physical || !physmap_virtual_address(bitmap_physical, &bitmap_direct)) {
+                                paging_ok = false;
+                            } 
+                            else {
+                                frame_t mapped = FRAME_INVALID;
+
+                                if (!vmm_query_page(kernel_map, bitmap_direct, &mapped, 0)) paging_ok = false;
+                                else if (mapped != phys_to_frame(bitmap_physical)) paging_ok = false;
+                            }
+
+                            /* Only change g_bitmap after the mapping has been structurally verified. */
+                            if (paging_ok && !pmm_enable_phys_map_access()) paging_ok = false;
+
+                            if (paging_ok) {
+                                PmmStats probe_before = pmm_stats();
+                                frame_t probe = frame_alloc();
+
+                                if (probe == FRAME_INVALID) {
+                                    paging_ok = false;
+                                } 
+                                else {
+                                    bool freed = frame_free(probe);
+                                    PmmStats probe_after = pmm_stats();
+
+                                    if (!freed || probe_before.free_pages != probe_after.free_pages) paging_ok = false;
+                                }
+                            }
+                        }
+                        u64 root_physical = frame_to_phys(kernel_map->root_frame);
+                        u64 root_direct = 0;
+
+                        if (!physmap_virtual_address(root_physical, &root_direct)) {
                             paging_ok = false;
                         } 
                         else {
                             frame_t mapped = FRAME_INVALID;
 
-                            if (!vmm_query_page(&g_kernel_page_map, bitmap_direct, &mapped, 0)) paging_ok = false;
-                            else if (mapped != phys_to_frame(bitmap_physical)) paging_ok = false;
-                        }
-
-                        /* Only change g_bitmap after the mapping has been structurally verified. */
-                        if (paging_ok && !pmm_enable_phys_map_access()) paging_ok = false;
-
-                        if (paging_ok) {
-                            PmmStats probe_before = pmm_stats();
-                            frame_t probe = frame_alloc();
-
-                            if (probe == FRAME_INVALID) {
-                                paging_ok = false;
-                            } 
-                            else {
-                                bool freed = frame_free(probe);
-                                PmmStats probe_after = pmm_stats();
-
-                                if (!freed || probe_before.free_pages != probe_after.free_pages) paging_ok = false;
-                            }
+                            /* VMM now walks page tables through the physmap. */
+                            if (!vmm_query_page(kernel_map, root_direct, &mapped, 0)) paging_ok = false;
+                            else if (mapped != kernel_map->root_frame) paging_ok = false;
                         }
                     }
-                    u64 root_physical = frame_to_phys(g_kernel_page_map.root_frame);
-                    u64 root_direct = 0;
+                    /* ------------------------------------------------ Move AHCI CPU-side DMA accesses onto the physical direct map. ------------------------------------------------ */
+                    if (paging_ok && ahci_ok) {
+                        if (!ahci_enable_phys_map_access()) {
+                            paging_ok = false;
+                        } 
+                        else if (!boot_disk || boot_disk->block_size != 512U) {
+                            /* AHCI claimed initialization succeeded, so the expected SATA block device should already exist. */
+                            paging_ok = false;
 
-                    if (!physmap_virtual_address(root_physical, &root_direct)) {
-                        paging_ok = false;
-                    } 
-                    else {
-                        frame_t mapped = FRAME_INVALID;
-
-                        /* VMM now walks page tables through the physmap. */
-                        if (!vmm_query_page(&g_kernel_page_map, root_direct, &mapped, 0)) paging_ok = false;
-                        else if (mapped != g_kernel_page_map.root_frame) paging_ok = false;
-                    }
-                }
-                /* ------------------------------------------------ Move AHCI CPU-side DMA accesses onto the physical direct map. ------------------------------------------------ */
-                if (paging_ok && ahci_ok) {
-                    if (!ahci_enable_phys_map_access()) {
-                        paging_ok = false;
-                    } 
-                    else if (!boot_disk || boot_disk->block_size != 512U) {
-                        /* AHCI claimed initialization succeeded, so the expected SATA block device should already exist. */
-                        paging_ok = false;
-
-                    } 
-                    else {
-                        /*
-                        * Switch CPU-side AHCI DMA access to physmap,
-                        * then perform a real DMA read as a runtime probe.
-                        */
-                        u8 sector_probe[512];
-                        if (!block_read(boot_disk, 0, 1, sector_probe)) paging_ok = false;
+                        } 
+                        else {
+                            /*
+                            * Switch CPU-side AHCI DMA access to physmap,
+                            * then perform a real DMA read as a runtime probe.
+                            */
+                            u8 sector_probe[512];
+                            if (!block_read(boot_disk, 0, 1, sector_probe)) paging_ok = false;
+                        }
                     }
                 }
             }
@@ -449,7 +453,7 @@ void kernel_main(BootInfo *boot) {
     terminal_write("  AHCI DMA PHYS MAP: ");
     terminal_writeln(ahci_phys_map_access_enabled() ? "ACTIVE" : "INACTIVE");
 
-    u64 root_physical = frame_to_phys(g_kernel_page_map.root_frame);
+    u64 root_physical = frame_to_phys(kernel_space->page_map.root_frame);
     u64 root_direct = 0;
 
     if (physmap_virtual_address(root_physical, &root_direct)) { terminal_write("  PML4 DIRECT: "); terminal_write_hex(root_direct); terminal_putchar('\n'); }
@@ -459,7 +463,7 @@ void kernel_main(BootInfo *boot) {
     terminal_write("  IST1: "); terminal_write_hex(gdt_ist1()); terminal_putchar('\n'); 
     terminal_write("  OLD CR3: "); terminal_write_hex(old_cr3); terminal_putchar('\n'); 
     terminal_write("  NEW CR3: "); terminal_write_hex(new_cr3); terminal_putchar('\n'); 
-    terminal_write("  PML4 FRAME: "); terminal_write_u64(g_kernel_page_map.root_frame);
+    terminal_write("  PML4 FRAME: "); terminal_write_u64(kernel_space->page_map.root_frame);
     terminal_write("  GDTR BASE: "); terminal_write_hex(gdtr.base); 
     terminal_write("  LIMIT: "); terminal_write_u64(gdtr.limit); terminal_putchar('\n');
     terminal_write("  ACPI: "); terminal_write(acpi_ok ? "READY" : "FALLBACK");

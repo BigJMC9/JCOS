@@ -70,10 +70,15 @@ static u32 pt_index(u64 address) {
         (u32)((address >> 12) & 0x1FFULL);
 }
 
-/*
- * Before the CR3 switch, page tables use bootstrap
- * identity mappings. Afterwards they use the physmap.
- */
+static bool map_owns_pml4_index(const VmPageMap *map, u32 index) {
+    if (!map) return false;
+
+    return
+        index >= map->owned_pml4_first &&
+        index < map->owned_pml4_end;
+}
+
+/* Before the CR3 switch, page tables use bootstrap identity mappings. Afterwards they use the physmap. */
 static u64 *table_pointer(frame_t frame) {
     u64 physical = frame_to_phys(frame);
 
@@ -237,20 +242,28 @@ static bool table_empty(const u64 *table) {
     return true;
 }
 
-bool vmm_page_map_create(VmPageMap *map) {
+bool vmm_page_map_create_owned_range(VmPageMap *map, u16 owned_first, u16 owned_end) {
     if (!map) return false;
+    if (owned_first >= owned_end || owned_end > VM_PML4_ENTRY_COUNT) return false;
 
     map->root_frame = FRAME_INVALID;
+    map->owned_pml4_first = 0;
+    map->owned_pml4_end = 0;
 
     frame_t root;
     u64 *table;
 
     if (!allocate_table(&root, &table)) return false;
 
-    /* allocate_table() already zeroed it. */
     map->root_frame = root;
+    map->owned_pml4_first = owned_first;
+    map->owned_pml4_end = owned_end;
 
     return true;
+}
+
+bool vmm_page_map_create(VmPageMap *map) {
+    return vmm_page_map_create_owned_range(map, 0, VM_PML4_ENTRY_COUNT);
 }
 
 void vmm_page_map_destroy(VmPageMap *map) {
@@ -270,10 +283,9 @@ void vmm_page_map_destroy(VmPageMap *map) {
      * Leaf data frames are deliberately NOT
      * released here.
      */
-    for (u32 i = 0; i < PAGE_TABLE_ENTRIES; ++i) {
+    for (u32 i = map->owned_pml4_first; i < map->owned_pml4_end; ++i) {
 
         u64 pml4e = pml4[i];
-
         if (!(pml4e & PTE_PRESENT)) continue;
 
         frame_t pdpt_frame = entry_frame(pml4e);
@@ -317,18 +329,21 @@ void vmm_page_map_destroy(VmPageMap *map) {
     (void)frame_free(map->root_frame);
 
     map->root_frame = FRAME_INVALID;
+    map->owned_pml4_first = 0;
+    map->owned_pml4_end = 0;
 }
 
 bool vmm_map_page(VmPageMap *map, u64 virtual_address, frame_t frame, vm_flags_t flags) {
     if (!map || map->root_frame == FRAME_INVALID) return false;
     if (!page_aligned(virtual_address) || !virtual_address_canonical(virtual_address)) return false;
     if (!valid_mapping_frame(frame)) return false;
-
     /* Refuse flags we do not understand yet. */
     if (flags & ~(VM_WRITE | VM_USER)) return false;
 
-    u64 *pml4 = table_pointer(map->root_frame);
+    u32 i4 = pml4_index(virtual_address);
+    if (!map_owns_pml4_index(map,i4)) return false;
 
+    u64 *pml4 = table_pointer(map->root_frame);
     if (!pml4) return false;
 
     bool user = (flags & VM_USER) != 0;
@@ -351,8 +366,6 @@ bool vmm_map_page(VmPageMap *map, u64 virtual_address, frame_t frame, vm_flags_t
     u64 *pt = 0;
 
     frame_t created = FRAME_INVALID;
-
-    u32 i4 = pml4_index(virtual_address);
 
     if (!create_or_get_table(pml4, i4, user, &created, &pdpt)) return false;
     if (created != FRAME_INVALID) {
@@ -442,16 +455,15 @@ bool vmm_query_page(const VmPageMap *map, u64 virtual_address, frame_t *frame, v
     if (!page_aligned(virtual_address) || !virtual_address_canonical(virtual_address)) return false;
 
     u64 *pml4 = table_pointer(map->root_frame);
-
     if (!pml4) return false;
 
     u32 i4 = pml4_index(virtual_address);
-    u64 pml4e = pml4[i4];
-
     frame_t pdpt_frame;
     u64 *pdpt;
 
     if (!existing_table(pml4, i4, &pdpt_frame, &pdpt)) return false;
+
+    u64 pml4e = pml4[i4];
 
     (void)pdpt_frame;
 
@@ -498,11 +510,11 @@ bool vmm_unmap_page(VmPageMap *map, u64 virtual_address, frame_t *old_frame) {
     if (!map || map->root_frame == FRAME_INVALID) return false;
     if (!page_aligned(virtual_address) || !virtual_address_canonical(virtual_address)) return false;
 
-    u64 *pml4 = table_pointer(map->root_frame);
-
-    if (!pml4) return false;
-
     u32 i4 = pml4_index(virtual_address);
+    if (!map_owns_pml4_index(map,i4)) return false;
+
+    u64 *pml4 = table_pointer(map->root_frame);
+    if (!pml4) return false;
 
     frame_t pdpt_frame;
     u64 *pdpt;
@@ -583,10 +595,9 @@ bool vmm_map_range(VmPageMap *map, u64 virtual_address, u64 physical_address, u6
     if (virtual_address > ~0ULL - (span - 1ULL)) return false;
     if (physical_address > ~0ULL - (span - 1ULL)) return false;
     for (u64 i = 0; i < page_count; ++i) {
-
         u64 virtual_page = virtual_address + i * VM_PAGE_SIZE;
-
         u64 physical_page = physical_address + i * VM_PAGE_SIZE;
+        if (!map_owns_pml4_index(map, pml4_index(virtual_page))) return false;
 
         frame_t expected = phys_to_frame(physical_page);
 
@@ -632,4 +643,23 @@ bool vmm_identity_map_range(VmPageMap *map, u64 physical_address, u64 size, vm_f
 
     return
         vmm_map_range(map, aligned, aligned, adjusted_size, flags);
+}
+
+bool vmm_page_map_share_pml4_entry(VmPageMap *destination, const VmPageMap *source, u16 index) {
+    if (!destination || !source || destination->root_frame == FRAME_INVALID || source->root_frame == FRAME_INVALID || index >= VM_PML4_ENTRY_COUNT) return false;
+
+    /* Never install a shared subtree into an entry that this map would later try to destroy. */
+    if (map_owns_pml4_index(destination, index)) return false;
+
+    u64 *destination_pml4 = table_pointer(destination->root_frame);
+
+    u64 *source_pml4 = table_pointer(source->root_frame);
+
+    if (!destination_pml4 || !source_pml4) return false;
+    if (destination_pml4[index] & PTE_PRESENT) return false;
+
+    /* Copy the PML4 entry, not the subtree. Both address spaces now reference the same lower-level kernel paging structures. */
+    destination_pml4[index] = source_pml4[index];
+
+    return true;
 }

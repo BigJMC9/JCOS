@@ -1,0 +1,56 @@
+#ifndef JA_OS_ADDRESS_SPACE_H
+#define JA_OS_ADDRESS_SPACE_H
+
+#include "types.h"
+#include "vmm.h"
+
+/*
+ * Slot 0 remains shared while the kernel itself
+ * still executes from low virtual addresses.
+ */
+#define ADDRESS_SPACE_USER_BASE 0x0000008000000000ULL
+#define ADDRESS_SPACE_USER_LIMIT 0x0000800000000000ULL
+
+typedef struct {
+    u64 id;
+    VmPageMap page_map;
+    bool kernel;
+} AddressSpace;
+
+bool address_space_kernel_init(void);
+
+AddressSpace *address_space_kernel(void);
+
+bool address_space_create(
+    AddressSpace *space
+);
+
+void address_space_destroy(
+    AddressSpace *space
+);
+
+bool address_space_map_page(
+    AddressSpace *space,
+    u64 virtual_address,
+    frame_t frame,
+    vm_flags_t flags
+);
+
+bool address_space_unmap_page(
+    AddressSpace *space,
+    u64 virtual_address,
+    frame_t *old_frame
+);
+
+bool address_space_query_page(
+    const AddressSpace *space,
+    u64 virtual_address,
+    frame_t *frame,
+    vm_flags_t *flags
+);
+
+u64 address_space_cr3(
+    const AddressSpace *space
+);
+
+#endif

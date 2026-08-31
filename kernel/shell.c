@@ -7,6 +7,8 @@
 #include "pci.h"
 #include "pmm.h"
 #include "vmm.h"
+#include "address_space.h"
+#include "physmap.h"
 #include "ps2.h"
 #include "serial.h"
 #include "terminal.h"
@@ -113,6 +115,7 @@ static void command_help(void) {
     terminal_writeln("  alloc       allocate one physical 4 KiB frame");
     terminal_writeln("  frametest   test PMM allocation/free/reuse");
     terminal_writeln("  vmmtest     test x86-64 page-table operations");
+    terminal_writeln("  astest      test address-space ownership/sharing");
     terminal_writeln("  cpu         show CPUID information");
     terminal_writeln("  interrupts  show APIC/PIC and keyboard counters");
     terminal_writeln("  acpi        show ACPI discovery results");
@@ -170,11 +173,7 @@ static void command_alloc(void) {
         return;
     }
 
-    terminal_write("ALLOCATED FRAME: ");
-    terminal_write_u64(frame);
-    terminal_write("  PHYSICAL: ");
-    terminal_write_hex(frame_to_phys(frame));
-    terminal_putchar('\n');
+    terminal_write("ALLOCATED FRAME: "); terminal_write_u64(frame); terminal_write("  PHYSICAL: "); terminal_write_hex(frame_to_phys(frame)); terminal_putchar('\n');
     terminal_writeln("FRAME REMAINS ALLOCATED.");
 }
 
@@ -183,9 +182,7 @@ static void command_frametest(void) {
 
     PmmStats before = pmm_stats();
 
-    terminal_write("  FREE BEFORE: ");
-    terminal_write_u64(before.free_pages);
-    terminal_putchar('\n');
+    terminal_write("  FREE BEFORE: "); terminal_write_u64(before.free_pages); terminal_putchar('\n');
 
     frame_t a = frame_alloc();
     frame_t b = frame_alloc();
@@ -238,16 +235,13 @@ static void command_frametest(void) {
 
     PmmStats after = pmm_stats();
 
-    terminal_write("  FREE AFTER: ");
-    terminal_write_u64(after.free_pages);
-    terminal_putchar('\n');
+    terminal_write("  FREE AFTER: "); terminal_write_u64(after.free_pages); terminal_putchar('\n');
 
     bool count_restored = before.free_pages == after.free_pages;
 
     bool pass = distinct && reused && freed_a && freed_c && freed_d && double_free_rejected && count_restored;
 
-    terminal_set_color(pass ? terminal_accent_color() : terminal_error_color());
-    terminal_write("PMM FRAME TEST: ");
+    terminal_set_color(pass ? terminal_accent_color() : terminal_error_color()); terminal_write("PMM FRAME TEST: ");
     terminal_writeln(pass ? "PASS" : "FAILED");
     terminal_set_color(terminal_default_color());
 }
@@ -257,9 +251,7 @@ static void command_vmmtest(void) {
 
     PmmStats before = pmm_stats();
 
-    terminal_write("  FREE BEFORE: ");
-    terminal_write_u64(before.free_pages);
-    terminal_putchar('\n');
+    terminal_write("  FREE BEFORE: "); terminal_write_u64(before.free_pages); terminal_putchar('\n');
 
     VmPageMap map;
 
@@ -272,11 +264,7 @@ static void command_vmmtest(void) {
         return;
     }
 
-    terminal_write("  ROOT FRAME: ");
-    terminal_write_u64(map.root_frame);
-    terminal_write("  PHYS=");
-    terminal_write_hex(frame_to_phys(map.root_frame));
-    terminal_putchar('\n');
+    terminal_write("  ROOT FRAME: "); terminal_write_u64(map.root_frame); terminal_write("  PHYS="); terminal_write_hex(frame_to_phys(map.root_frame)); terminal_putchar('\n');
 
     frame_t data = frame_alloc();
 
@@ -289,11 +277,7 @@ static void command_vmmtest(void) {
         return;
     }
 
-    terminal_write("  DATA FRAME: ");
-    terminal_write_u64(data);
-    terminal_write("  PHYS=");
-    terminal_write_hex(frame_to_phys(data));
-    terminal_putchar('\n');
+    terminal_write("  DATA FRAME: "); terminal_write_u64(data); terminal_write("  PHYS="); terminal_write_hex(frame_to_phys(data)); terminal_putchar('\n');
 
     const u64 test_virtual = 0x40000000ULL;
     bool mapped = vmm_map_page(&map, test_virtual, data, VM_WRITE);
@@ -350,9 +334,7 @@ static void command_vmmtest(void) {
 
     PmmStats after = pmm_stats();
 
-    terminal_write("  FREE AFTER: ");
-    terminal_write_u64(after.free_pages);
-    terminal_putchar('\n');
+    terminal_write("  FREE AFTER: "); terminal_write_u64(after.free_pages); terminal_putchar('\n');
 
     bool count_restored = before.free_pages == after.free_pages;
 
@@ -361,8 +343,114 @@ static void command_vmmtest(void) {
 
     bool pass = mapped && queried && frame_match && flags_match && duplicate_rejected && unmapped && old_frame_match && query_after_unmap_rejected && data_freed && count_restored;
 
+    terminal_set_color(pass ? terminal_accent_color() : terminal_error_color()); terminal_write("VMM PAGE TABLE TEST: ");
+    terminal_writeln(pass ? "PASS" : "FAILED");
+    terminal_set_color(terminal_default_color());
+}
+
+static void command_astest(void) {
+    terminal_writeln("ADDRESS SPACE TEST:");
+
+    PmmStats before = pmm_stats();
+
+    terminal_write("  FREE BEFORE: ");
+    terminal_write_u64(before.free_pages);
+    terminal_putchar('\n');
+
+    AddressSpace space;
+
+    bool created = address_space_create(&space);
+
+    terminal_write("  CREATE: ");
+    terminal_writeln(created ? "PASS" : "FAILED");
+
+    if (!created) return;
+
+    terminal_write("  ID: ");
+    terminal_write_u64(space.id);
+    terminal_write("  CR3: ");
+    terminal_write_hex(address_space_cr3(&space));
+    terminal_putchar('\n');
+
+    /* The low kernel mapping must be shared but supervisor-only. */
+    u64 kernel_page = g_boot->kernel_base & ~(VM_PAGE_SIZE - 1ULL);
+    frame_t kernel_frame = FRAME_INVALID;
+    vm_flags_t kernel_flags = 0;
+    bool kernel_shared = address_space_query_page(&space, kernel_page, &kernel_frame, &kernel_flags) && kernel_frame == phys_to_frame(kernel_page) && !(kernel_flags & VM_USER);
+
+    terminal_write("  KERNEL MAPPING SHARED: ");
+    terminal_writeln(kernel_shared ? "PASS" : "FAILED");
+
+    /* The physical direct map must also be shared and supervisor-only. */
+    u64 bitmap_direct = 0;
+    bool physmap_shared = false;
+
+    if (physmap_virtual_address(before.bitmap_physical, &bitmap_direct)) {
+        frame_t mapped = FRAME_INVALID;
+        vm_flags_t flags = 0;
+
+        physmap_shared = address_space_query_page(&space, bitmap_direct, &mapped, &flags) && mapped == phys_to_frame(before.bitmap_physical) && !(flags & VM_USER);
+    }
+
+    terminal_write("  PHYSMAP SHARED: ");
+    terminal_writeln(physmap_shared ? "PASS" : "FAILED");
+
+    frame_t data = frame_alloc();
+    bool data_ok = data != FRAME_INVALID;
+
+    bool mapped = false;
+    bool queried = false;
+    bool flags_match = false;
+
+    if (data_ok) {
+
+        mapped = address_space_map_page(&space, ADDRESS_SPACE_USER_BASE, data, VM_WRITE);
+
+        frame_t queried_frame = FRAME_INVALID;
+        vm_flags_t queried_flags = 0;
+
+        queried = mapped && address_space_query_page(&space, ADDRESS_SPACE_USER_BASE, &queried_frame, &queried_flags);
+        flags_match = queried && queried_frame == data && queried_flags == (VM_WRITE | VM_USER);
+    }
+
+    terminal_write("  USER MAP: ");
+    terminal_writeln(mapped ? "PASS" : "FAILED");
+    terminal_write("  USER QUERY/FLAGS: ");
+    terminal_writeln(flags_match ? "PASS" : "FAILED");
+
+    bool low_rejected = data_ok && !address_space_map_page(&space, 0x40000000ULL, data, VM_WRITE);
+
+    terminal_write("  LOW KERNEL SLOT REJECTED: ");
+    terminal_writeln(low_rejected ? "PASS" : "FAILED");
+
+    bool high_rejected = data_ok && !address_space_map_page(&space, PHYS_MAP_BASE, data, VM_WRITE);
+
+    terminal_write("  KERNEL HALF REJECTED: ");
+    terminal_writeln(high_rejected ? "PASS" : "FAILED");
+
+    frame_t old_frame = FRAME_INVALID;
+    bool unmapped = mapped && address_space_unmap_page(&space, ADDRESS_SPACE_USER_BASE, &old_frame);
+    bool old_match = unmapped && old_frame == data;
+
+    terminal_write("  USER UNMAP: ");
+    terminal_writeln(unmapped ? "PASS" : "FAILED");
+
+    address_space_destroy(&space);
+
+    bool data_freed = data_ok && frame_free(data);
+    PmmStats after = pmm_stats();
+    bool count_restored = before.free_pages == after.free_pages;
+
+    terminal_write("  FREE AFTER: ");
+    terminal_write_u64(after.free_pages);
+    terminal_putchar('\n');
+    terminal_write("  FRAME COUNT RESTORED: ");
+    terminal_writeln(count_restored ? "PASS" : "FAILED");
+
+    bool pass = created && kernel_shared && physmap_shared && data_ok && mapped && queried && flags_match && low_rejected && high_rejected && unmapped && old_match && data_freed && count_restored;
+
     terminal_set_color(pass ? terminal_accent_color() : terminal_error_color());
-    terminal_write("VMM PAGE TABLE TEST: ");
+    terminal_write("ADDRESS SPACE TEST: ");
     terminal_writeln(pass ? "PASS" : "FAILED");
     terminal_set_color(terminal_default_color());
 }
@@ -962,6 +1050,7 @@ static void execute(char *line) {
     else if (k_strieq(command, "alloc")) command_alloc();
     else if (k_strieq(command, "frametest")) command_frametest();
     else if (k_strieq(command, "vmmtest")) command_vmmtest();
+    else if (k_strieq(command, "astest")) command_astest();
     else if (k_strieq(command, "cpu")) command_cpu();
     else if (k_strieq(command, "interrupts")) command_interrupts();
     else if (k_strieq(command, "acpi")) command_acpi();
