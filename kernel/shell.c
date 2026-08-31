@@ -19,6 +19,7 @@
 #include "fat32.h"
 #include "thread.h"
 #include "gdt.h"
+#include "scheduler.h"
 
 #define INPUT_CAPACITY 128U
 
@@ -27,6 +28,20 @@ static VfsNode *g_cwd;
 static const BootInfo *g_boot;
 static char g_input[INPUT_CAPACITY];
 static u32 g_length;
+
+static Thread *g_switchtest_main;
+static Thread *g_switchtest_a;
+static Thread *g_switchtest_b;
+
+static volatile u64 g_switchtest_a_count;
+static volatile u64 g_switchtest_b_count;
+static volatile bool g_switchtest_failed;
+
+static volatile u64 g_schedtest_a_count;
+static volatile u64 g_schedtest_b_count;
+static volatile bool g_schedtest_failed;
+
+static volatile bool g_exittest_started;
 
 static char *trim(char *s) {
     while (*s && k_ascii_space(*s)) ++s;
@@ -119,6 +134,10 @@ static void command_help(void) {
     terminal_writeln("  vmmtest     test x86-64 page-table operations");
     terminal_writeln("  astest      test address-space ownership/sharing");
     terminal_writeln("  threadtest  test thread lifecycle and kernel stacks");
+    terminal_writeln("  switchtest  test cooperative thread context switches");
+    terminal_writeln("  schedtest   test cooperative round-robin scheduling");
+    terminal_writeln("  exittest    test permanent current-thread termination");
+    terminal_writeln("  syscalltest test Ring3 syscall round-trip");
     terminal_writeln("  cpu         show CPUID information");
     terminal_writeln("  interrupts  show APIC/PIC and keyboard counters");
     terminal_writeln("  acpi        show ACPI discovery results");
@@ -130,6 +149,7 @@ static void command_help(void) {
     terminal_writeln("  fat32       show FAT32 filesystem information");
     terminal_writeln("  fatread FILE [OFFSET] [COUNT]  read/test a FAT32 root file");
     terminal_writeln("  fault       deliberately execute UD2 to test the IDT");
+    terminal_writeln("  userfault   enter Ring3 and deliberately execute UD2");
     terminal_writeln("  reboot      reset via ACPI, keyboard controller, or triple fault"); 
     terminal_writeln("  disks       list block devices");
 }
@@ -210,18 +230,14 @@ static void command_frametest(void) {
     bool distinct = a != b && a != c && b != c;
 
     bool freed_b = frame_free(b);
-
     frame_t d = frame_alloc();
-
     bool reused = freed_b && d != FRAME_INVALID && d == b;
 
     terminal_write("  REUSE FREED FRAME: ");
     terminal_writeln(reused ? "PASS" : "FAILED");
 
     bool freed_a = frame_free(a);
-
     bool freed_c = frame_free(c);
-
     bool freed_d = false;
 
     if (d != FRAME_INVALID) freed_d = frame_free(d);
@@ -241,7 +257,6 @@ static void command_frametest(void) {
     terminal_write("  FREE AFTER: "); terminal_write_u64(after.free_pages); terminal_putchar('\n');
 
     bool count_restored = before.free_pages == after.free_pages;
-
     bool pass = distinct && reused && freed_a && freed_c && freed_d && double_free_rejected && count_restored;
 
     terminal_set_color(pass ? terminal_accent_color() : terminal_error_color()); terminal_write("PMM FRAME TEST: ");
@@ -356,12 +371,9 @@ static void command_astest(void) {
 
     PmmStats before = pmm_stats();
 
-    terminal_write("  FREE BEFORE: ");
-    terminal_write_u64(before.free_pages);
-    terminal_putchar('\n');
+    terminal_write("  FREE BEFORE: "); terminal_write_u64(before.free_pages); terminal_putchar('\n');
 
     AddressSpace space;
-
     bool created = address_space_create(&space);
 
     terminal_write("  CREATE: ");
@@ -369,11 +381,7 @@ static void command_astest(void) {
 
     if (!created) return;
 
-    terminal_write("  ID: ");
-    terminal_write_u64(space.id);
-    terminal_write("  CR3: ");
-    terminal_write_hex(address_space_cr3(&space));
-    terminal_putchar('\n');
+    terminal_write("  ID: "); terminal_write_u64(space.id); terminal_write("  CR3: "); terminal_write_hex(address_space_cr3(&space)); terminal_putchar('\n');
 
     /* The low kernel mapping must be shared but supervisor-only. */
     u64 kernel_page = g_boot->kernel_base & ~(VM_PAGE_SIZE - 1ULL);
@@ -444,16 +452,13 @@ static void command_astest(void) {
     PmmStats after = pmm_stats();
     bool count_restored = before.free_pages == after.free_pages;
 
-    terminal_write("  FREE AFTER: ");
-    terminal_write_u64(after.free_pages);
-    terminal_putchar('\n');
+    terminal_write("  FREE AFTER: "); terminal_write_u64(after.free_pages); terminal_putchar('\n'); 
     terminal_write("  FRAME COUNT RESTORED: ");
     terminal_writeln(count_restored ? "PASS" : "FAILED");
 
     bool pass = created && kernel_shared && physmap_shared && data_ok && mapped && queried && flags_match && low_rejected && high_rejected && unmapped && old_match && data_freed && count_restored;
 
-    terminal_set_color(pass ? terminal_accent_color() : terminal_error_color());
-    terminal_write("ADDRESS SPACE TEST: ");
+    terminal_set_color(pass ? terminal_accent_color() : terminal_error_color()); terminal_write("ADDRESS SPACE TEST: ");
     terminal_writeln(pass ? "PASS" : "FAILED");
     terminal_set_color(terminal_default_color());
 }
@@ -461,373 +466,625 @@ static void command_astest(void) {
 static void command_threadtest(void) {
     terminal_writeln("THREAD TEST:");
 
-    PmmStats before =
-        pmm_stats();
+    PmmStats before = pmm_stats();
+
+    terminal_write("  FREE BEFORE: "); terminal_write_u64(before.free_pages); terminal_putchar('\n');
+
+    Thread *current = thread_current();
+    bool bootstrap_ok = current && current->id == 1 && current->state == THREAD_STATE_RUNNING && current->address_space == address_space_kernel() && current->kernel_stack_top == gdt_rsp0() && !current->owns_kernel_stack;
+
+    terminal_write("  BOOTSTRAP THREAD: ");
+    terminal_writeln(bootstrap_ok ? "PASS" : "FAILED");
+
+    AddressSpace space;
+    bool space_created = address_space_create(&space);
+
+    terminal_write("  ADDRESS SPACE: ");
+    terminal_writeln(space_created ? "PASS" : "FAILED");
+
+    if (!space_created) return;
+
+    Thread thread;
+    bool created = thread_create(&thread, &space);
+
+    terminal_write("  CREATE: ");
+    terminal_writeln(created ? "PASS" : "FAILED");
+
+    if (!created) {
+        address_space_destroy(&space);
+
+        return;
+    }
+
+    terminal_write("  ID: "); terminal_write_u64(thread.id);
+    terminal_write("  STACK PHYS: "); terminal_write_hex(thread.kernel_stack_physical); terminal_putchar('\n'); 
+    terminal_write("  STACK BASE: "); terminal_write_hex(thread.kernel_stack_base); terminal_write("  TOP: "); terminal_write_hex(thread.kernel_stack_top); terminal_putchar('\n');
+
+    bool metadata_ok = thread.id != current->id && thread.address_space == &space && thread.state == THREAD_STATE_READY && thread.kernel_stack_size == THREAD_KERNEL_STACK_SIZE && thread.owns_kernel_stack;
+
+    terminal_write("  METADATA: ");
+    terminal_writeln(metadata_ok ? "PASS" : "FAILED");
+
+    /* The stack is reached through the shared supervisor-only physical direct map. */
+    frame_t first_frame = FRAME_INVALID;
+    vm_flags_t first_flags = 0;
+
+    bool first_mapped = address_space_query_page(&space, thread.kernel_stack_base, &first_frame, &first_flags) && first_frame == phys_to_frame(thread.kernel_stack_physical) && (first_flags & VM_WRITE) && !(first_flags & VM_USER);
+
+    u64 last_virtual = thread.kernel_stack_top - FRAME_SIZE;
+    u64 last_physical = thread.kernel_stack_physical + thread.kernel_stack_size - FRAME_SIZE;
+
+    frame_t last_frame = FRAME_INVALID;
+    vm_flags_t last_flags = 0;
+
+    bool last_mapped = address_space_query_page(&space, last_virtual, &last_frame, &last_flags) && last_frame == phys_to_frame(last_physical) && (last_flags & VM_WRITE) && !(last_flags & VM_USER);
+    bool stack_mapped = first_mapped && last_mapped;
+
+    terminal_write("  STACK PHYSMAP: ");
+    terminal_writeln(stack_mapped ? "PASS" : "FAILED");
+
+    /* Touch both ends of the allocated stack. */
+    volatile u64 *first_word = (volatile u64 *)(u64) thread.kernel_stack_base;
+
+    volatile u64 *last_word = (volatile u64 *)(u64) (thread.kernel_stack_top - sizeof(u64));
+
+    const u64 marker = 0x4A434F5354485244ULL;
+
+    *first_word = marker;
+    *last_word = ~marker;
+
+    bool stack_rw = *first_word == marker && *last_word == ~marker;
+
+    terminal_write("  STACK READ/WRITE: ");
+    terminal_writeln(stack_rw ? "PASS" : "FAILED");
+
+    /* Simulate the scheduler's future RSP0 update. RSP0 is only consumed on CPL3 -> CPL0 entry. */
+    u64 original_cr3 = arch_read_cr3() & ~0xFFFULL;
+    u64 original_rsp0 = gdt_rsp0();
+
+    /* thread_activate() does not switch the live kernel RSP, so keep IRQs disabled while this structural activation test is in progress. */
+    interrupts_disable();
+
+    bool activated = thread_activate(&thread);
+    bool current_switched = activated && thread_current() == &thread;
+    bool state_switched = activated && thread.state == THREAD_STATE_RUNNING && current->state == THREAD_STATE_READY;
+    bool cr3_switched = activated && (arch_read_cr3() & ~0xFFFULL) == address_space_cr3(&space);
+    bool rsp0_switched = activated && gdt_rsp0() == thread.kernel_stack_top;
+    bool restored = activated && thread_activate(current);
+    bool current_restored = restored && thread_current() == current && current->state == THREAD_STATE_RUNNING && thread.state == THREAD_STATE_READY;
+    bool cr3_restored = restored && (arch_read_cr3() & ~0xFFFULL) == original_cr3;
+    bool rsp0_restored = restored && gdt_rsp0() == original_rsp0;
+
+    interrupts_enable();
+
+    terminal_write("  ACTIVATE: ");
+    terminal_writeln(activated ? "PASS" : "FAILED");
+    terminal_write("  CURRENT SWITCH: ");
+    terminal_writeln(current_switched ? "PASS" : "FAILED");
+    terminal_write("  STATE SWITCH: ");
+    terminal_writeln(state_switched ? "PASS" : "FAILED");
+    terminal_write("  CR3 SWITCH: ");
+    terminal_writeln(cr3_switched ? "PASS" : "FAILED");
+    terminal_write("  RSP0 SWITCH: ");
+    terminal_writeln(rsp0_switched ? "PASS" : "FAILED");
+    terminal_write("  RESTORE CURRENT: ");
+    terminal_writeln(current_restored ? "PASS" : "FAILED");
+    terminal_write("  CR3 RESTORE: ");
+    terminal_writeln(cr3_restored ? "PASS" : "FAILED");
+    terminal_write("  RSP0 RESTORE: ");
+    terminal_writeln(rsp0_restored ? "PASS" : "FAILED");
+
+    bool destroyed = thread_destroy(&thread);
+
+    address_space_destroy(&space);
+
+    PmmStats after = pmm_stats();
+    bool count_restored = before.free_pages == after.free_pages;
+
+    terminal_write("  DESTROY: ");
+    terminal_writeln(destroyed ? "PASS" : "FAILED");
+    terminal_write("  FREE AFTER: "); terminal_write_u64(after.free_pages); terminal_putchar('\n'); 
+    terminal_write("  FRAME COUNT RESTORED: ");
+    terminal_writeln(count_restored ? "PASS" : "FAILED");
+
+    bool pass = bootstrap_ok && space_created && created && metadata_ok && stack_mapped && stack_rw && activated && current_switched && state_switched && cr3_switched && rsp0_switched && restored && current_restored && cr3_restored && rsp0_restored && destroyed && count_restored;
+    
+    terminal_set_color(pass ? terminal_accent_color() : terminal_error_color()); 
+    terminal_write("THREAD TEST: ");
+    terminal_writeln(pass ? "PASS" : "FAILED");
+    terminal_set_color(terminal_default_color());
+}
+
+static void switchtest_thread_a(void *argument) {
+    (void)argument;
+    for (u32 i = 0; i < 3U; ++i) {
+        ++g_switchtest_a_count;
+        if (!thread_switch(g_switchtest_b)) {
+            g_switchtest_failed = true;
+            (void)thread_switch(g_switchtest_main);
+            cpu_halt_forever();
+        }
+    }
+    /* Return control to the shell thread. */
+    if (!thread_switch(g_switchtest_main)) g_switchtest_failed = true;
+    cpu_halt_forever();
+}
+
+static void switchtest_thread_b(void *argument) {
+    (void)argument;
+    for (u32 i = 0; i < 3U; ++i) {
+        ++g_switchtest_b_count;
+        if (!thread_switch(g_switchtest_a)) {
+            g_switchtest_failed = true;
+            (void)thread_switch(g_switchtest_main);
+            cpu_halt_forever();
+        }
+    }
+    /* Under the expected sequence B remains suspended after its third switch to A. */
+    (void)thread_switch(g_switchtest_main);
+    cpu_halt_forever();
+}
+
+static void command_switchtest(void) {
+    terminal_writeln("CONTEXT SWITCH TEST:");
+
+    PmmStats before = pmm_stats();
+
+    terminal_write("  FREE BEFORE: "); terminal_write_u64(before.free_pages); terminal_putchar('\n');
+
+    Thread *main_thread = thread_current();
+    bool main_ok = main_thread && main_thread->state == THREAD_STATE_RUNNING;
+
+    terminal_write("  MAIN THREAD: ");
+    terminal_writeln(main_ok ? "PASS" : "FAILED");
+
+    if (!main_ok) return;
+
+    Thread a;
+    Thread b;
+
+    AddressSpace *kernel_space = address_space_kernel();
+    bool created_a = thread_create(&a, kernel_space);
+    bool created_b = created_a && thread_create(&b, kernel_space);
+
+    terminal_write("  CREATE A: ");
+    terminal_writeln(created_a ? "PASS" : "FAILED");
+    terminal_write("  CREATE B: ");
+    terminal_writeln(created_b ? "PASS" : "FAILED");
+
+    if (!created_a || !created_b) {
+        if (created_a) (void)thread_destroy(&a);
+
+        return;
+    }
+
+    bool prepared_a = thread_prepare_kernel(&a, switchtest_thread_a, 0);
+    bool prepared_b = thread_prepare_kernel(&b, switchtest_thread_b, 0);
+
+    terminal_write("  PREPARE A: ");
+    terminal_writeln(prepared_a ? "PASS" : "FAILED");
+    terminal_write("  PREPARE B: ");
+    terminal_writeln(prepared_b ? "PASS" : "FAILED");
+
+    if (!prepared_a || !prepared_b) {
+
+        (void)thread_destroy(&a);
+        (void)thread_destroy(&b);
+
+        return;
+    }
+
+    g_switchtest_main = main_thread;
+    g_switchtest_a = &a;
+    g_switchtest_b = &b;
+    g_switchtest_a_count = 0;
+    g_switchtest_b_count = 0;
+    g_switchtest_failed = false;
+
+    /* No IRQ may run while the live kernel RSP moves between cooperative contexts. */
+    interrupts_disable();
+
+    bool switched = thread_switch(&a);
+
+    interrupts_enable();
+
+    bool current_restored = switched && thread_current() == main_thread && main_thread->state == THREAD_STATE_RUNNING;
+    bool counts_ok = g_switchtest_a_count == 3 && g_switchtest_b_count == 3;
+    bool child_states_ok = a.state == THREAD_STATE_READY && b.state == THREAD_STATE_READY;
+
+    terminal_write("  SWITCH SEQUENCE: ");
+    terminal_writeln(switched && !g_switchtest_failed ? "PASS" : "FAILED");
+    terminal_write("  A COUNT: "); terminal_write_u64(g_switchtest_a_count); terminal_putchar('\n'); terminal_write("  B COUNT: "); terminal_write_u64(g_switchtest_b_count); terminal_putchar('\n'); terminal_write("  CURRENT RESTORED: ");
+    terminal_writeln(current_restored ? "PASS" : "FAILED");
+    terminal_write("  CHILD STATES: ");
+    terminal_writeln(child_states_ok ? "PASS" : "FAILED");
+
+    bool destroyed_a = thread_destroy(&a);
+    bool destroyed_b = thread_destroy(&b);
+
+    g_switchtest_main = 0;
+    g_switchtest_a = 0;
+    g_switchtest_b = 0;
+
+    PmmStats after = pmm_stats();
+    bool count_restored = before.free_pages == after.free_pages;
+
+    terminal_write("  DESTROY A: ");
+    terminal_writeln(destroyed_a ? "PASS" : "FAILED");
+    terminal_write("  DESTROY B: ");
+    terminal_writeln(destroyed_b ? "PASS" : "FAILED");
+    terminal_write("  FREE AFTER: "); terminal_write_u64(after.free_pages); terminal_putchar('\n'); terminal_write("  FRAME COUNT RESTORED: ");
+    terminal_writeln(count_restored ? "PASS" : "FAILED");
+
+    bool pass = created_a && created_b && prepared_a && prepared_b && switched && !g_switchtest_failed && counts_ok && current_restored && child_states_ok && destroyed_a && destroyed_b && count_restored;
+
+    terminal_set_color(pass ? terminal_accent_color() : terminal_error_color()); terminal_write("CONTEXT SWITCH TEST: ");
+    terminal_writeln(pass ? "PASS" : "FAILED");
+    terminal_set_color(terminal_default_color());
+}
+
+static void schedtest_worker(void *argument) {
+    volatile u64 *counter = (volatile u64 *)argument;
+
+    if (!counter) {
+        g_schedtest_failed = true;
+        cpu_halt_forever();
+    }
+
+    for (u32 i = 0; i < 3U; ++i) {
+        ++(*counter);
+        if (!scheduler_yield()) {
+            g_schedtest_failed = true;
+            cpu_halt_forever();
+        }
+    }
+    /*
+     * Remain cooperatively parked.
+     *
+     * The test destroys this thread while it is
+     * suspended inside scheduler_yield().
+     */
+    for (;;) {
+        if (!scheduler_yield()) {
+            g_schedtest_failed = true;
+            cpu_halt_forever();
+        }
+    }
+}
+
+static void command_schedtest(void) {
+    terminal_writeln("SCHEDULER TEST:");
+
+    PmmStats before = pmm_stats();
+
+    terminal_write("  FREE BEFORE: "); terminal_write_u64(before.free_pages); terminal_putchar('\n');
+
+    Thread *main_thread = thread_current();
+    bool main_ok = main_thread && main_thread->state == THREAD_STATE_RUNNING && main_thread->on_run_queue && scheduler_thread_count() == 1;
+
+    terminal_write("  MAIN QUEUED: ");
+    terminal_writeln(main_ok ? "PASS" : "FAILED");
+
+    if (!main_ok) return;
+
+    Thread a;
+    Thread b;
+
+    AddressSpace *kernel_space = address_space_kernel();
+
+    bool created_a = thread_create(&a, kernel_space);
+    bool created_b = created_a && thread_create(&b, kernel_space);
+
+    terminal_write("  CREATE A: ");
+    terminal_writeln(created_a ? "PASS" : "FAILED");
+    terminal_write("  CREATE B: ");
+    terminal_writeln(created_b ? "PASS" : "FAILED");
+
+    if (!created_a || !created_b) {
+        if (created_a) (void)thread_destroy(&a);
+        return;
+    }
+
+    bool prepared_a = thread_prepare_kernel(&a, schedtest_worker, (void *)&g_schedtest_a_count);
+    bool prepared_b = thread_prepare_kernel(&b, schedtest_worker, (void *)&g_schedtest_b_count);
+
+    terminal_write("  PREPARE A: ");
+    terminal_writeln(prepared_a ? "PASS" : "FAILED");
+    terminal_write("  PREPARE B: ");
+    terminal_writeln(prepared_b ? "PASS" : "FAILED");
+
+    if (!prepared_a || !prepared_b) {
+        (void)thread_destroy(&a);
+        (void)thread_destroy(&b);
+        return;
+    }
+
+    bool added_a = scheduler_add(&a);
+    bool added_b = added_a && scheduler_add(&b);
+
+    terminal_write("  QUEUE A: ");
+    terminal_writeln(added_a ? "PASS" : "FAILED");
+    terminal_write("  QUEUE B: ");
+    terminal_writeln(added_b ? "PASS" : "FAILED");
+
+    if (!added_a || !added_b) {
+        if (added_a) (void)scheduler_remove(&a);
+
+        (void)thread_destroy(&a);
+        (void)thread_destroy(&b);
+
+        return;
+    }
+
+    bool queue_three = scheduler_thread_count() == 3;
+
+    terminal_write("  QUEUE COUNT 3: ");
+    terminal_writeln(queue_three ? "PASS" : "FAILED");
+
+    g_schedtest_a_count = 0;
+    g_schedtest_b_count = 0;
+    g_schedtest_failed = false;
+
+    /*
+     * Each main-thread yield produces:
+     *
+     * main -> A -> B -> main
+     */
+    interrupts_disable();
+
+    bool yielded = true;
+
+    for (u32 round = 0; round < 3U; ++round) {
+        if (!scheduler_yield()) {
+            yielded = false;
+            break;
+        }
+    }
+
+    interrupts_enable();
+
+    bool counts_ok = g_schedtest_a_count == 3 && g_schedtest_b_count == 3;
+    bool current_restored = thread_current() == main_thread && main_thread->state == THREAD_STATE_RUNNING;
+    bool children_ready = a.state == THREAD_STATE_READY && b.state == THREAD_STATE_READY;
+
+    terminal_write("  YIELD SEQUENCE: ");
+    terminal_writeln(yielded && !g_schedtest_failed ? "PASS" : "FAILED");
+    terminal_write("  A COUNT: "); terminal_write_u64(g_schedtest_a_count); terminal_putchar('\n'); terminal_write("  B COUNT: "); terminal_write_u64(g_schedtest_b_count); terminal_putchar('\n'); terminal_write("  CURRENT RESTORED: ");
+    terminal_writeln(current_restored ? "PASS" : "FAILED");
+    terminal_write("  CHILDREN READY: ");
+    terminal_writeln(children_ready ? "PASS" : "FAILED");
+
+    bool removed_a = scheduler_remove(&a);
+    bool removed_b = scheduler_remove(&b);
+    bool queue_restored = scheduler_thread_count() == 1;
+
+    terminal_write("  REMOVE A: ");
+    terminal_writeln(removed_a ? "PASS" : "FAILED");
+    terminal_write("  REMOVE B: ");
+    terminal_writeln(removed_b ? "PASS" : "FAILED");
+    terminal_write("  QUEUE RESTORED: ");
+    terminal_writeln(queue_restored ? "PASS" : "FAILED");
+
+    bool destroyed_a = thread_destroy(&a);
+    bool destroyed_b = thread_destroy(&b);
+
+    PmmStats after = pmm_stats();
+    bool frames_restored = before.free_pages == after.free_pages;
+
+    terminal_write("  DESTROY A: ");
+    terminal_writeln(destroyed_a ? "PASS" : "FAILED");
+    terminal_write("  DESTROY B: ");
+    terminal_writeln(destroyed_b ? "PASS" : "FAILED");
+    terminal_write("  FREE AFTER: "); terminal_write_u64(after.free_pages); terminal_putchar('\n'); terminal_write("  FRAME COUNT RESTORED: ");
+    terminal_writeln(frames_restored ? "PASS" : "FAILED");
+
+    bool pass = main_ok && created_a && created_b && prepared_a && prepared_b && added_a && added_b && queue_three && yielded && !g_schedtest_failed && counts_ok && current_restored && children_ready && removed_a && removed_b && queue_restored && destroyed_a && destroyed_b && frames_restored;
+
+    terminal_set_color(pass ? terminal_accent_color() : terminal_error_color()); terminal_write("SCHEDULER TEST: ");
+    terminal_writeln(pass ? "PASS" : "FAILED");
+    terminal_set_color(terminal_default_color());
+}
+
+static void exittest_worker(void *argument) {
+    (void)argument;
+    g_exittest_started = true;
+    scheduler_exit_current();
+}
+
+static void command_exittest(void) {
+    terminal_writeln("THREAD EXIT TEST:");
+
+    PmmStats before = pmm_stats();
 
     terminal_write("  FREE BEFORE: ");
     terminal_write_u64(before.free_pages);
     terminal_putchar('\n');
 
+    Thread *main_thread = thread_current();
+    bool main_ok = main_thread && main_thread->state == THREAD_STATE_RUNNING && main_thread->on_run_queue && scheduler_thread_count() == 1;
 
-    Thread *current =
-        thread_current();
+    terminal_write("  MAIN THREAD: ");
+    terminal_writeln(main_ok ? "PASS" : "FAILED");
 
-    bool bootstrap_ok =
-        current &&
-        current->id == 1 &&
-        current->state ==
-            THREAD_STATE_RUNNING &&
-        current->address_space ==
-            address_space_kernel() &&
-        current->kernel_stack_top ==
-            gdt_rsp0() &&
-        !current->owns_kernel_stack;
+    if (!main_ok) return;
 
-    terminal_write(
-        "  BOOTSTRAP THREAD: "
-    );
+    Thread child;
+    bool created = thread_create(&child, address_space_kernel());
 
-    terminal_writeln(
-        bootstrap_ok
-            ? "PASS"
-            : "FAILED"
-    );
+    terminal_write("  CREATE: ");
+    terminal_writeln(created ? "PASS" : "FAILED");
 
+    if (!created) return;
 
-    AddressSpace space;
+    bool prepared = thread_prepare_kernel(&child, exittest_worker, 0);
 
-    bool space_created =
-        address_space_create(
-            &space
-        );
+    terminal_write("  PREPARE: ");
+    terminal_writeln(prepared ? "PASS" : "FAILED");
 
-    terminal_write(
-        "  ADDRESS SPACE: "
-    );
-
-    terminal_writeln(
-        space_created
-            ? "PASS"
-            : "FAILED"
-    );
-
-    if (!space_created)
-        return;
-
-
-    Thread thread;
-
-    bool created =
-        thread_create(
-            &thread,
-            &space
-        );
-
-    terminal_write(
-        "  CREATE: "
-    );
-
-    terminal_writeln(
-        created
-            ? "PASS"
-            : "FAILED"
-    );
-
-    if (!created) {
-        address_space_destroy(
-            &space
-        );
+    if (!prepared) {
+        (void)thread_destroy(&child);
 
         return;
     }
 
+    bool queued = scheduler_add(&child);
 
-    terminal_write("  ID: ");
-    terminal_write_u64(thread.id);
+    terminal_write("  QUEUE: ");
+    terminal_writeln(queued ? "PASS" : "FAILED");
 
-    terminal_write("  STACK PHYS: ");
-    terminal_write_hex(
-        thread.kernel_stack_physical
-    );
+    if (!queued) {
+        (void)thread_destroy(&child);
 
-    terminal_putchar('\n');
+        return;
+    }
 
-    terminal_write(
-        "  STACK BASE: "
-    );
+    bool queue_two = scheduler_thread_count() == 2;
 
-    terminal_write_hex(
-        thread.kernel_stack_base
-    );
+    terminal_write("  QUEUE COUNT 2: ");
+    terminal_writeln(queue_two ? "PASS" : "FAILED");
 
-    terminal_write(
-        "  TOP: "
-    );
-
-    terminal_write_hex(
-        thread.kernel_stack_top
-    );
-
-    terminal_putchar('\n');
-
-
-    bool metadata_ok =
-        thread.id != current->id &&
-        thread.address_space == &space &&
-        thread.state ==
-            THREAD_STATE_READY &&
-        thread.kernel_stack_size ==
-            THREAD_KERNEL_STACK_SIZE &&
-        thread.owns_kernel_stack;
-
-    terminal_write(
-        "  METADATA: "
-    );
-
-    terminal_writeln(
-        metadata_ok
-            ? "PASS"
-            : "FAILED"
-    );
-
+    g_exittest_started = false;
 
     /*
-     * The stack is reached through the shared
-     * supervisor-only physical direct map.
+     * main -> child
+     *
+     * child exits permanently and enters the
+     * saved main context without saving itself.
      */
-    frame_t first_frame =
-        FRAME_INVALID;
+    interrupts_disable();
 
-    vm_flags_t first_flags =
-        0;
+    bool yielded = scheduler_yield();
 
-    bool first_mapped =
-        address_space_query_page(
-            &space,
-            thread.kernel_stack_base,
-            &first_frame,
-            &first_flags) &&
-        first_frame ==
-            phys_to_frame(
-                thread.kernel_stack_physical) &&
-        (first_flags & VM_WRITE) &&
-        !(first_flags & VM_USER);
+    interrupts_enable();
 
+    bool worker_started = g_exittest_started;
+    bool current_restored = yielded && thread_current() == main_thread && main_thread->state == THREAD_STATE_RUNNING;
+    bool child_dead = child.state == THREAD_STATE_DEAD && !child.on_run_queue && !child.context_ready;
+    bool queue_restored = scheduler_thread_count() == 1;
 
-    u64 last_virtual =
-        thread.kernel_stack_top -
-        FRAME_SIZE;
+    terminal_write("  CHILD RAN: ");
+    terminal_writeln(worker_started ? "PASS" : "FAILED");
+    terminal_write("  CURRENT RESTORED: ");
+    terminal_writeln(current_restored ? "PASS" : "FAILED");
+    terminal_write("  CHILD DEAD: ");
+    terminal_writeln(child_dead ? "PASS" : "FAILED");
+    terminal_write("  QUEUE RESTORED: ");
+    terminal_writeln(queue_restored ? "PASS" : "FAILED");
 
-    u64 last_physical =
-        thread.kernel_stack_physical +
-        thread.kernel_stack_size -
-        FRAME_SIZE;
+    /* We are now executing on the main stack, so the dead child's stack can be freed. */
+    bool reaped = thread_destroy(&child);
 
-    frame_t last_frame =
-        FRAME_INVALID;
+    terminal_write("  REAP DEAD THREAD: ");
+    terminal_writeln(reaped ? "PASS" : "FAILED");
 
-    vm_flags_t last_flags =
-        0;
+    PmmStats after = pmm_stats();
 
-    bool last_mapped =
-        address_space_query_page(
-            &space,
-            last_virtual,
-            &last_frame,
-            &last_flags) &&
-        last_frame ==
-            phys_to_frame(
-                last_physical) &&
-        (last_flags & VM_WRITE) &&
-        !(last_flags & VM_USER);
+    bool frames_restored = before.free_pages == after.free_pages;
 
-    bool stack_mapped =
-        first_mapped &&
-        last_mapped;
-
-    terminal_write(
-        "  STACK PHYSMAP: "
-    );
-
-    terminal_writeln(
-        stack_mapped
-            ? "PASS"
-            : "FAILED"
-    );
-
-
-    /*
-     * Touch both ends of the allocated stack.
-     */
-    volatile u64 *first_word =
-        (volatile u64 *)(u64)
-            thread.kernel_stack_base;
-
-    volatile u64 *last_word =
-        (volatile u64 *)(u64)
-            (thread.kernel_stack_top -
-             sizeof(u64));
-
-    const u64 marker =
-        0x4A434F5354485244ULL;
-
-    *first_word = marker;
-    *last_word = ~marker;
-
-    bool stack_rw =
-        *first_word == marker &&
-        *last_word == ~marker;
-
-    terminal_write(
-        "  STACK READ/WRITE: "
-    );
-
-    terminal_writeln(
-        stack_rw
-            ? "PASS"
-            : "FAILED"
-    );
-
-
-    /*
-     * Simulate the scheduler's future RSP0 update.
-     * RSP0 is only consumed on CPL3 -> CPL0 entry.
-     */
-    u64 old_rsp0 =
-        gdt_rsp0();
-
-    gdt_set_rsp0(
-        thread.kernel_stack_top
-    );
-
-    bool rsp0_installed =
-        gdt_rsp0() ==
-        thread.kernel_stack_top;
-
-    gdt_set_rsp0(
-        old_rsp0
-    );
-
-    bool rsp0_restored =
-        gdt_rsp0() ==
-        old_rsp0;
-
-    terminal_write(
-        "  TSS RSP0 INSTALL: "
-    );
-
-    terminal_writeln(
-        rsp0_installed
-            ? "PASS"
-            : "FAILED"
-    );
-
-    terminal_write(
-        "  TSS RSP0 RESTORE: "
-    );
-
-    terminal_writeln(
-        rsp0_restored
-            ? "PASS"
-            : "FAILED"
-    );
-
-
-    bool current_unchanged =
-        thread_current() ==
-        current;
-
-    terminal_write(
-        "  CURRENT UNCHANGED: "
-    );
-
-    terminal_writeln(
-        current_unchanged
-            ? "PASS"
-            : "FAILED"
-    );
-
-
-    bool destroyed =
-        thread_destroy(
-            &thread
-        );
-
-    address_space_destroy(
-        &space
-    );
-
-
-    PmmStats after =
-        pmm_stats();
-
-    bool count_restored =
-        before.free_pages ==
-        after.free_pages;
-
-    terminal_write(
-        "  DESTROY: "
-    );
-
-    terminal_writeln(
-        destroyed
-            ? "PASS"
-            : "FAILED"
-    );
-
-    terminal_write(
-        "  FREE AFTER: "
-    );
-
-    terminal_write_u64(
-        after.free_pages
-    );
-
+    terminal_write("  FREE AFTER: ");
+    terminal_write_u64(after.free_pages);
     terminal_putchar('\n');
+    terminal_write("  FRAME COUNT RESTORED: ");
+    terminal_writeln(frames_restored ? "PASS" : "FAILED");
 
-    terminal_write(
-        "  FRAME COUNT RESTORED: "
-    );
+    bool pass = main_ok && created && prepared && queued && queue_two && yielded && worker_started && current_restored && child_dead && queue_restored && reaped && frames_restored;
 
-    terminal_writeln(
-        count_restored
-            ? "PASS"
-            : "FAILED"
-    );
+    terminal_set_color(pass ? terminal_accent_color() : terminal_error_color());
+    terminal_write("THREAD EXIT TEST: ");
+    terminal_writeln(pass ? "PASS" : "FAILED");
+    terminal_set_color(terminal_default_color());
+}
 
+static void command_syscalltest(void) {
+    const u64 user_code = ADDRESS_SPACE_USER_BASE;
+    const u64 user_stack = ADDRESS_SPACE_USER_BASE + VM_PAGE_SIZE;
+    const u64 user_stack_top = user_stack + VM_PAGE_SIZE;
 
-    bool pass =
-        bootstrap_ok &&
-        space_created &&
-        created &&
-        metadata_ok &&
-        stack_mapped &&
-        stack_rw &&
-        rsp0_installed &&
-        rsp0_restored &&
-        current_unchanged &&
-        destroyed &&
-        count_restored;
+    AddressSpace space;
 
-    terminal_set_color(
-        pass
-            ? terminal_accent_color()
-            : terminal_error_color()
-    );
+    if (!address_space_create(&space)) {
+        terminal_writeln("USERFAULT: ADDRESS SPACE FAILED.");
+        return;
+    }
 
-    terminal_write(
-        "THREAD TEST: "
-    );
+    Thread thread;
 
-    terminal_writeln(
-        pass
-            ? "PASS"
-            : "FAILED"
-    );
+    if (!thread_create(&thread, &space)) {
+        address_space_destroy(&space);
+        terminal_writeln("USERFAULT: THREAD FAILED.");
+        return;
+    }
 
-    terminal_set_color(
-        terminal_default_color()
-    );
+    frame_t code_frame = frame_alloc();
+    frame_t stack_frame = frame_alloc();
+
+    if (code_frame == FRAME_INVALID || stack_frame == FRAME_INVALID) {
+        if (code_frame != FRAME_INVALID) (void)frame_free(code_frame);
+        if (stack_frame != FRAME_INVALID) (void)frame_free(stack_frame);
+
+        (void)thread_destroy(&thread);
+        address_space_destroy(&space);
+
+        terminal_writeln("USERFAULT: FRAME ALLOCATION FAILED.");
+        return;
+    }
+
+    bool code_mapped = address_space_map_page(&space, user_code, code_frame, 0);
+    bool stack_mapped = address_space_map_page(&space, user_stack, stack_frame, VM_WRITE);
+
+    if (!code_mapped || !stack_mapped) {
+
+        frame_t ignored = FRAME_INVALID;
+
+        if (code_mapped) (void)address_space_unmap_page(&space, user_code, &ignored);
+        if (stack_mapped) (void)address_space_unmap_page(&space, user_stack, &ignored);
+
+        (void)frame_free(code_frame);
+        (void)frame_free(stack_frame);
+
+        (void)thread_destroy(&thread);
+        address_space_destroy(&space);
+
+        terminal_writeln("USERFAULT: USER MAPPING FAILED.");
+
+        return;
+    }
+
+    u8 *code = (u8 *)phys_to_virt(frame_to_phys(code_frame));
+
+    if (!code) {
+        terminal_writeln("USERFAULT: PHYSMAP FAILED.");
+
+        return;
+    }
+
+    /* mov eax, SYSCALL_THREAD_ID int 0x80 ud2 */
+    code[0] = 0xB8;
+    code[1] = 0x00;
+    code[2] = 0x00;
+    code[3] = 0x00;
+    code[4] = 0x00;
+    code[5] = 0xCD;
+    code[6] = 0x80;
+    code[7] = 0x0F;
+    code[8] = 0x0B;
+
+    terminal_writeln("ENTERING RING3 SYSCALL TEST...");
+    terminal_write("  USER RIP: "); terminal_write_hex(user_code); terminal_putchar('\n');
+    terminal_write("  USER RSP: "); terminal_write_hex(user_stack_top); terminal_putchar('\n');
+    terminal_write("  KERNEL RSP0: "); terminal_write_hex(thread.kernel_stack_top); terminal_putchar('\n');
+
+    /* No interrupt may observe the transitional kernel context before IRETQ enters this thread. */
+    interrupts_disable();
+
+    if (!thread_activate(&thread)) {
+        interrupts_enable();
+        terminal_writeln("SYSCALLTEST: THREAD ACTIVATION FAILED.");
+        return;
+    }
+
+    terminal_write("  ACTIVE THREAD: "); terminal_write_u64(thread_current()->id); terminal_putchar('\n');
+    arch_enter_user(user_code, user_stack_top);
 }
 
 static void command_cpu(void) {
@@ -1142,17 +1399,13 @@ static void command_partitions(void) {
     for (u32 i = 0; i < gpt->partition_count; ++i) {
 
         const GptPartition *part = &gpt->partitions[i];
-
         if (!part->valid) continue;
 
         terminal_write("  sda"); terminal_write_u64(part->index);
-
         if (part->name[0]) { terminal_write("  "); terminal_write(part->name); }
 
         terminal_putchar('\n'); terminal_write("    FIRST LBA: "); terminal_write_u64(part->first_lba); terminal_putchar('\n'); terminal_write("    LAST LBA: "); terminal_write_u64(part->last_lba); terminal_putchar('\n');
-
         u64 sectors = part->last_lba - part->first_lba + 1ULL;
-
         terminal_write("    SECTORS: "); terminal_write_u64(sectors); terminal_putchar('\n');
 
         if (gpt->device) {
@@ -1162,6 +1415,104 @@ static void command_partitions(void) {
             terminal_writeln(" MiB");
         }
     }
+}
+
+static void command_userfault(void) {
+    /*
+     * Destructive Ring3 probe.
+     *
+     * Success ends in a Ring3 #UD exception and
+     * therefore does not return to the shell.
+     */
+    const u64 user_code = ADDRESS_SPACE_USER_BASE;
+    const u64 user_stack = ADDRESS_SPACE_USER_BASE + VM_PAGE_SIZE;
+    const u64 user_stack_top = user_stack + VM_PAGE_SIZE;
+
+    AddressSpace space;
+
+    if (!address_space_create(&space)) {
+        terminal_writeln("USERFAULT: ADDRESS SPACE FAILED.");
+
+        return;
+    }
+
+    Thread thread;
+
+    if (!thread_create(&thread, &space)) {
+        address_space_destroy(&space);
+        terminal_writeln("USERFAULT: THREAD FAILED.");
+        return;
+    }
+
+    frame_t code_frame = frame_alloc();
+    frame_t stack_frame = frame_alloc();
+
+    if (code_frame == FRAME_INVALID || stack_frame == FRAME_INVALID) {
+        if (code_frame != FRAME_INVALID) (void)frame_free(code_frame);
+        if (stack_frame != FRAME_INVALID) (void)frame_free(stack_frame);
+
+        (void)thread_destroy(&thread);
+        address_space_destroy(&space);
+
+        terminal_writeln("USERFAULT: FRAME ALLOCATION FAILED.");
+        return;
+    }
+
+    bool code_mapped = address_space_map_page(&space, user_code, code_frame, 0);
+    bool stack_mapped = address_space_map_page(&space, user_stack, stack_frame, VM_WRITE);
+
+    if (!code_mapped || !stack_mapped) {
+
+        frame_t ignored = FRAME_INVALID;
+
+        if (code_mapped) (void)address_space_unmap_page(&space, user_code, &ignored);
+        if (stack_mapped) (void)address_space_unmap_page(&space, user_stack, &ignored);
+
+        (void)frame_free(code_frame);
+        (void)frame_free(stack_frame);
+
+        (void)thread_destroy(&thread);
+        address_space_destroy(&space);
+
+        terminal_writeln("USERFAULT: USER MAPPING FAILED.");
+
+        return;
+    }
+
+    u8 *code = (u8 *)phys_to_virt(frame_to_phys(code_frame));
+
+    if (!code) {
+        terminal_writeln("USERFAULT: PHYSMAP FAILED.");
+
+        return;
+    }
+
+    /*
+     * UD2
+     *
+     * If Ring3 entry succeeds this raises #UD,
+     * forcing a CPL3 -> CPL0 transition.
+     */
+    code[0] = 0x0F;
+    code[1] = 0x0B;
+
+    terminal_writeln("ENTERING RING3...");
+    terminal_write("  USER RIP: "); terminal_write_hex(user_code); terminal_putchar('\n');
+    terminal_write("  USER RSP: "); terminal_write_hex(user_stack_top); terminal_putchar('\n');
+    terminal_write("  KERNEL RSP0: "); terminal_write_hex(thread.kernel_stack_top); terminal_putchar('\n');
+
+    /* No interrupt may observe the transitional kernel context before IRETQ enters this thread. */
+    interrupts_disable();
+
+    if (!thread_activate(&thread)) {
+        interrupts_enable();
+        terminal_writeln("USERFAULT: THREAD ACTIVATION FAILED.");
+        return;
+    }
+
+    terminal_write("  ACTIVE THREAD: "); terminal_write_u64(thread_current()->id); terminal_putchar('\n');
+
+    arch_enter_user(user_code, user_stack_top);
 }
 
 static void command_fat32(void) {
@@ -1427,6 +1778,10 @@ static void execute(char *line) {
     else if (k_strieq(command, "vmmtest")) command_vmmtest();
     else if (k_strieq(command, "astest")) command_astest();
     else if (k_strieq(command, "threadtest")) command_threadtest();
+    else if (k_strieq(command, "switchtest")) command_switchtest();
+    else if (k_strieq(command, "schedtest")) command_schedtest();
+    else if (k_strieq(command, "exittest")) command_exittest();
+    else if (k_strieq(command, "syscalltest")) command_syscalltest();
     else if (k_strieq(command, "cpu")) command_cpu();
     else if (k_strieq(command, "interrupts")) command_interrupts();
     else if (k_strieq(command, "acpi")) command_acpi();
@@ -1436,6 +1791,7 @@ static void execute(char *line) {
     else if (k_strieq(command, "sector")) command_sector(args);
     else if (k_strieq(command, "partitions")) command_partitions();
     else if (k_strieq(command, "fault")) __asm__ volatile ("ud2");
+    else if (k_strieq(command, "userfault")) command_userfault();
     else if (k_strieq(command, "reboot")) command_reboot();
     else if (k_strieq(command, "pwd")) command_pwd();
     else if (k_strieq(command, "fat32")) command_fat32();

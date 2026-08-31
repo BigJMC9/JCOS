@@ -25,6 +25,9 @@
 .global arch_reload_segments
 .global arch_load_tr
 .global arch_read_tr
+.global arch_enter_user
+.global arch_context_switch
+.global arch_context_enter
 .global isr_stub_offsets
 .extern kernel_main
 .extern interrupt_dispatch
@@ -180,6 +183,86 @@ arch_triple_fault:
     lidt [rsp]
     int3
     jmp cpu_halt_forever
+
+arch_enter_user:
+    /*
+     * rdi = user RIP
+     * rsi = user RSP
+     *
+     * IRETQ privilege-return frame:
+     *
+     *   SS
+     *   RSP
+     *   RFLAGS
+     *   CS
+     *   RIP
+     */
+    push 0x1B
+    push rsi
+
+    /*
+     * Keep interrupts disabled for this first
+     * synchronous Ring3 probe.
+     */
+    push 0x2
+
+    push 0x23
+    push rdi
+
+    iretq
+
+    ud2
+
+arch_context_switch:
+    /*
+     * rdi = old CpuContext *
+     * rsi = new CpuContext *
+     */
+
+    mov QWORD PTR [rdi + 0], rbx
+    mov QWORD PTR [rdi + 8], rbp
+    mov QWORD PTR [rdi + 16], r12
+    mov QWORD PTR [rdi + 24], r13
+    mov QWORD PTR [rdi + 32], r14
+    mov QWORD PTR [rdi + 40], r15
+
+    mov QWORD PTR [rdi + 48], rsp
+
+    lea rax, [rip + .Lcontext_resume]
+    mov QWORD PTR [rdi + 56], rax
+
+
+    mov rbx, QWORD PTR [rsi + 0]
+    mov rbp, QWORD PTR [rsi + 8]
+    mov r12, QWORD PTR [rsi + 16]
+    mov r13, QWORD PTR [rsi + 24]
+    mov r14, QWORD PTR [rsi + 32]
+    mov r15, QWORD PTR [rsi + 40]
+
+    mov rsp, QWORD PTR [rsi + 48]
+
+    jmp QWORD PTR [rsi + 56]
+
+.Lcontext_resume:
+    ret
+
+arch_context_enter:
+    /*
+     * rdi = CpuContext *
+     *
+     * One-way context handoff.
+     */
+
+    mov rbx, QWORD PTR [rdi + 0]
+    mov rbp, QWORD PTR [rdi + 8]
+    mov r12, QWORD PTR [rdi + 16]
+    mov r13, QWORD PTR [rdi + 24]
+    mov r14, QWORD PTR [rdi + 32]
+    mov r15, QWORD PTR [rdi + 40]
+
+    mov rsp, QWORD PTR [rdi + 48]
+
+    jmp QWORD PTR [rdi + 56]
 
 isr_stub_0:
     push 0
@@ -411,6 +494,11 @@ isr_stub_47:
     push 47
     jmp isr_common
 
+isr_stub_128:
+    push 0
+    push 128
+    jmp isr_common
+
 isr_stub_255:
     push 0
     push 255
@@ -506,6 +594,7 @@ isr_stub_offsets:
     .long isr_stub_45 - isr_stub_offsets
     .long isr_stub_46 - isr_stub_offsets
     .long isr_stub_47 - isr_stub_offsets
+    .long isr_stub_128 - isr_stub_offsets
     .long isr_stub_255 - isr_stub_offsets
 
 .section .note.GNU-stack,"",@progbits

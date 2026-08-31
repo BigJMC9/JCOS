@@ -4,10 +4,12 @@
 #include "types.h"
 #include "pmm.h"
 #include "address_space.h"
+#include "arch.h"
 
 #define THREAD_KERNEL_STACK_PAGES 4ULL
-#define THREAD_KERNEL_STACK_SIZE \
-    (THREAD_KERNEL_STACK_PAGES * FRAME_SIZE)
+#define THREAD_KERNEL_STACK_SIZE (THREAD_KERNEL_STACK_PAGES * FRAME_SIZE)
+
+typedef void (*ThreadEntry)(void *argument);
 
 typedef enum {
     THREAD_STATE_INVALID = 0,
@@ -22,17 +24,32 @@ typedef struct Thread {
     AddressSpace *address_space;
     ThreadState state;
 
-    /*
-     * Device/allocator-facing physical base and
-     * CPU-visible virtual stack range.
-     */
+    CpuContext context;
+
+    ThreadEntry entry;
+    void *argument;
+    
     u64 kernel_stack_physical;
     u64 kernel_stack_base;
     u64 kernel_stack_top;
     u64 kernel_stack_size;
 
     bool owns_kernel_stack;
+    bool context_ready;
+
+    struct Thread *run_next;
+    bool on_run_queue;
 } Thread;
+
+bool thread_prepare_kernel(
+    Thread *thread,
+    ThreadEntry entry,
+    void *argument
+);
+
+bool thread_switch(
+    Thread *next
+);
 
 
 /*
@@ -48,18 +65,21 @@ bool thread_system_init(
 
 Thread *thread_current(void);
 
+/*
+ * Activate a thread's address space and kernel
+ * entry stack.
+ *
+ * The caller must have interrupts disabled.
+ * This does not switch the current kernel RSP.
+ */
+bool thread_activate(Thread *thread);
 
 /*
  * Create a non-running thread with its own
  * 16 KiB kernel stack.
  */
-bool thread_create(
-    Thread *thread,
-    AddressSpace *address_space
-);
+bool thread_create(Thread *thread, AddressSpace *address_space);
 
-bool thread_destroy(
-    Thread *thread
-);
+bool thread_destroy(Thread *thread);
 
 #endif

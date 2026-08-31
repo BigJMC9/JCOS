@@ -22,6 +22,7 @@
 #include "partition.h"
 #include "fat32.h"
 #include "thread.h"
+#include "scheduler.h"
 #include "splash.h"
 
 #define CR4_LA57 (1ULL << 12)
@@ -437,6 +438,15 @@ void kernel_main(BootInfo *boot) {
         cpu_halt_forever();
     }
 
+    bool scheduler_ok = scheduler_init();
+    if (!scheduler_ok) {
+        serial_write("JA OS: scheduler initialization failed.\n");
+        terminal_set_color(terminal_error_color());
+        terminal_writeln("SCHEDULER INITIALIZATION FAILED.");
+        terminal_set_color(terminal_default_color());
+        cpu_halt_forever();
+    }
+
     splash_progress(85);
     bool keyboard_ok = (!acpi->i8042_known || acpi->i8042_present) ? ps2_init() : false;
     splash_progress(95);
@@ -491,6 +501,7 @@ void kernel_main(BootInfo *boot) {
     terminal_write("AHCI: ");
     terminal_writeln( ahci_ok ? "DETECTED" : "NOT DETECTED");
     terminal_write("THREADS: "); terminal_writeln( thread_ok ? "READY" : "FAILED");
+    terminal_write("SCHEDULER: "); terminal_writeln(scheduler_ok ? "READY" : "FAILED");
     terminal_write("PS/2: "); terminal_write(keyboard_ok ? "DETECTED" : "NOT DETECTED");
     terminal_write("  COM1: ");
     terminal_writeln(serial_available() ? "READY" : "NOT DETECTED");

@@ -67,7 +67,6 @@ bool ahci_init(void);
 const AhciInfo *ahci_get(void);
 const char *ahci_device_type_name( AhciDeviceType type);
 
-
 /*
  * Switch CPU-side DMA-buffer access to the physmap.
  * Device-facing DMA addresses remain physical.

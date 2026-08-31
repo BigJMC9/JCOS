@@ -4,6 +4,8 @@
 #include "terminal.h"
 #include "interrupt_controller.h"
 #include "ps2.h"
+#include "thread.h"
+#include "syscall.h"
 
 typedef struct PACKED {
     u16 offset_low;
@@ -35,12 +37,12 @@ const InterruptStackFrame * interrupt_user_stack( const InterruptFrame *frame) {
     return (const InterruptStackFrame *) ((const u8 *)frame + sizeof(InterruptFrame));
 }
 
-static void idt_set(u8 vector, u64 handler, u16 selector, u8 ist) {
+static void idt_set(u8 vector, u64 handler, u16 selector, u8 ist, u8 dpl) {
     IdtEntry *entry = &g_idt[vector];
     entry->offset_low = (u16)handler;
     entry->selector = selector;
     entry->ist = ist & 7U;
-    entry->type_attributes = 0x8E; /* Present, ring 0, interrupt gate. */
+    entry->type_attributes = (u8)(0x8EU | ((dpl & 3U) << 5));
     entry->offset_middle = (u16)(handler >> 16);
     entry->offset_high = (u32)(handler >> 32);
     entry->zero = 0;
@@ -53,14 +55,12 @@ void idt_init(bool tss_ready) {
     u16 selector = arch_read_cs();
     for (u32 vector = 0; vector < 48; ++vector) {
 
-    u64 handler = table + (s64)isr_stub_offsets[vector];
-
-    u8 ist = (tss_ready && vector == 8U) ? 1U : 0U;
-
-    idt_set((u8)vector, handler, selector, ist);
-}
-
-idt_set(0xFF, table + (s64)isr_stub_offsets[48], selector, 0);
+        u64 handler = table + (s64)isr_stub_offsets[vector];
+        u8 ist = (tss_ready && vector == 8U) ? 1U : 0U;
+        idt_set((u8)vector, handler, selector, ist, 0);
+    }
+    idt_set(0x80, table + (s64)isr_stub_offsets[48], selector, 0, 3);
+    idt_set(0xFF, table + (s64)isr_stub_offsets[49], selector, 0, 0);
     g_idtr.limit = (u16)(sizeof(g_idt) - 1);
     g_idtr.base = (u64)(void *)g_idt;
     arch_load_idt(&g_idtr);
@@ -97,7 +97,7 @@ static const char *exception_name(u64 vector) {
 static NORETURN void exception_panic(const InterruptFrame *frame) {
     interrupts_disable();
     terminal_set_color(terminal_error_color());
-    terminal_writeln("\nKERNEL PANIC: CPU EXCEPTION");
+    terminal_writeln("\nCPU EXCEPTION:");
     terminal_write("VECTOR: "); terminal_write_u64(frame->vector);
     terminal_write(" ("); terminal_write(exception_name(frame->vector));
     terminal_writeln(")");
@@ -105,6 +105,33 @@ static NORETURN void exception_panic(const InterruptFrame *frame) {
     terminal_write("RIP: "); terminal_write_hex(frame->rip); terminal_putchar('\n');
     terminal_write("CS: "); terminal_write_hex(frame->cs); terminal_putchar('\n');
     terminal_write("RFLAGS: "); terminal_write_hex(frame->rflags); terminal_putchar('\n');
+    bool from_user = interrupt_from_user(frame);
+    terminal_write("ORIGIN: ");
+    terminal_writeln(from_user ? "USER" : "KERNEL");
+    if (from_user) {
+        const InterruptStackFrame *user = interrupt_user_stack(frame);
+        Thread *current = thread_current();
+        terminal_write( "THREAD: ");
+        if (current) {
+            terminal_write_u64(current->id);
+        } 
+        else {
+            terminal_write("NONE");
+        }
+        terminal_putchar('\n');
+        terminal_write("RAX: ");
+        terminal_write_hex(frame->rax);
+        terminal_putchar('\n');
+        if (user) {
+            terminal_write("USER RSP: ");
+            terminal_write_hex(user->rsp);
+            terminal_putchar('\n');
+
+            terminal_write("USER SS: ");
+            terminal_write_hex(user->ss);
+            terminal_putchar('\n');
+        }
+    }
     if (frame->vector == 14) {
         terminal_write("CR2: "); terminal_write_hex(arch_read_cr2()); terminal_putchar('\n');
     }
@@ -118,6 +145,11 @@ void interrupt_dispatch(InterruptFrame *frame) {
     ++g_counts[vector];
 
     if (frame->vector < 32) exception_panic(frame);
+    if (vector == SYSCALL_VECTOR) {
+        /* INT 0x80 entered through the DPL3 syscall gate and already switched to TSS.RSP0. */
+        syscall_dispatch(frame);
+        return;
+    }   
     if (vector == 0x21) {
         ps2_handle_irq();
         interrupt_controller_eoi(vector);
