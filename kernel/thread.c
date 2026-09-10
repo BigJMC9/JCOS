@@ -4,6 +4,7 @@
 #include "vmm.h"
 #include "arch.h"
 #include "gdt.h"
+#include "interrupts.h"
 
 static Thread g_bootstrap_thread;
 static Thread *g_current_thread;
@@ -24,49 +25,78 @@ static NORETURN void thread_kernel_trampoline(void) {
     cpu_halt_forever();
 }
 
-static NORETURN void thread_user_trampoline(void) {
-    Thread *thread = thread_current();
+static bool thread_build_interrupt_context(Thread *thread, u64 rip, u64 cs, u64 rflags, u64 return_rsp, u64 return_ss) {
+    if (!thread || !rip || !cs || !return_rsp || !return_ss|| !thread->kernel_stack_base || !thread->kernel_stack_top) return false;
 
-    if (!thread || !thread->user_rip || !thread->user_rsp) cpu_halt_forever();
-    arch_enter_user(thread->user_rip, thread->user_rsp);
-}
-
-bool thread_prepare_kernel(Thread *thread, ThreadEntry entry, void *argument) {
-    if (!g_initialized || !thread || thread == g_current_thread || !thread->id || !entry || thread->state != THREAD_STATE_READY || !thread->owns_kernel_stack || thread->context_ready) return false;
-    if (!thread->kernel_stack_base || !thread->kernel_stack_top || thread->kernel_stack_top <= thread->kernel_stack_base) return false;
-    if (thread->kernel_stack_top & 0xFULL) return false;
-    if (thread->kernel_stack_top - thread->kernel_stack_base < sizeof(u64)) return false;
-
-    k_memset(&thread->context, 0, sizeof(thread->context));
-
-    thread->entry = entry;
-    thread->argument = argument;
+    const u64 frame_size = sizeof(InterruptFrame) + sizeof(InterruptStackFrame);
 
     /*
-     * A normal SysV function begins with
-     * RSP % 16 == 8 because CALL pushed a
-     * return address.
-     *
-     * Enter with JMP, so reserve a dummy
-     * return slot ourselves.
+     * Keep an unused return-sized slot at the
+     * very top. For a kernel first-entry this
+     * also gives the trampoline normal SysV
+     * function-entry alignment.
      */
-    u64 initial_rsp = thread->kernel_stack_top - sizeof(u64);
+    u64 anchor = thread->kernel_stack_top - sizeof(u64);
+    if (anchor < thread->kernel_stack_base + frame_size) return false;
 
-    *(u64 *)(u64)initial_rsp = 0;
+    *(u64 *)(u64)anchor = 0;
 
-    thread->context.rsp = initial_rsp;
-    thread->context.rip = (u64)(void *) thread_kernel_trampoline;
-    thread->user_rip = 0;
-    thread->user_rsp = 0;
-    thread->context_ready = true;
+    u64 frame_address = anchor - frame_size;
+    InterruptFrame *frame = (InterruptFrame *)(u64) frame_address;
+    InterruptStackFrame *stack = (InterruptStackFrame *) ((u8 *)frame + sizeof(InterruptFrame));
+
+    k_memset((void *)(u64)frame_address, 0, (usize)frame_size);
+
+    frame->rip = rip;
+    frame->cs = cs;
+    frame->rflags = rflags;
+
+    stack->rsp = return_rsp;
+    stack->ss = return_ss;
+
+    thread->interrupt_rsp = frame_address;
+    thread->interrupt_context_ready = true;
 
     return true;
 }
 
-bool thread_prepare_user(Thread *thread, u64 user_rip, u64 user_rsp) {
-    if (!g_initialized || !thread || thread == g_current_thread || !thread->id || !thread->address_space || thread->address_space->kernel || thread->state != THREAD_STATE_READY || !thread->owns_kernel_stack || thread->context_ready) return false;
+bool thread_prepare_kernel(Thread *thread, ThreadEntry entry, void *argument) {
+    if (!g_initialized || !thread || thread == g_current_thread || !thread->id || !entry || thread->state != THREAD_STATE_READY || !thread->owns_kernel_stack) return false;
     if (!thread->kernel_stack_base || !thread->kernel_stack_top || thread->kernel_stack_top <= thread->kernel_stack_base) return false;
     if (thread->kernel_stack_top & 0xFULL) return false;
+    if (thread->kernel_stack_top - thread->kernel_stack_base < sizeof(u64)) return false;
+
+    if (thread->interrupt_context_ready || thread->interrupt_rsp) return false;
+    
+    /*
+    * Reserve the normal SysV function-entry
+    * return slot for the kernel trampoline.
+    */
+    u64 initial_rsp = thread->kernel_stack_top - sizeof(u64);
+
+    thread->entry = entry;
+    thread->argument = argument;
+
+    if (!thread_build_interrupt_context(thread, 
+        (u64)(void *) thread_kernel_trampoline, 
+        GDT_KERNEL_CODE_SELECTOR, 0x202ULL,
+        initial_rsp,
+        GDT_KERNEL_DATA_SELECTOR)) 
+    {
+
+        thread->entry = 0;
+        thread->argument = 0;
+
+        return false;
+    }
+    return true;
+}
+
+bool thread_prepare_user(Thread *thread, u64 user_rip, u64 user_rsp) {
+    if (!g_initialized || !thread || thread == g_current_thread || !thread->id || !thread->address_space || thread->address_space->kernel || thread->state != THREAD_STATE_READY || !thread->owns_kernel_stack) return false;
+    if (!thread->kernel_stack_base || !thread->kernel_stack_top || thread->kernel_stack_top <= thread->kernel_stack_base) return false;
+    if (thread->kernel_stack_top & 0xFULL) return false;
+    if (thread->interrupt_context_ready || thread->interrupt_rsp) return false;
     if (user_rip < ADDRESS_SPACE_USER_BASE || user_rip >= ADDRESS_SPACE_USER_LIMIT) return false;
     if (user_rsp <= ADDRESS_SPACE_USER_BASE || user_rsp > ADDRESS_SPACE_USER_LIMIT) return false;
 
@@ -84,23 +114,22 @@ bool thread_prepare_user(Thread *thread, u64 user_rip, u64 user_rsp) {
     if (!address_space_query_page(thread->address_space, stack_page, &stack_frame, &stack_flags)) return false;
     if (!(stack_flags & VM_USER) || !(stack_flags & VM_WRITE)) return false;
 
-    k_memset(&thread->context, 0, sizeof(thread->context));
-
     thread->entry = 0;
     thread->argument = 0;
-    thread->user_rip = user_rip;
-    thread->user_rsp = user_rsp;
 
-    /* We JMP into the trampoline rather than CALL it, so synthesize the usual SysV entry alignment. */
-    u64 initial_rsp = thread->kernel_stack_top - sizeof(u64);
-
-    *(u64 *)(u64)initial_rsp = 0;
-
-    thread->context.rsp = initial_rsp;
-    thread->context.rip = (u64)(void *) thread_user_trampoline;
-    thread->context_ready = true;
-
-    return true;
+    /*
+    * Scheduled user threads begin directly in
+    * Ring3 through their synthetic IRET frame.
+    */
+    return
+        thread_build_interrupt_context(
+            thread,
+            user_rip,
+            GDT_USER_CODE_SELECTOR,
+            0x202ULL,
+            user_rsp,
+            GDT_USER_DATA_SELECTOR
+        );
 }
 
 static bool release_kernel_stack(u64 physical, u64 size) {
@@ -187,35 +216,6 @@ bool thread_activate(Thread *thread) {
     return true;
 }
 
-bool thread_switch(Thread *next) {
-    if (!g_initialized || !g_current_thread || !next || !next->id) return false;
-
-    Thread *previous = g_current_thread;
-
-    if (next == previous) return true;
-    if (!next->context_ready || next->state != THREAD_STATE_READY) return false;
-
-    /*
-     * Installs:
-     *
-     *   current thread
-     *   CR3
-     *   TSS.RSP0
-     *   thread states
-     *
-     * Interrupts must already be disabled.
-     */
-    if (!thread_activate(next)) return false;
-
-    /* The outgoing context becomes resumable once arch_context_switch stores it. */
-    previous->context_ready = true;
-
-    arch_context_switch(&previous->context, &next->context);
-
-    /* Reached only when another thread later switches back to this one. */
-    return true;
-}
-
 bool thread_create(Thread *thread, AddressSpace *address_space) {
     if (!g_initialized || !thread || thread == g_current_thread || !address_space || !address_space_cr3(address_space) || !g_next_thread_id) return false;
 
@@ -263,22 +263,10 @@ bool thread_create(Thread *thread, AddressSpace *address_space) {
 }
 
 bool thread_destroy(Thread *thread) {
-    if (!g_initialized || 
-        !thread || 
-        thread == g_current_thread || 
-        !thread->id || 
-        thread->state == THREAD_STATE_INVALID || 
-        thread->state == THREAD_STATE_RUNNING || 
-        thread->on_run_queue) {
-        return false;
-    }
+    if (!g_initialized || !thread || thread == g_current_thread || !thread->id || thread->state == THREAD_STATE_INVALID || thread->state == THREAD_STATE_RUNNING || thread->on_run_queue) return false;
 
     bool result = true;
-    if (thread->owns_kernel_stack) {
-        result = release_kernel_stack(thread->kernel_stack_physical, thread->kernel_stack_size);
-    }
-
-    k_memset(&thread->context, 0, sizeof(thread->context));
+    if (thread->owns_kernel_stack) result = release_kernel_stack(thread->kernel_stack_physical, thread->kernel_stack_size);
 
     thread->address_space = 0;
     thread->entry = 0;
@@ -288,11 +276,12 @@ bool thread_destroy(Thread *thread) {
     thread->kernel_stack_top = 0;
     thread->kernel_stack_size = 0;
     thread->owns_kernel_stack = false;
-    thread->context_ready = false;
     thread->run_next = 0;
     thread->on_run_queue = false;
     thread->id = 0;
     thread->state = THREAD_STATE_DEAD;
+    thread->interrupt_rsp = 0;
+    thread->interrupt_context_ready = false;
 
     return result;
 }

@@ -28,8 +28,7 @@ GLOBAL arch_reload_segments
 GLOBAL arch_load_tr
 GLOBAL arch_read_tr
 GLOBAL arch_enter_user
-GLOBAL arch_context_switch
-GLOBAL arch_context_enter
+GLOBAL arch_reschedule_interrupt
 GLOBAL isr_stub_offsets
 EXTERN kernel_main
 EXTERN interrupt_dispatch
@@ -243,72 +242,17 @@ arch_enter_user:
 
     ud2
 
-arch_context_switch:
+arch_reschedule_interrupt:
     ;
-    ; SysV ABI:
+    ; RDI = scheduler operation.
     ;
-    ; RDI = old CpuContext *
-    ; RSI = new CpuContext *
+    ; RAX is part of InterruptFrame, the
+    ; scheduler can inspect it and can 
+    ; place a return result there.
     ;
-    ; CpuContext:
-    ;
-    ;   +0   RBX
-    ;   +8   RBP
-    ;   +16  R12
-    ;   +24  R13
-    ;   +32  R14
-    ;   +40  R15
-    ;   +48  RSP
-    ;   +56  RIP
-    ;
-
-    mov [rdi + 0], rbx
-    mov [rdi + 8], rbp
-    mov [rdi + 16], r12
-    mov [rdi + 24], r13
-    mov [rdi + 32], r14
-    mov [rdi + 40], r15
-
-    mov [rdi + 48], rsp
-
-    lea rax, [rel .resume]
-    mov [rdi + 56], rax
-
-
-    mov rbx, [rsi + 0]
-    mov rbp, [rsi + 8]
-    mov r12, [rsi + 16]
-    mov r13, [rsi + 24]
-    mov r14, [rsi + 32]
-    mov r15, [rsi + 40]
-
-    mov rsp, [rsi + 48]
-
-    jmp qword [rsi + 56]
-
-.resume:
+    mov rax, rdi
+    int 0x81
     ret
-
-arch_context_enter:
-    ;
-    ; SysV ABI:
-    ;
-    ; RDI = CpuContext *
-    ;
-    ; This is a one-way context handoff.
-    ; The current context is deliberately lost.
-    ;
-
-    mov rbx, [rdi + 0]
-    mov rbp, [rdi + 8]
-    mov r12, [rdi + 16]
-    mov r13, [rdi + 24]
-    mov r14, [rdi + 32]
-    mov r15, [rdi + 40]
-
-    mov rsp, [rdi + 48]
-
-    jmp qword [rdi + 56]
 
 isr_stub_0:
     push qword 0
@@ -545,6 +489,11 @@ isr_stub_128:
     push qword 128
     jmp isr_common
 
+isr_stub_129:
+    push qword 0
+    push qword 129
+    jmp isr_common
+
 isr_stub_255:
     push qword 0
     push qword 255
@@ -567,11 +516,24 @@ isr_common:
     push rcx
     push rbx
     push rax
-    mov r12, rsp
+
+    ;
+    ; interrupt_dispatch(frame) returns the
+    ; InterruptFrame that is to be restored.
+    ;
     mov rdi, rsp
     and rsp, -16
     call interrupt_dispatch
-    mov rsp, r12
+
+    test rax, rax
+    jz cpu_halt_forever
+
+    ;
+    ; This may be the frame from an entirely
+    ; different thread/kernel stack.
+    ;
+    mov rsp, rax
+
     pop rax
     pop rbx
     pop rcx
@@ -587,6 +549,7 @@ isr_common:
     pop r13
     pop r14
     pop r15
+
     add rsp, 16
     iretq
 
@@ -641,4 +604,5 @@ isr_stub_offsets:
     dd isr_stub_46 - isr_stub_offsets
     dd isr_stub_47 - isr_stub_offsets
     dd isr_stub_128 - isr_stub_offsets
+    dd isr_stub_129 - isr_stub_offsets
     dd isr_stub_255 - isr_stub_offsets

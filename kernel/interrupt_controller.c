@@ -35,7 +35,7 @@ static void io_wait(void) {
 }
 
 static void pic_mask_all(void) {
-    arch_out8(PIC1_DATA, 0xFF);
+    arch_out8(PIC1_DATA, 0xFF); 
     arch_out8(PIC2_DATA, 0xFF);
 }
 
@@ -48,7 +48,7 @@ static void pic_initialize_keyboard(void) {
     arch_out8(PIC2_DATA, 0x02); io_wait();
     arch_out8(PIC1_DATA, 0x01); io_wait();
     arch_out8(PIC2_DATA, 0x01); io_wait();
-    arch_out8(PIC1_DATA, 0xFD); /* Unmask IRQ1 only. */
+    arch_out8(PIC1_DATA, 0xFD); /* Unmask IRQ1 only. */ 
     arch_out8(PIC2_DATA, 0xFF);
 }
 
@@ -85,13 +85,13 @@ static bool lapic_initialize(const AcpiInfo *acpi) {
     if (!g_info.x2apic && !g_lapic_base) return false;
 
     g_info.local_apic_id = g_info.x2apic ? lapic_read(0x020) : (lapic_read(0x020) >> 24);
-    lapic_write(LAPIC_TPR, 0);
-    lapic_write(LAPIC_LVT_TIMER, LAPIC_LVT_MASKED | 0xFEU);
-    lapic_write(LAPIC_LVT_THERMAL, LAPIC_LVT_MASKED | 0xFEU);
-    lapic_write(LAPIC_LVT_PERF, LAPIC_LVT_MASKED | 0xFEU);
+    lapic_write(LAPIC_TPR, 0); 
+    lapic_write(LAPIC_LVT_TIMER, LAPIC_LVT_MASKED | 0xFEU); 
+    lapic_write(LAPIC_LVT_THERMAL, LAPIC_LVT_MASKED | 0xFEU); 
+    lapic_write(LAPIC_LVT_PERF, LAPIC_LVT_MASKED | 0xFEU); 
     lapic_write(LAPIC_LVT_LINT0, LAPIC_LVT_MASKED);
-    lapic_write(LAPIC_LVT_LINT1, LAPIC_LVT_MASKED);
-    lapic_write(LAPIC_LVT_ERROR, LAPIC_LVT_MASKED | 0xFEU);
+    lapic_write(LAPIC_LVT_LINT1, LAPIC_LVT_MASKED); 
+    lapic_write(LAPIC_LVT_ERROR, LAPIC_LVT_MASKED | 0xFEU); 
     lapic_write(LAPIC_SIVR, (1U << 8) | SPURIOUS_VECTOR);
     return true;
 }
@@ -118,7 +118,7 @@ static void ioapic_mask_all(const AcpiIoApic *io) {
     u32 count = ioapic_redirection_count(io->address);
     for (u32 pin = 0; pin < count; ++pin) {
         u8 low = (u8)(0x10 + pin * 2);
-        ioapic_write(io->address, (u8)(low + 1), 0);
+        ioapic_write(io->address, (u8)(low + 1), 0); 
         ioapic_write(io->address, low, LAPIC_LVT_MASKED | 0x20U);
     }
 }
@@ -146,7 +146,7 @@ static bool ioapic_route_keyboard(const AcpiInfo *acpi) {
     if (trigger == 3U) low |= (1U << 15);  /* Level triggered. */
     u32 high = (g_info.local_apic_id & 0xFFU) << 24;
     u8 reg = (u8)(0x10 + pin * 2);
-    ioapic_write(target->address, (u8)(reg + 1), high);
+    ioapic_write(target->address, (u8)(reg + 1), high); 
     ioapic_write(target->address, reg, low);
     return true;
 }
@@ -200,4 +200,23 @@ const char *interrupt_controller_name(void) {
     if (g_info.mode == INTERRUPT_CONTROLLER_APIC) return g_info.x2apic ? "X2APIC + IOAPIC" : "XAPIC + IOAPIC";
     if (g_info.mode == INTERRUPT_CONTROLLER_PIC) return "8259 PIC FALLBACK";
     return "NONE";
+}
+
+bool interrupt_controller_unmask_legacy_irq(u8 irq) {
+    if (g_info.mode != INTERRUPT_CONTROLLER_PIC || irq >= 16U) return false;
+    if (irq < 8U) {
+        u8 mask = arch_in8(PIC1_DATA);
+        mask &= (u8)~(1U << irq);
+        arch_out8(PIC1_DATA, mask);
+        return true;
+    }
+    /* Slave IRQs require the master cascade line, IRQ2, to be enabled as well. */
+    u8 master_mask = arch_in8(PIC1_DATA);
+    master_mask &= (u8)~(1U << 2);
+    arch_out8(PIC1_DATA, master_mask);
+
+    u8 slave_mask = arch_in8(PIC2_DATA);
+    slave_mask &= (u8)~(1U << (irq - 8U));
+    arch_out8(PIC2_DATA, slave_mask);
+    return true;
 }

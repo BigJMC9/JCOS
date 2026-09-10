@@ -23,6 +23,7 @@
 #include "fat32.h"
 #include "thread.h"
 #include "scheduler.h"
+#include "timer.h"
 #include "splash.h"
 
 #define CR4_LA57 (1ULL << 12)
@@ -446,6 +447,7 @@ void kernel_main(BootInfo *boot) {
         terminal_set_color(terminal_default_color());
         cpu_halt_forever();
     }
+    bool timer_ok = timer_init(100U);
 
     splash_progress(85);
     bool keyboard_ok = (!acpi->i8042_known || acpi->i8042_present) ? ps2_init() : false;
@@ -502,6 +504,15 @@ void kernel_main(BootInfo *boot) {
     terminal_writeln( ahci_ok ? "DETECTED" : "NOT DETECTED");
     terminal_write("THREADS: "); terminal_writeln( thread_ok ? "READY" : "FAILED");
     terminal_write("SCHEDULER: "); terminal_writeln(scheduler_ok ? "READY" : "FAILED");
+    terminal_write("TIMER: ");
+    if (timer_ok) {
+        terminal_write("PIT ");
+        terminal_write_u64(timer_frequency());
+        terminal_writeln(" HZ");
+    } 
+    else {
+        terminal_writeln("FAILED");
+    }
     terminal_write("PS/2: "); terminal_write(keyboard_ok ? "DETECTED" : "NOT DETECTED");
     terminal_write("  COM1: ");
     terminal_writeln(serial_available() ? "READY" : "NOT DETECTED");

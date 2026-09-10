@@ -26,8 +26,7 @@
 .global arch_load_tr
 .global arch_read_tr
 .global arch_enter_user
-.global arch_context_switch
-.global arch_context_enter
+.global arch_reschedule_interrupt
 .global isr_stub_offsets
 .extern kernel_main
 .extern interrupt_dispatch
@@ -213,56 +212,13 @@ arch_enter_user:
 
     ud2
 
-arch_context_switch:
+arch_reschedule_interrupt:
     /*
-     * rdi = old CpuContext *
-     * rsi = new CpuContext *
+     * RDI = scheduler operation.
      */
-
-    mov QWORD PTR [rdi + 0], rbx
-    mov QWORD PTR [rdi + 8], rbp
-    mov QWORD PTR [rdi + 16], r12
-    mov QWORD PTR [rdi + 24], r13
-    mov QWORD PTR [rdi + 32], r14
-    mov QWORD PTR [rdi + 40], r15
-
-    mov QWORD PTR [rdi + 48], rsp
-
-    lea rax, [rip + .Lcontext_resume]
-    mov QWORD PTR [rdi + 56], rax
-
-
-    mov rbx, QWORD PTR [rsi + 0]
-    mov rbp, QWORD PTR [rsi + 8]
-    mov r12, QWORD PTR [rsi + 16]
-    mov r13, QWORD PTR [rsi + 24]
-    mov r14, QWORD PTR [rsi + 32]
-    mov r15, QWORD PTR [rsi + 40]
-
-    mov rsp, QWORD PTR [rsi + 48]
-
-    jmp QWORD PTR [rsi + 56]
-
-.Lcontext_resume:
+    mov rax, rdi
+    int 0x81
     ret
-
-arch_context_enter:
-    /*
-     * rdi = CpuContext *
-     *
-     * One-way context handoff.
-     */
-
-    mov rbx, QWORD PTR [rdi + 0]
-    mov rbp, QWORD PTR [rdi + 8]
-    mov r12, QWORD PTR [rdi + 16]
-    mov r13, QWORD PTR [rdi + 24]
-    mov r14, QWORD PTR [rdi + 32]
-    mov r15, QWORD PTR [rdi + 40]
-
-    mov rsp, QWORD PTR [rdi + 48]
-
-    jmp QWORD PTR [rdi + 56]
 
 isr_stub_0:
     push 0
@@ -499,6 +455,11 @@ isr_stub_128:
     push 128
     jmp isr_common
 
+isr_stub_129:
+    push 0
+    push 129
+    jmp isr_common
+
 isr_stub_255:
     push 0
     push 255
@@ -521,11 +482,20 @@ isr_common:
     push rcx
     push rbx
     push rax
-    mov r12, rsp
+    /*
+     * interrupt_dispatch(frame) returns the
+     * InterruptFrame that is to be restored.
+     */
     mov rdi, rsp
     and rsp, -16
     call interrupt_dispatch
-    mov rsp, r12
+    test rax, rax
+    jz cpu_halt_forever
+    /*
+     * RAX may point into another thread's
+     * kernel stack.
+     */
+    mov rsp, rax
     pop rax
     pop rbx
     pop rcx
@@ -595,6 +565,7 @@ isr_stub_offsets:
     .long isr_stub_46 - isr_stub_offsets
     .long isr_stub_47 - isr_stub_offsets
     .long isr_stub_128 - isr_stub_offsets
+    .long isr_stub_129 - isr_stub_offsets
     .long isr_stub_255 - isr_stub_offsets
 
 .section .note.GNU-stack,"",@progbits

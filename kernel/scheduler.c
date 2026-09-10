@@ -1,17 +1,45 @@
 #include "scheduler.h"
 #include "arch.h"
 
+typedef enum {
+    SCHEDULER_TRAP_INVALID = 0,
+    SCHEDULER_TRAP_YIELD = 1,
+    SCHEDULER_TRAP_BLOCK = 2,
+    SCHEDULER_TRAP_EXIT = 3
+} SchedulerTrapOperation;
+
 static Thread *g_run_head;
 static Thread *g_run_tail;
 
 static u64 g_run_count;
 static bool g_initialized;
 
+static u64 g_reschedule_count;
+static bool g_preemption_enabled;
+static u64 g_preemption_count;
+
+static bool scheduler_interrupt_frame_valid(const Thread *thread, const InterruptFrame *frame) {
+    if (!thread || 
+        !frame || 
+        !thread->kernel_stack_base || 
+        !thread->kernel_stack_top || 
+        thread->kernel_stack_top <= thread->kernel_stack_base
+    ) return false;
+
+    const u64 frame_size = sizeof(InterruptFrame) + sizeof(InterruptStackFrame);
+    if (thread->kernel_stack_size < frame_size) return false;
+
+    u64 address = (u64)(const void *)frame;
+    if (address < thread->kernel_stack_base) return false;
+    if (address > thread->kernel_stack_top - frame_size) return false;
+
+    return true;
+}
+
 bool scheduler_init(void) {
     if (g_initialized) return false;
 
     Thread *current = thread_current();
-
     if (!current || !current->id || current->state != THREAD_STATE_RUNNING || current->on_run_queue) return false;
 
     /* The bootstrap thread starts as the only runnable thread. */
@@ -22,19 +50,28 @@ bool scheduler_init(void) {
     g_run_tail = current;
     g_run_count = 1;
     g_initialized = true;
+    g_preemption_enabled = false;
+    g_preemption_count = 0;
+    g_reschedule_count = 0;
 
     return true;
 }
 
 bool scheduler_add(Thread *thread) {
-    if (!g_initialized || !thread || !thread->id || thread->on_run_queue || !thread->context_ready || thread->state != THREAD_STATE_READY) return false;
+    if (!g_initialized || 
+        !thread || 
+        !thread->id || 
+        thread->on_run_queue || 
+        thread->state != THREAD_STATE_READY || 
+        !thread->interrupt_context_ready || 
+        !thread->interrupt_rsp
+    ) return false;
+
+    InterruptFrame *frame = (InterruptFrame *)(u64) thread->interrupt_rsp;
+
+    if (!scheduler_interrupt_frame_valid(thread, frame)) return false;
     if (!g_run_head || !g_run_tail || !g_run_count) return false;
 
-    /*
-     * Circular run queue:
-     *
-     * tail -> new -> head
-     */
     thread->run_next = g_run_head;
     g_run_tail->run_next = thread;
     g_run_tail = thread;
@@ -78,8 +115,32 @@ static bool scheduler_unlink(Thread *thread) {
     return true;
 }
 
+static bool scheduler_find_next_interrupt_thread(Thread *current, Thread **out_thread, InterruptFrame **out_frame) {
+    if (!current || 
+        !out_thread || 
+        !out_frame || 
+        !current->run_next || 
+        g_run_count < 2
+    )   return false;
+
+    Thread *candidate = current->run_next;
+    for (u64 inspected = 0; inspected + 1ULL < g_run_count; ++inspected) {
+        if (!candidate) return false;
+        if (candidate != current && candidate->on_run_queue && candidate->state == THREAD_STATE_READY && candidate-> interrupt_context_ready && candidate->interrupt_rsp) {
+            InterruptFrame *saved = (InterruptFrame *)(u64) candidate-> interrupt_rsp;
+            if (scheduler_interrupt_frame_valid(candidate, saved)) {
+                *out_thread = candidate;
+                *out_frame = saved;
+                return true;
+            }
+        }
+        candidate = candidate->run_next;
+    }
+    return false;
+}
+
 bool scheduler_remove(Thread *thread) {
-   if (!g_initialized || !thread || !thread->on_run_queue) return false;
+    if (!g_initialized || !thread || !thread->on_run_queue) return false;
     if (thread == thread_current()) return false;
     return scheduler_unlink(thread);
 }
@@ -88,97 +149,47 @@ bool scheduler_yield(void) {
     if (!g_initialized || !g_run_head || !g_run_tail || !g_run_count) return false;
 
     Thread *current = thread_current();
-    if (!current || !current->on_run_queue || current->state != THREAD_STATE_RUNNING || !current->run_next) return false;
+    if (!current || 
+        !current->id || 
+        !current->on_run_queue || 
+        current->state != THREAD_STATE_RUNNING || 
+        !current->run_next
+    )   return false;
 
-    /* Search forward in round-robin order for another READY thread. */
-    Thread *candidate = current->run_next;
-    for (u64 inspected = 0; inspected + 1ULL < g_run_count; ++inspected) {
-        if (!candidate) return false;
-        if (candidate != current && candidate->on_run_queue && candidate->context_ready && candidate->state == THREAD_STATE_READY) return thread_switch(candidate);
-
-        candidate = candidate->run_next;
-    }
-    /* No other runnable thread. */
-    return true;
+    /* Yielding with nobody else runnable is a successful no-op. */
+    if (g_run_count == 1) return true;
+    return arch_reschedule_interrupt(SCHEDULER_TRAP_YIELD) != 0;
 }
 
 bool scheduler_block_current(void) {
     if (!g_initialized || !g_run_head || !g_run_tail || g_run_count < 2) return false;
 
-    Thread *blocked = thread_current();
+    Thread *current = thread_current();
+    if (!current || 
+        !current->id || 
+        !current->on_run_queue || 
+        current->state != THREAD_STATE_RUNNING || 
+        !current->run_next
+    )   return false;
 
-    if (!blocked || !blocked->id || !blocked->on_run_queue || blocked->state != THREAD_STATE_RUNNING || !blocked->run_next) return false;
-
-    /*
-     * Find another runnable thread.
-     *
-     * Its context must already be enterable.
-     */
-    Thread *candidate = blocked->run_next;
-    Thread *chosen = 0;
-
-    for (u64 inspected = 0; inspected + 1ULL < g_run_count; ++inspected) {
-        if (!candidate) return false;
-        if (candidate != blocked && candidate->on_run_queue && candidate->context_ready && candidate->state == THREAD_STATE_READY) {
-
-            chosen = candidate;
-            break;
-        }
-        candidate = candidate->run_next;
-    }
-
-    if (!chosen) return false;
-
-    /*
-     * First install the target thread's:
-     *
-     *   current-thread identity
-     *   CR3
-     *   TSS.RSP0
-     *
-     * thread_activate() temporarily changes
-     * blocked from RUNNING to READY.
-     */
-    if (!thread_activate(chosen)) return false;
-
-    /*
-     * Still executing on blocked's
-     * kernel stack, but chosen is now the
-     * architectural current thread.
-     *
-     * Interrupts must remain disabled across
-     * this transition.
-     */
-    if (!scheduler_unlink(blocked)) cpu_halt_forever();
-
-    blocked->state = THREAD_STATE_BLOCKED;
-
-    /* arch_context_switch() is about to save the continuation at this exact point. */
-    blocked->context_ready = true;
-    arch_context_switch(&blocked->context, &chosen->context);
-
-    /* Reached only after scheduler_wake() made this thread READY again and a later scheduler switch selected it. */
-    return thread_current() == blocked && blocked->state == THREAD_STATE_RUNNING && blocked->on_run_queue;
+    /* On success this INT does not return until scheduler_wake() makes us READY and the scheduler selects this saved frame again. */
+    return arch_reschedule_interrupt(SCHEDULER_TRAP_BLOCK) != 0;
 }
 
 bool scheduler_wake(Thread *thread) {
-    if (!g_initialized ||
-        !thread ||
-        !thread->id ||
-        thread == thread_current() ||
-        thread->on_run_queue ||
-        thread->run_next ||
-        !thread->context_ready ||
-        thread->state != THREAD_STATE_BLOCKED) {
+    if (!g_initialized || 
+        !thread || 
+        !thread->id || 
+        thread == thread_current() || 
+        thread->on_run_queue || 
+        thread->run_next || 
+        !thread-> interrupt_context_ready || 
+        !thread->interrupt_rsp || 
+        thread->state != THREAD_STATE_BLOCKED
+    )   return false;
 
-        return false;
-    }
-
-    /*
-     * scheduler_add() accepts READY threads.
-     * Restore BLOCKED if insertion somehow
-     * fails.
-     */
+    InterruptFrame *frame = (InterruptFrame *)(u64) thread->interrupt_rsp;
+    if (!scheduler_interrupt_frame_valid(thread, frame)) return false;
     thread->state = THREAD_STATE_READY;
     if (!scheduler_add(thread)) {
         thread->state = THREAD_STATE_BLOCKED;
@@ -191,53 +202,227 @@ u64 scheduler_thread_count(void) {
     return g_initialized ? g_run_count : 0;
 }
 
-NORETURN void scheduler_exit_current(void) {
-    if (!g_initialized || !g_run_head || !g_run_tail || g_run_count < 2) cpu_halt_forever();
+bool scheduler_preemption_enable(void) {
+    if (!g_initialized || 
+        g_preemption_enabled || 
+        !g_run_head || 
+        !g_run_tail || 
+        g_run_count < 2
+    )    return false;
 
-    Thread *dying = thread_current();
-    if (!dying || !dying->id || !dying->on_run_queue || dying->state != THREAD_STATE_RUNNING || !dying->run_next) cpu_halt_forever();
+    Thread *current = thread_current();
+    if (!current || 
+        !current->id || 
+        !current->on_run_queue || 
+        current->state != THREAD_STATE_RUNNING
+    )   return false;
 
-    /* Find another READY thread whose saved context can actually be entered. */
-    Thread *next = dying->run_next;
-    Thread *chosen = 0;
+    bool saw_current = false;
+    Thread *thread = g_run_head;
+    /*
+     * Every non-running thread must already
+     * have a valid interrupt-return context.
+     *
+     * The running thread does not need one:
+     * its first PIT interrupt creates it.
+     */
+    for (u64 i = 0; i < g_run_count; ++i) {
+        if (!thread || !thread->id || !thread->on_run_queue || !thread->run_next) return false;
+        if (thread == current) {
+            if (saw_current || thread->state != THREAD_STATE_RUNNING) return false;
 
-    for (u64 inspected = 0; inspected + 1ULL < g_run_count; ++inspected) {
-        if (!next) cpu_halt_forever();
-        if (next != dying && next->on_run_queue && next->state == THREAD_STATE_READY && next->context_ready) {
-            chosen = next;
-            break;
+            saw_current = true;
+        } 
+        else {
+            if (thread->state != THREAD_STATE_READY || !thread-> interrupt_context_ready || !thread->interrupt_rsp) return false;
+            InterruptFrame *frame = (InterruptFrame *)(u64) thread->interrupt_rsp;
+            if (!scheduler_interrupt_frame_valid(thread, frame)) return false;
         }
-        next = next->run_next;
+        thread = thread->run_next;
+    }
+    if (!saw_current) return false;
+    g_preemption_enabled = true;
+    return true;
+}
+
+bool scheduler_preemption_disable(void) {
+    if (!g_initialized || !g_preemption_enabled) return false;
+    g_preemption_enabled = false;
+    return true;
+}
+
+bool scheduler_preemption_enabled(void) {
+    return g_initialized && g_preemption_enabled;
+}
+
+u64 scheduler_preemption_count(void) {
+    return g_initialized ? g_preemption_count : 0;
+}
+
+static InterruptFrame *scheduler_switch_ready_from_interrupt(InterruptFrame *frame, bool timer_preemption) {
+    if (!frame || 
+        !g_initialized || 
+        !g_run_head || 
+        !g_run_tail || 
+        g_run_count < 2
+    )   return frame;
+
+    Thread *current = thread_current();
+    if (!current || 
+        !current->id || 
+        !current->on_run_queue || 
+        current->state != THREAD_STATE_RUNNING || 
+        !current->run_next
+    )    return frame;
+    if (!scheduler_interrupt_frame_valid(current, frame)) return frame;
+
+    Thread *chosen = 0;
+    InterruptFrame *chosen_frame = 0;
+
+    if (!scheduler_find_next_interrupt_thread(current, &chosen, &chosen_frame)) {
+        /* A software yield with nobody eligible is still a successful no-op. */
+        if (!timer_preemption) frame->rax = 1;
+        return frame;
     }
 
-    if (!chosen) cpu_halt_forever();
+    if (!timer_preemption) frame->rax = 1;
+    current->interrupt_rsp = (u64)(void *)frame;
+    current->interrupt_context_ready = true;
 
-    /*
-     * This installs:
-     *
-     *   chosen CR3
-     *   chosen TSS.RSP0
-     *   chosen as current
-     *
-     * It temporarily changes dying from
-     * RUNNING to READY.
-     */
+    if (!thread_activate(chosen)) {
+        current->interrupt_rsp = 0;
+        current->interrupt_context_ready = false;
+        if (!timer_preemption) frame->rax = 0;
+        return frame;
+    }
+
+    /* chosen_frame is now being consumed. */
+    chosen->interrupt_rsp = 0;
+    chosen->interrupt_context_ready = false;
+
+    if (timer_preemption) ++g_preemption_count;
+    else ++g_reschedule_count;
+
+    return chosen_frame;
+}
+
+static InterruptFrame *scheduler_block_from_interrupt(InterruptFrame *frame) {
+    if (!frame) return frame;
+    frame->rax = 0;
+
+    if (!g_initialized || !g_run_head || !g_run_tail || g_run_count < 2) return frame;
+
+    Thread *blocked = thread_current();
+    if (!blocked || !blocked->id || !blocked->on_run_queue || blocked->state != THREAD_STATE_RUNNING || !blocked->run_next || !scheduler_interrupt_frame_valid(blocked, frame)) return frame;
+
+    Thread *chosen = 0;
+    InterruptFrame *chosen_frame = 0;
+    if (!scheduler_find_next_interrupt_thread(blocked, &chosen, &chosen_frame)) return frame;
+
+    frame->rax = 1;
+    blocked->interrupt_rsp = (u64)(void *)frame;
+    blocked->interrupt_context_ready = true;
+
+    /* thread_activate temporarily changes blocked RUNNING -> READY. */
+    if (!thread_activate(chosen)) {
+        blocked->interrupt_rsp = 0;
+        blocked->interrupt_context_ready = false;
+        frame->rax = 0;
+        return frame;
+    }
+
+    /* We have already changed architectural current to chosen. Failure here is an internal scheduler invariant failure. */
+    if (!scheduler_unlink(blocked)) cpu_halt_forever();
+
+    blocked->state = THREAD_STATE_BLOCKED;
+    chosen->interrupt_rsp = 0;
+    chosen->interrupt_context_ready = false;
+    ++g_reschedule_count;
+    return chosen_frame;
+}
+
+static InterruptFrame *scheduler_exit_from_interrupt(InterruptFrame *frame, bool count_reschedule) {
+    if (!frame || 
+        !g_initialized || 
+        !g_run_head || 
+        !g_run_tail || 
+        g_run_count < 2
+    )   cpu_halt_forever();
+
+    Thread *dying = thread_current();
+    if (!dying || 
+        !dying->id || 
+        !dying->on_run_queue || 
+        dying->state != THREAD_STATE_RUNNING || 
+        !dying->run_next || 
+        !scheduler_interrupt_frame_valid(dying, frame)
+    )    cpu_halt_forever();
+
+    Thread *chosen = 0;
+    InterruptFrame *chosen_frame = 0;
+
+    if (!scheduler_find_next_interrupt_thread(dying, &chosen, &chosen_frame)) cpu_halt_forever();
+
+    /* The dying frame is deliberately NOT retained as a resumable context. */
     if (!thread_activate(chosen)) cpu_halt_forever();
-
-    /* thread_current() is now chosen, so the dying thread may safely leave the queue. */
     if (!scheduler_unlink(dying)) cpu_halt_forever();
 
     dying->state = THREAD_STATE_DEAD;
+    dying->interrupt_rsp = 0;
+    dying->interrupt_context_ready = false;
 
-    /* Its old cooperative context must never become runnable again. */
-    dying->context_ready = false;
+    chosen->interrupt_rsp = 0;
+    chosen->interrupt_context_ready = false;
 
-    /*
-     * Do not free dying->kernel_stack here.
-     *
-     * We are still physically executing on it
-     * until arch_context_enter changes RSP.
-     */
-    arch_context_enter(&chosen->context);
+    if (count_reschedule) ++g_reschedule_count;
+    
+    return chosen_frame;
+}
+
+InterruptFrame *scheduler_reschedule(InterruptFrame *frame) {
+    if (!frame) return 0;
+    SchedulerTrapOperation operation = (SchedulerTrapOperation) frame->rax;
+
+    switch (operation) {
+        case SCHEDULER_TRAP_YIELD:
+            return scheduler_switch_ready_from_interrupt(frame, false);
+        case SCHEDULER_TRAP_BLOCK:
+            return scheduler_block_from_interrupt(frame);
+        case SCHEDULER_TRAP_EXIT:
+            return scheduler_exit_from_interrupt(frame, true);
+        case SCHEDULER_TRAP_INVALID:
+        default:
+            frame->rax = 0;
+            return frame;
+    }
+}
+
+InterruptFrame *scheduler_preempt(InterruptFrame *frame) {
+    if (!frame || !g_preemption_enabled) return frame;
+
+    return scheduler_switch_ready_from_interrupt(frame, true);
+}
+
+u64 scheduler_reschedule_count(void) {
+    return g_initialized ? g_reschedule_count : 0;
+}
+
+InterruptFrame *scheduler_terminate_current_from_interrupt(InterruptFrame *frame) {
+    return scheduler_exit_from_interrupt(frame, false);
+}
+
+NORETURN void scheduler_exit_current(void) {
+    if (!g_initialized || !g_run_head || !g_run_tail || g_run_count < 2) cpu_halt_forever();
+
+    Thread *current = thread_current();
+
+    if (!current || 
+        !current->id || 
+        !current->on_run_queue || 
+        current->state != THREAD_STATE_RUNNING
+    )    cpu_halt_forever();
+
+    /* Successful EXIT never restores this frame, so this call never returns. */
+    (void)arch_reschedule_interrupt(SCHEDULER_TRAP_EXIT);
     cpu_halt_forever();
 }

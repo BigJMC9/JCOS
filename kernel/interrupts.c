@@ -7,6 +7,8 @@
 #include "thread.h"
 #include "syscall.h"
 #include "scheduler.h"
+#include "timer.h"
+#include "gdt.h"
 
 typedef struct PACKED {
     u16 offset_low;
@@ -73,7 +75,9 @@ void idt_init(bool tss_ready) {
         u8 ist = (tss_ready && vector == 8U) ? 1U : 0U;
         idt_set((u8)vector, handler, selector, ist, 0);
     }
-    idt_set(0x80, table + (s64)isr_stub_offsets[48], selector, 0, 3); idt_set(0xFF, table + (s64)isr_stub_offsets[49], selector, 0, 0);
+    idt_set(0x80, table + (s64)isr_stub_offsets[48], selector, 0, 3); 
+    idt_set(RESCHEDULE_VECTOR, table + (s64)isr_stub_offsets[49], selector, 0, 0);
+    idt_set(0xFF, table + (s64)isr_stub_offsets[50], selector, 0, 0);
     g_idtr.limit = (u16)(sizeof(g_idt) - 1);
     g_idtr.base = (u64)(void *)g_idt;
     arch_load_idt(&g_idtr);
@@ -118,7 +122,7 @@ static bool user_exception_is_terminable(u64 vector) {
     return vector == 6ULL || vector == 14ULL;
 }
 
-static NORETURN void user_exception_terminate(const InterruptFrame *frame) {
+static InterruptFrame *user_exception_terminate(InterruptFrame *frame) {
     interrupts_disable();
 
     Thread *thread = thread_current();
@@ -145,8 +149,8 @@ static NORETURN void user_exception_terminate(const InterruptFrame *frame) {
 
     terminal_set_color(terminal_error_color());
     terminal_writeln("\nUSER FAULT:");
-    terminal_write("VECTOR: ");
-    terminal_write_u64(frame->vector);
+    terminal_write("VECTOR: "); 
+    terminal_write_u64(frame->vector); 
     terminal_write(" (");
     exception_write_name(frame->vector);
     terminal_writeln(")");
@@ -164,36 +168,66 @@ static NORETURN void user_exception_terminate(const InterruptFrame *frame) {
     terminal_writeln("ACTION: THREAD TERMINATED");
     terminal_set_color(terminal_default_color());
 
-    /*
-     * This never returns.
-     *
-     * The trap frame and current kernel stack
-     * are deliberately abandoned.
-     */
-    scheduler_exit_current();
+    return scheduler_terminate_current_from_interrupt(frame);
 }
 
 static NORETURN void exception_panic(const InterruptFrame *frame) {
     interrupts_disable();
     terminal_set_color(terminal_error_color());
     terminal_writeln("\nCPU EXCEPTION:");
-    terminal_write("VECTOR: ");
-    terminal_write_u64(frame->vector);
-    terminal_write(" (");
+    terminal_write("VECTOR: "); terminal_write_u64(frame->vector); terminal_write(" (");
     exception_write_name(frame->vector);
     terminal_writeln(")");
     terminal_write("ERROR CODE: "); terminal_write_hex(frame->error_code); terminal_putchar('\n');
     terminal_write("RIP: "); terminal_write_hex(frame->rip); terminal_putchar('\n');
     terminal_write("CS: "); terminal_write_hex(frame->cs); terminal_putchar('\n');
     terminal_write("RFLAGS: "); terminal_write_hex(frame->rflags); terminal_putchar('\n');
+    Thread *fault_thread = thread_current();
+    terminal_write("FRAME PTR: "); terminal_write_hex((u64)(const void *)frame); terminal_putchar('\n');
+    terminal_write("CURRENT THREAD: ");
+    if (fault_thread) terminal_write_u64(fault_thread->id);
+    else terminal_write("NONE");
+    terminal_putchar('\n');
+    terminal_write("PREEMPTION: ");
+    terminal_writeln(scheduler_preemption_enabled() ? "ENABLED" : "DISABLED");
+    terminal_write("PREEMPTIONS: "); terminal_write_u64(scheduler_preemption_count()); terminal_putchar('\n');
+
+    if (fault_thread) {
+        terminal_write("THREAD STACK BASE: "); terminal_write_hex(fault_thread-> kernel_stack_base); terminal_putchar('\n');
+        terminal_write("THREAD STACK TOP: "); terminal_write_hex(fault_thread-> kernel_stack_top); terminal_putchar('\n');
+        terminal_write("THREAD INT RSP: "); terminal_write_hex(fault_thread-> interrupt_rsp); terminal_putchar('\n');
+        terminal_write("THREAD INT READY: ");
+        terminal_writeln(fault_thread-> interrupt_context_ready ? "YES" : "NO");
+    }
+    if (frame->vector == 8ULL) {
+        /*
+        * #DF uses IST1.
+        *
+        * An IST switch saves the previous RSP/SS
+        * even though CS.RPL is still 0.
+        */
+        const InterruptStackFrame *old_stack = (const InterruptStackFrame *) ((const u8 *)frame + sizeof(InterruptFrame));
+
+        terminal_write("DF IST1 NOW: "); terminal_write_hex(gdt_ist1()); terminal_putchar('\n');
+        terminal_write("DF OLD RSP: "); terminal_write_hex(old_stack->rsp); terminal_putchar('\n');
+        terminal_write("DF OLD SS: "); terminal_write_hex(old_stack->ss); terminal_putchar('\n');
+
+        /* CR2 is only authoritative for #PF, but during this controlled test its value is useful for detecting whether the first exception was caused by a page access. */
+        terminal_write("DF CR2 SNAPSHOT: "); terminal_write_hex(arch_read_cr2()); terminal_putchar('\n');
+
+        if (fault_thread) {
+            bool old_rsp_in_thread_stack = old_stack->rsp >= fault_thread->kernel_stack_base && old_stack->rsp <= fault_thread->kernel_stack_top;
+            terminal_write("DF OLD RSP IN THREAD STACK: ");
+            terminal_writeln(old_rsp_in_thread_stack ? "YES" : "NO");
+        }
+    }
     bool from_user = interrupt_from_user(frame);
     terminal_write("ORIGIN: ");
     terminal_writeln(from_user ? "USER" : "KERNEL");
     if (from_user) {
         const InterruptStackFrame *user = interrupt_user_stack(frame);
-        Thread *current = thread_current();
         terminal_write( "THREAD: ");
-        if (current) terminal_write_u64(current->id);
+        if (fault_thread) terminal_write_u64(fault_thread->id);
         else terminal_write("NONE");
         terminal_putchar('\n'); terminal_write("RAX: "); terminal_write_hex(frame->rax); terminal_putchar('\n');
         if (user) {
@@ -208,7 +242,7 @@ static NORETURN void exception_panic(const InterruptFrame *frame) {
     cpu_halt_forever();
 }
 
-void interrupt_dispatch(InterruptFrame *frame) {
+InterruptFrame *interrupt_dispatch(InterruptFrame *frame) {
     if (!frame) cpu_halt_forever();
     u8 vector = (u8)frame->vector;
     ++g_counts[vector];
@@ -218,28 +252,39 @@ void interrupt_dispatch(InterruptFrame *frame) {
             Thread *current = thread_current();
 
             /* Scheduler-managed user threads can be isolated. Transitional manual Ring3 probes still use the old panic. */
-            if (current && current->on_run_queue && current->state == THREAD_STATE_RUNNING && scheduler_thread_count() >= 2) user_exception_terminate(frame);
+            if (current && current->on_run_queue && current->state == THREAD_STATE_RUNNING && scheduler_thread_count() >= 2) {
+                return user_exception_terminate(frame);
+            }
         }
         exception_panic(frame);
     }
     if (vector == SYSCALL_VECTOR) {
         /* INT 0x80 entered through the DPL3 syscall gate and already switched to TSS.RSP0. */
         syscall_dispatch(frame);
-        return;
-    }   
+        return frame;
+    }
+    if (vector == RESCHEDULE_VECTOR) {
+        return scheduler_reschedule(frame);
+    }
+    if (vector == 0x20) {
+        timer_handle_irq();
+        interrupt_controller_eoi(vector);
+        return scheduler_preempt(frame);
+    }
     if (vector == 0x21) {
         ps2_handle_irq();
         interrupt_controller_eoi(vector);
-        return;
+        return frame;
     }
     if (vector >= 0x20 && vector <= 0x2F) {
         interrupt_controller_eoi(vector);
-        return;
+        return frame;
     }
     if (vector == 0xFF) {
         ++g_spurious;
-        return; /* A true local-APIC spurious interrupt receives no EOI. */
+        return frame; /* A true local-APIC spurious interrupt receives no EOI. */
     }
+    return frame; /* Unhandled interrupt. The CPU will resume execution at the interrupted instruction. */
 }
 
 void interrupts_enable(void) { arch_sti(); }

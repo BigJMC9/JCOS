@@ -4,7 +4,6 @@
 #include "types.h"
 #include "pmm.h"
 #include "address_space.h"
-#include "arch.h"
 
 #define THREAD_KERNEL_STACK_PAGES 4ULL
 #define THREAD_KERNEL_STACK_SIZE (THREAD_KERNEL_STACK_PAGES * FRAME_SIZE)
@@ -24,13 +23,10 @@ typedef struct Thread {
     AddressSpace *address_space;
     ThreadState state;
 
-    CpuContext context;
+    u64 interrupt_rsp;
 
     ThreadEntry entry;
     void *argument;
-
-    u64 user_rip;
-    u64 user_rsp;
     
     u64 kernel_stack_physical;
     u64 kernel_stack_base;
@@ -38,7 +34,7 @@ typedef struct Thread {
     u64 kernel_stack_size;
 
     bool owns_kernel_stack;
-    bool context_ready;
+    bool interrupt_context_ready;
 
     struct Thread *run_next;
     bool on_run_queue;
@@ -55,11 +51,6 @@ bool thread_prepare_user(
     u64 user_rip,
     u64 user_rsp
 );
-
-bool thread_switch(
-    Thread *next
-);
-
 
 /*
  * Adopt the currently executing boot thread.

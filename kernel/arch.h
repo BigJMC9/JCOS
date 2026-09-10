@@ -26,41 +26,12 @@ u64 arch_read_cr3(void);
 void arch_write_cr3(u64 value);
 u64 arch_read_cr4(void);
 
+u64 arch_reschedule_interrupt(u64 operation);
+
 typedef struct PACKED {
     u16 limit;
     u64 base;
 } ArchDescriptorTablePointer;
-
-typedef struct {
-    u64 rbx;
-    u64 rbp;
-    u64 r12;
-    u64 r13;
-    u64 r14;
-    u64 r15;
-
-    u64 rsp;
-    u64 rip;
-} CpuContext;
-
-_Static_assert(__builtin_offsetof(CpuContext, rbx) == 0, "CpuContext rbx offset");
-_Static_assert(__builtin_offsetof(CpuContext, rbp) == 8, "CpuContext rbp offset");
-_Static_assert(__builtin_offsetof(CpuContext, r12) == 16, "CpuContext r12 offset");
-_Static_assert(__builtin_offsetof(CpuContext, r13) == 24, "CpuContext r13 offset");
-_Static_assert(__builtin_offsetof(CpuContext, r14) == 32, "CpuContext r14 offset");
-_Static_assert(__builtin_offsetof(CpuContext, r15) == 40, "CpuContext r15 offset");
-_Static_assert(__builtin_offsetof(CpuContext, rsp) == 48, "CpuContext rsp offset");
-_Static_assert(__builtin_offsetof(CpuContext, rip) == 56, "CpuContext rip offset");
-_Static_assert(sizeof(CpuContext) == 64, "CpuContext size");
-
-void arch_context_switch(
-    CpuContext *old_context,
-    const CpuContext *new_context
-);
-
-NORETURN void arch_context_enter(
-    const CpuContext *context
-);
 
 void arch_store_gdt(
     ArchDescriptorTablePointer *descriptor
@@ -83,7 +54,14 @@ u16 arch_read_tr(void);
 
 void arch_load_idt(const void *descriptor);
 
-/* Entries 0..47 are vectors 0..47. Entry 48 is vector 128. Entry 49 is vector 255. */
-extern const s32 isr_stub_offsets[50];
+/*
+ * Entries:
+ *
+ *   0..47  -> vectors 0..47
+ *   48     -> vector 0x80
+ *   49     -> vector 0x81
+ *   50     -> vector 0xFF
+ */
+extern const s32 isr_stub_offsets[51];
 
 #endif

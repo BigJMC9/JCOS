@@ -20,6 +20,7 @@
 #include "thread.h"
 #include "gdt.h"
 #include "scheduler.h"
+#include "timer.h"
 
 #define INPUT_CAPACITY 128U
 
@@ -29,14 +30,6 @@ static const BootInfo *g_boot;
 static char g_input[INPUT_CAPACITY];
 static u32 g_length;
 
-static Thread *g_switchtest_main;
-static Thread *g_switchtest_a;
-static Thread *g_switchtest_b;
-
-static volatile u64 g_switchtest_a_count;
-static volatile u64 g_switchtest_b_count;
-static volatile bool g_switchtest_failed;
-
 static volatile u64 g_schedtest_a_count;
 static volatile u64 g_schedtest_b_count;
 static volatile bool g_schedtest_failed;
@@ -45,6 +38,13 @@ static volatile bool g_exittest_started;
 
 static volatile bool g_blocktest_started;
 static volatile bool g_blocktest_resumed;
+
+static volatile u64 g_preempttest_a_count;
+static volatile u64 g_preempttest_b_count;
+
+static volatile u64 g_reschedtest_a_count;
+static volatile u64 g_reschedtest_b_count;
+static volatile bool g_reschedtest_failed;
 
 static char *trim(char *s) {
     while (*s && k_ascii_space(*s)) ++s;
@@ -137,13 +137,17 @@ static void command_help(void) {
     terminal_writeln("  vmmtest     test x86-64 page-table operations");
     terminal_writeln("  astest      test address-space ownership/sharing");
     terminal_writeln("  threadtest  test thread lifecycle and kernel stacks");
-    terminal_writeln("  switchtest  test cooperative thread context switches");
-    terminal_writeln("  schedtest   test cooperative round-robin scheduling");
+    terminal_writeln("  schedtest   test round-robin full-frame scheduling");
     terminal_writeln("  blocktest   test thread blocking and wakeup");
     terminal_writeln("  exittest    test permanent current-thread termination");
     terminal_writeln("  syscalltest test Ring3 syscall round-trip");
     terminal_writeln("  userisotest test recoverable Ring3 fault isolation");
     terminal_writeln("  userpftest  test recoverable Ring3 page fault");
+    terminal_writeln("  timer       show PIT timer state");
+    terminal_writeln("  timertest   test periodic IRQ0 ticks");
+    terminal_writeln("  preempttest test timer-driven involuntary switching");
+    terminal_writeln("  userpreempttest test PIT preemption from Ring3");
+    terminal_writeln("  reschedtest test INT 0x81 full-frame scheduling");
     terminal_writeln("  cpu         show CPUID information");
     terminal_writeln("  interrupts  show APIC/PIC and keyboard counters");
     terminal_writeln("  acpi        show ACPI discovery results");
@@ -593,138 +597,27 @@ static void command_threadtest(void) {
     terminal_write("  FRAME COUNT RESTORED: ");
     terminal_writeln(count_restored ? "PASS" : "FAILED");
 
-    bool pass = bootstrap_ok && space_created && created && metadata_ok && stack_mapped && stack_rw && activated && current_switched && state_switched && cr3_switched && rsp0_switched && restored && current_restored && cr3_restored && rsp0_restored && destroyed && count_restored;
+    bool pass = (
+        bootstrap_ok && 
+        space_created && 
+        created && 
+        metadata_ok && 
+        stack_mapped && 
+        stack_rw && 
+        activated && 
+        current_switched && 
+        state_switched && 
+        cr3_switched && 
+        rsp0_switched && 
+        restored && 
+        current_restored && 
+        cr3_restored && 
+        rsp0_restored && 
+        destroyed && 
+        count_restored
+    );
 
-    terminal_set_color(pass ? terminal_accent_color() : terminal_error_color()); 
-    terminal_write("THREAD TEST: ");
-    terminal_writeln(pass ? "PASS" : "FAILED");
-    terminal_set_color(terminal_default_color());
-}
-
-static void switchtest_thread_a(void *argument) {
-    (void)argument;
-    for (u32 i = 0; i < 3U; ++i) {
-        ++g_switchtest_a_count;
-        if (!thread_switch(g_switchtest_b)) {
-            g_switchtest_failed = true;
-            (void)thread_switch(g_switchtest_main);
-            cpu_halt_forever();
-        }
-    }
-    /* Return control to the shell thread. */
-    if (!thread_switch(g_switchtest_main)) g_switchtest_failed = true;
-    cpu_halt_forever();
-}
-
-static void switchtest_thread_b(void *argument) {
-    (void)argument;
-    for (u32 i = 0; i < 3U; ++i) {
-        ++g_switchtest_b_count;
-        if (!thread_switch(g_switchtest_a)) {
-            g_switchtest_failed = true;
-            (void)thread_switch(g_switchtest_main);
-            cpu_halt_forever();
-        }
-    }
-    /* Under the expected sequence B remains suspended after its third switch to A. */
-    (void)thread_switch(g_switchtest_main);
-    cpu_halt_forever();
-}
-
-static void command_switchtest(void) {
-    terminal_writeln("CONTEXT SWITCH TEST:");
-
-    PmmStats before = pmm_stats();
-
-    terminal_write("  FREE BEFORE: "); terminal_write_u64(before.free_pages); terminal_putchar('\n');
-
-    Thread *main_thread = thread_current();
-    bool main_ok = main_thread && main_thread->state == THREAD_STATE_RUNNING;
-
-    terminal_write("  MAIN THREAD: ");
-    terminal_writeln(main_ok ? "PASS" : "FAILED");
-
-    if (!main_ok) return;
-
-    Thread a;
-    Thread b;
-
-    AddressSpace *kernel_space = address_space_kernel();
-    bool created_a = thread_create(&a, kernel_space);
-    bool created_b = created_a && thread_create(&b, kernel_space);
-
-    terminal_write("  CREATE A: ");
-    terminal_writeln(created_a ? "PASS" : "FAILED");
-    terminal_write("  CREATE B: ");
-    terminal_writeln(created_b ? "PASS" : "FAILED");
-
-    if (!created_a || !created_b) {
-        if (created_a) (void)thread_destroy(&a);
-
-        return;
-    }
-
-    bool prepared_a = thread_prepare_kernel(&a, switchtest_thread_a, 0);
-    bool prepared_b = thread_prepare_kernel(&b, switchtest_thread_b, 0);
-
-    terminal_write("  PREPARE A: ");
-    terminal_writeln(prepared_a ? "PASS" : "FAILED");
-    terminal_write("  PREPARE B: ");
-    terminal_writeln(prepared_b ? "PASS" : "FAILED");
-
-    if (!prepared_a || !prepared_b) {
-
-        (void)thread_destroy(&a);
-        (void)thread_destroy(&b);
-
-        return;
-    }
-
-    g_switchtest_main = main_thread;
-    g_switchtest_a = &a;
-    g_switchtest_b = &b;
-    g_switchtest_a_count = 0;
-    g_switchtest_b_count = 0;
-    g_switchtest_failed = false;
-
-    /* No IRQ may run while the live kernel RSP moves between cooperative contexts. */
-    interrupts_disable();
-
-    bool switched = thread_switch(&a);
-
-    interrupts_enable();
-
-    bool current_restored = switched && thread_current() == main_thread && main_thread->state == THREAD_STATE_RUNNING;
-    bool counts_ok = g_switchtest_a_count == 3 && g_switchtest_b_count == 3;
-    bool child_states_ok = a.state == THREAD_STATE_READY && b.state == THREAD_STATE_READY;
-
-    terminal_write("  SWITCH SEQUENCE: ");
-    terminal_writeln(switched && !g_switchtest_failed ? "PASS" : "FAILED");
-    terminal_write("  A COUNT: "); terminal_write_u64(g_switchtest_a_count); terminal_putchar('\n'); terminal_write("  B COUNT: "); terminal_write_u64(g_switchtest_b_count); terminal_putchar('\n'); terminal_write("  CURRENT RESTORED: ");
-    terminal_writeln(current_restored ? "PASS" : "FAILED");
-    terminal_write("  CHILD STATES: ");
-    terminal_writeln(child_states_ok ? "PASS" : "FAILED");
-
-    bool destroyed_a = thread_destroy(&a);
-    bool destroyed_b = thread_destroy(&b);
-
-    g_switchtest_main = 0;
-    g_switchtest_a = 0;
-    g_switchtest_b = 0;
-
-    PmmStats after = pmm_stats();
-    bool count_restored = before.free_pages == after.free_pages;
-
-    terminal_write("  DESTROY A: ");
-    terminal_writeln(destroyed_a ? "PASS" : "FAILED");
-    terminal_write("  DESTROY B: ");
-    terminal_writeln(destroyed_b ? "PASS" : "FAILED");
-    terminal_write("  FREE AFTER: "); terminal_write_u64(after.free_pages); terminal_putchar('\n'); terminal_write("  FRAME COUNT RESTORED: ");
-    terminal_writeln(count_restored ? "PASS" : "FAILED");
-
-    bool pass = created_a && created_b && prepared_a && prepared_b && switched && !g_switchtest_failed && counts_ok && current_restored && child_states_ok && destroyed_a && destroyed_b && count_restored;
-
-    terminal_set_color(pass ? terminal_accent_color() : terminal_error_color()); terminal_write("CONTEXT SWITCH TEST: ");
+    terminal_set_color(pass ? terminal_accent_color() : terminal_error_color()); terminal_write("THREAD TEST: ");
     terminal_writeln(pass ? "PASS" : "FAILED");
     terminal_set_color(terminal_default_color());
 }
@@ -855,7 +748,8 @@ static void command_schedtest(void) {
 
     terminal_write("  YIELD SEQUENCE: ");
     terminal_writeln(yielded && !g_schedtest_failed ? "PASS" : "FAILED");
-    terminal_write("  A COUNT: "); terminal_write_u64(g_schedtest_a_count); terminal_putchar('\n'); terminal_write("  B COUNT: "); terminal_write_u64(g_schedtest_b_count); terminal_putchar('\n'); terminal_write("  CURRENT RESTORED: ");
+    terminal_write("  A COUNT: "); terminal_write_u64(g_schedtest_a_count); terminal_putchar('\n'); terminal_write("  B COUNT: "); terminal_write_u64(g_schedtest_b_count); terminal_putchar('\n'); 
+    terminal_write("  CURRENT RESTORED: ");
     terminal_writeln(current_restored ? "PASS" : "FAILED");
     terminal_write("  CHILDREN READY: ");
     terminal_writeln(children_ready ? "PASS" : "FAILED");
@@ -884,7 +778,27 @@ static void command_schedtest(void) {
     terminal_write("  FREE AFTER: "); terminal_write_u64(after.free_pages); terminal_putchar('\n'); terminal_write("  FRAME COUNT RESTORED: ");
     terminal_writeln(frames_restored ? "PASS" : "FAILED");
 
-    bool pass = main_ok && created_a && created_b && prepared_a && prepared_b && added_a && added_b && queue_three && yielded && !g_schedtest_failed && counts_ok && current_restored && children_ready && removed_a && removed_b && queue_restored && destroyed_a && destroyed_b && frames_restored;
+    bool pass = (
+        main_ok && 
+        created_a && 
+        created_b && 
+        prepared_a && 
+        prepared_b && 
+        added_a && 
+        added_b && 
+        queue_three && 
+        yielded && 
+        !g_schedtest_failed && 
+        counts_ok && 
+        current_restored && 
+        children_ready && 
+        removed_a && 
+        removed_b && 
+        queue_restored && 
+        destroyed_a && 
+        destroyed_b && 
+        frames_restored
+    );
 
     terminal_set_color(pass ? terminal_accent_color() : terminal_error_color()); terminal_write("SCHEDULER TEST: ");
     terminal_writeln(pass ? "PASS" : "FAILED");
@@ -965,7 +879,7 @@ static void command_exittest(void) {
 
     bool worker_started = g_exittest_started;
     bool current_restored = yielded && thread_current() == main_thread && main_thread->state == THREAD_STATE_RUNNING;
-    bool child_dead = child.state == THREAD_STATE_DEAD && !child.on_run_queue && !child.context_ready;
+    bool child_dead = child.state == THREAD_STATE_DEAD && !child.on_run_queue && !child.interrupt_context_ready && !child.interrupt_rsp;
     bool queue_restored = scheduler_thread_count() == 1;
 
     terminal_write("  CHILD RAN: ");
@@ -987,16 +901,12 @@ static void command_exittest(void) {
 
     bool frames_restored = before.free_pages == after.free_pages;
 
-    terminal_write("  FREE AFTER: "); 
-    terminal_write_u64(after.free_pages); 
-    terminal_putchar('\n'); 
-    terminal_write("  FRAME COUNT RESTORED: ");
+    terminal_write("  FREE AFTER: "); terminal_write_u64(after.free_pages); terminal_putchar('\n'); terminal_write("  FRAME COUNT RESTORED: ");
     terminal_writeln(frames_restored ? "PASS" : "FAILED");
 
     bool pass = main_ok && created && prepared && queued && queue_two && yielded && worker_started && current_restored && child_dead && queue_restored && reaped && frames_restored;
 
-    terminal_set_color(pass ? terminal_accent_color() : terminal_error_color()); 
-    terminal_write("THREAD EXIT TEST: ");
+    terminal_set_color(pass ? terminal_accent_color() : terminal_error_color()); terminal_write("THREAD EXIT TEST: ");
     terminal_writeln(pass ? "PASS" : "FAILED");
     terminal_set_color(terminal_default_color());
 }
@@ -1233,7 +1143,7 @@ static void command_userisotest(void) {
 
     bool fault_captured = interrupt_last_user_fault(&fault);
     bool current_restored = yielded && thread_current() == main_thread && main_thread->state == THREAD_STATE_RUNNING;
-    bool user_dead = thread.state == THREAD_STATE_DEAD && !thread.on_run_queue && !thread.context_ready;
+    bool user_dead = thread.state == THREAD_STATE_DEAD && !thread.on_run_queue && !thread.interrupt_context_ready && !thread.interrupt_rsp;
     bool fault_ok = fault_captured && fault.thread_id == user_thread_id && fault.vector == 6ULL && fault.rip == user_code && fault.user_rsp == user_stack_top && fault.user_ss == 0x1BULL;
     bool queue_restored = scheduler_thread_count() == 1;
 
@@ -1268,16 +1178,12 @@ static void command_userisotest(void) {
     terminal_writeln(code_unmapped && stack_unmapped ? "PASS" : "FAILED");
     terminal_write("  USER FRAMES FREED: ");
     terminal_writeln(code_freed && stack_freed ? "PASS" : "FAILED");
-    terminal_write("  FREE AFTER: "); 
-    terminal_write_u64(after.free_pages); 
-    terminal_putchar('\n'); 
-    terminal_write("  FRAME COUNT RESTORED: ");
+    terminal_write("  FREE AFTER: "); terminal_write_u64(after.free_pages); terminal_putchar('\n'); terminal_write("  FRAME COUNT RESTORED: ");
     terminal_writeln(frames_restored ? "PASS" : "FAILED");
 
     bool pass = main_ok && space_created && thread_created && frames_ok && mappings_ok && prepared && queued && yielded && current_restored && user_dead && fault_ok && queue_restored && reaped && code_unmapped && stack_unmapped && code_freed && stack_freed && frames_restored;
 
-    terminal_set_color(pass ? terminal_accent_color() : terminal_error_color()); 
-    terminal_write("USER FAULT ISOLATION TEST: ");
+    terminal_set_color(pass ? terminal_accent_color() : terminal_error_color()); terminal_write("USER FAULT ISOLATION TEST: ");
     terminal_writeln(pass ? "PASS" : "FAILED");
     terminal_set_color(terminal_default_color());
 }
@@ -1452,7 +1358,7 @@ static void command_userpftest(void) {
 
     bool fault_captured = interrupt_last_user_fault(&fault);
     bool current_restored = yielded && thread_current() == main_thread && main_thread->state == THREAD_STATE_RUNNING;
-    bool user_dead = thread.state == THREAD_STATE_DEAD && !thread.on_run_queue && !thread.context_ready;
+    bool user_dead = thread.state == THREAD_STATE_DEAD && !thread.on_run_queue &&  !thread.interrupt_context_ready && !thread.interrupt_rsp;
     bool fault_identity_ok = fault_captured && fault.thread_id == user_thread_id && fault.vector == 14ULL && fault.rip == user_code && fault.cr2 == fault_address && fault.user_rsp == user_stack_top && fault.user_ss == 0x1BULL;
 
     /*
@@ -1507,6 +1413,62 @@ static void command_userpftest(void) {
     terminal_set_color(terminal_default_color());
 }
 
+static void command_timer(void) {
+    terminal_writeln("TIMER:");
+    terminal_write("  INITIALIZED: ");
+    terminal_writeln(timer_initialized() ? "YES" : "NO");
+    terminal_write("  SOURCE: ");
+    terminal_writeln(timer_initialized() ? "8254 PIT / IRQ0" : "NONE");
+    terminal_write("  FREQUENCY: "); terminal_write_u64(timer_frequency());
+    terminal_writeln(" HZ");
+    terminal_write("  TICKS: "); terminal_write_u64( timer_ticks()); terminal_putchar('\n'); 
+    terminal_write("  VECTOR 0x20 COUNT: "); terminal_write_u64(interrupt_count(0x20)); terminal_putchar('\n');
+}
+
+static void command_timertest(void) {
+    terminal_writeln("PIT TIMER TEST:");
+    if (!timer_initialized()) {
+        terminal_writeln("  INITIALIZED: FAILED");
+        return;
+    }
+
+    /* Snapshot both IRQ0 counters atomically with respect to IRQ delivery. */
+    interrupts_disable();
+
+    u64 tick_before = timer_ticks();
+    u64 irq_before = interrupt_count(0x20);
+
+    interrupts_enable();
+
+    /* Wait for at least one tick, but keep a finite timeout so a broken IRQ0 doesn't hang the shell forever. */
+    u64 spins = 0;
+
+    while (timer_ticks() == tick_before && spins < 50000000ULL) {
+        arch_pause();
+        ++spins;
+    }
+
+    interrupts_disable();
+    u64 tick_after = timer_ticks();
+    u64 irq_after = interrupt_count(0x20);
+    interrupts_enable();
+    bool tick_advanced = tick_after > tick_before;
+    bool irq_advanced = irq_after > irq_before;
+
+    terminal_write("  FREQUENCY: "); terminal_write_u64(timer_frequency());
+    terminal_writeln(" HZ");
+    terminal_write("  TICKS BEFORE: "); terminal_write_u64(tick_before); terminal_putchar('\n'); terminal_write("  TICKS AFTER: "); terminal_write_u64(tick_after); terminal_putchar('\n'); terminal_write("  TICK ADVANCED: ");
+    terminal_writeln(tick_advanced ? "PASS" : "FAILED");
+    terminal_write("  IRQ0 ADVANCED: ");
+    terminal_writeln(irq_advanced ? "PASS" : "FAILED");
+
+    bool pass = tick_advanced && irq_advanced;
+
+    terminal_set_color(pass ? terminal_accent_color() : terminal_error_color()); terminal_write("PIT TIMER TEST: ");
+    terminal_writeln(pass ? "PASS" : "FAILED");
+    terminal_set_color(terminal_default_color());
+}
+
 static void blocktest_worker(void *argument) {
     (void)argument;
     g_blocktest_started = true;
@@ -1524,9 +1486,7 @@ static void command_blocktest(void) {
 
     PmmStats before = pmm_stats();
 
-    terminal_write("  FREE BEFORE: ");
-    terminal_write_u64(before.free_pages);
-    terminal_putchar('\n');
+    terminal_write("  FREE BEFORE: "); terminal_write_u64(before.free_pages); terminal_putchar('\n');
 
     Thread *main_thread = thread_current();
     bool main_ok = main_thread && main_thread->state == THREAD_STATE_RUNNING && main_thread->on_run_queue && scheduler_thread_count() == 1;
@@ -1581,7 +1541,7 @@ static void command_blocktest(void) {
 
     bool current_after_block = first_yield && thread_current() == main_thread && main_thread->state == THREAD_STATE_RUNNING;
     bool worker_started = g_blocktest_started;
-    bool worker_blocked = worker.state == THREAD_STATE_BLOCKED && !worker.on_run_queue && worker.context_ready;
+    bool worker_blocked = worker.state == THREAD_STATE_BLOCKED && !worker.on_run_queue && worker.interrupt_context_ready && worker.interrupt_rsp;
     bool not_resumed_yet = !g_blocktest_resumed;
     bool queue_one = scheduler_thread_count() == 1;
 
@@ -1622,7 +1582,7 @@ static void command_blocktest(void) {
     interrupts_enable();
 
     bool worker_resumed = g_blocktest_resumed;
-    bool worker_dead = worker.state == THREAD_STATE_DEAD && !worker.on_run_queue && !worker.context_ready;
+    bool worker_dead = worker.state == THREAD_STATE_DEAD && !worker.on_run_queue && !worker.interrupt_context_ready && !worker.interrupt_rsp;
     bool main_restored = second_yield && thread_current() == main_thread && main_thread->state == THREAD_STATE_RUNNING;
     bool queue_restored = scheduler_thread_count() == 1;
 
@@ -1658,16 +1618,846 @@ static void command_blocktest(void) {
     PmmStats after = pmm_stats();
     bool frames_restored = before.free_pages == after.free_pages;
 
+    terminal_write("  FREE AFTER: "); terminal_write_u64(after.free_pages); terminal_putchar('\n'); 
+    terminal_write("  FRAME COUNT RESTORED: ");
+    terminal_writeln(frames_restored ? "PASS" : "FAILED");
+
+    bool pass = (
+        main_ok && 
+        created && 
+        prepared && 
+        queued && 
+        first_yield && 
+        worker_started && 
+        worker_blocked && 
+        not_resumed_yet && 
+        current_after_block && 
+        queue_one && 
+        woke && 
+        wake_state_ok && 
+        second_yield && 
+        worker_resumed && 
+        worker_dead && 
+        main_restored && 
+        queue_restored && 
+        reaped && 
+        frames_restored
+    );
+
+    terminal_set_color(pass ? terminal_accent_color() : terminal_error_color()); terminal_write("THREAD BLOCK/WAKE TEST: ");
+    terminal_writeln(pass ? "PASS" : "FAILED");
+    terminal_set_color(terminal_default_color());
+}
+
+static void preempttest_worker(void *argument) {
+    volatile u64 *counter = (volatile u64 *)argument;
+
+    if (!counter) cpu_halt_forever();
+
+    /*
+     * Intentionally:
+     *
+     *   no scheduler_yield()
+     *   no scheduler_block_current()
+     *   no explicit context switch
+     */
+    for (;;) ++(*counter);
+}
+
+static void command_preempttest(void) {
+    terminal_writeln("TIMER PREEMPTION TEST:");
+
+    PmmStats before = pmm_stats();
+    terminal_write("  FREE BEFORE: "); terminal_write_u64(before.free_pages); terminal_putchar('\n');
+    Thread *main_thread = thread_current();
+    bool main_ok = timer_initialized() && main_thread && main_thread->state == THREAD_STATE_RUNNING && main_thread->on_run_queue && scheduler_thread_count() == 1;
+
+    terminal_write("  TIMER/MAIN: ");
+    terminal_writeln(main_ok ? "PASS" : "FAILED");
+
+    if (!main_ok) return;
+
+    Thread a;
+    Thread b;
+
+    bool created_a = thread_create(&a, address_space_kernel());
+    bool created_b = created_a && thread_create(&b, address_space_kernel());
+
+    terminal_write("  CREATE A: ");
+    terminal_writeln(created_a ? "PASS" : "FAILED");
+    terminal_write("  CREATE B: ");
+    terminal_writeln(created_b ? "PASS" : "FAILED");
+
+    if (!created_a || !created_b) {
+        if (created_a) (void)thread_destroy(&a);
+        return;
+    }
+
+    bool prepared_a = thread_prepare_kernel(&a, preempttest_worker, (void *)&g_preempttest_a_count);
+    bool prepared_b = thread_prepare_kernel(&b, preempttest_worker, (void *)&g_preempttest_b_count);
+
+    terminal_write("  PREPARE A: ");
+    terminal_writeln(prepared_a ? "PASS" : "FAILED");
+    terminal_write("  PREPARE B: ");
+    terminal_writeln(prepared_b ? "PASS" : "FAILED");
+
+    if (!prepared_a || !prepared_b) {
+        (void)thread_destroy(&a);
+        (void)thread_destroy(&b);
+        return;
+    }
+
+    bool queued_a = scheduler_add(&a);
+    bool queued_b = queued_a && scheduler_add(&b);
+
+    terminal_write("  QUEUE A: ");
+    terminal_writeln(queued_a ? "PASS" : "FAILED");
+    terminal_write("  QUEUE B: ");
+    terminal_writeln(queued_b ? "PASS" : "FAILED");
+
+    if (!queued_a || !queued_b) {
+        if (queued_a) (void)scheduler_remove(&a);
+        (void)thread_destroy(&a);
+        (void)thread_destroy(&b);
+        return;
+    }
+
+    InterruptFrame *a_frame = (InterruptFrame *)(u64) a.interrupt_rsp;
+    InterruptFrame *b_frame = (InterruptFrame *)(u64) b.interrupt_rsp;
+
+    terminal_write("  A FRAME: "); terminal_write_hex(a.interrupt_rsp); terminal_putchar('\n');
+    terminal_write("  A RIP: "); terminal_write_hex(a_frame ? a_frame->rip : 0); terminal_putchar('\n');
+    terminal_write("  A CS: "); terminal_write_hex(a_frame ? a_frame->cs : 0); terminal_putchar('\n');
+    terminal_write("  A RFLAGS: "); terminal_write_hex(a_frame ? a_frame->rflags : 0); terminal_putchar('\n');
+    u64 a_expected_rsp = a.kernel_stack_top - sizeof(u64);
+
+    terminal_write("  A EXPECTED RSP: "); terminal_write_hex(a_expected_rsp); terminal_putchar('\n'); 
+    terminal_write("  A DUMMY RETURN: "); terminal_write_hex(*(const u64 *)(u64) a_expected_rsp); terminal_putchar('\n');
+    terminal_write("  B FRAME: "); terminal_write_hex(b.interrupt_rsp); terminal_putchar('\n');
+    terminal_write("  B RIP: "); terminal_write_hex(b_frame ? b_frame->rip : 0); terminal_putchar('\n');
+    terminal_write("  B CS: "); terminal_write_hex(b_frame ? b_frame->cs : 0); terminal_putchar('\n');
+    terminal_write("  B RFLAGS: "); terminal_write_hex(b_frame ? b_frame->rflags : 0); terminal_putchar('\n');
+
+    g_preempttest_a_count = 0;
+    g_preempttest_b_count = 0;
+
+    u64 preempt_before = scheduler_preemption_count();
+    u64 start_tick = timer_ticks();
+    u64 timeout_ticks = timer_frequency() ? (u64)timer_frequency() * 2ULL : 200ULL;
+
+    /*
+     * Queue is now:
+     *
+     *   main -> A -> B -> main
+     *
+     * A and B already have synthetic IRET
+     * frames. Main receives a real frame on
+     * the first timer interrupt.
+     */
+    interrupts_disable();
+
+    bool enabled = scheduler_preemption_enable();
+    if (!enabled) {
+        bool removed_a = scheduler_remove(&a);
+        bool removed_b = scheduler_remove(&b);
+        bool destroyed_a = thread_destroy(&a);
+        bool destroyed_b = thread_destroy(&b);
+
+        interrupts_enable();
+
+        terminal_writeln("  ENABLE PREEMPTION: FAILED");
+        terminal_write("  CLEANUP: ");
+        terminal_writeln(removed_a && removed_b && destroyed_a && destroyed_b ? "PASS" : "FAILED");
+
+        return;
+    }
+    interrupts_enable();
+
+    /*
+     * From here until we disable preemption:
+     *
+     * DO NOT print.
+     * DO NOT yield.
+     * DO NOT block.
+     *
+     * A and B only increment volatile counters.
+     */
+    bool completed = false;
+    while ((timer_ticks() - start_tick) < timeout_ticks) {
+        u64 switches = scheduler_preemption_count() - preempt_before;
+        if (g_preempttest_a_count > 0 && g_preempttest_b_count > 0 && switches >= 6ULL) {
+            completed = true;
+            break;
+        }
+        arch_pause();
+    }
+
+    /* We can only reach this code while main is the currently scheduled thread. */
+    interrupts_disable();
+    bool disabled = scheduler_preemption_disable();
+
+    u64 preempt_after = scheduler_preemption_count();
+    u64 a_count = g_preempttest_a_count;
+    u64 b_count = g_preempttest_b_count;
+    u64 switches = preempt_after - preempt_before;
+    bool main_restored = thread_current() == main_thread && main_thread->state == THREAD_STATE_RUNNING;
+
+    /* Because main is RUNNING, both workers must currently be suspended READY threads with saved interrupt frames. */
+    bool workers_suspended = a.state == THREAD_STATE_READY && b.state == THREAD_STATE_READY && a.on_run_queue && b.on_run_queue && a.interrupt_context_ready && b.interrupt_context_ready;
+    bool removed_a = disabled && scheduler_remove(&a);
+    bool removed_b = disabled && scheduler_remove(&b);
+    bool queue_restored = scheduler_thread_count() == 1;
+    bool destroyed_a = removed_a && thread_destroy(&a);
+    bool destroyed_b = removed_b && thread_destroy(&b);
+
+    PmmStats after = pmm_stats();
+    bool frames_restored = before.free_pages == after.free_pages;
+
+    interrupts_enable();
+
+    /* Printing is safe again: preemption is off and the worker stacks have been reclaimed. */
+    terminal_write("  ENABLE PREEMPTION: ");
+    terminal_writeln(enabled ? "PASS" : "FAILED");
+    terminal_write("  DISABLE PREEMPTION: ");
+    terminal_writeln(disabled ? "PASS" : "FAILED");
+    terminal_write("  PREEMPTIONS: "); terminal_write_u64(switches); terminal_putchar('\n'); 
+    terminal_write("  A COUNT: "); terminal_write_u64(a_count); terminal_putchar('\n'); 
+    terminal_write("  B COUNT: "); terminal_write_u64(b_count); terminal_putchar('\n');
+    terminal_write("  A RAN WITHOUT YIELD: ");
+    terminal_writeln(a_count > 0 ? "PASS" : "FAILED");
+    terminal_write("  B RAN WITHOUT YIELD: ");
+    terminal_writeln(b_count > 0 ? "PASS" : "FAILED");
+    terminal_write("  MULTIPLE SWITCHES: ");
+    terminal_writeln(switches >= 6ULL ? "PASS" : "FAILED");
+    terminal_write("  MAIN RESTORED: ");
+    terminal_writeln(main_restored ? "PASS" : "FAILED");
+    terminal_write("  WORKERS SUSPENDED: ");
+    terminal_writeln(workers_suspended ? "PASS" : "FAILED");
+    terminal_write("  QUEUE RESTORED: ");
+    terminal_writeln(queue_restored ? "PASS" : "FAILED");
+    terminal_write("  DESTROY A: ");
+    terminal_writeln(destroyed_a ? "PASS" : "FAILED");
+    terminal_write("  DESTROY B: ");
+    terminal_writeln(destroyed_b ? "PASS" : "FAILED");
+    terminal_write("  FREE AFTER: "); terminal_write_u64(after.free_pages); terminal_putchar('\n'); 
+    terminal_write("  FRAME COUNT RESTORED: ");
+    terminal_writeln(frames_restored ? "PASS" : "FAILED");
+
+    bool pass = enabled && disabled && completed && a_count > 0 && b_count > 0 && switches >= 6ULL && main_restored && workers_suspended && removed_a && removed_b && queue_restored && destroyed_a && destroyed_b && frames_restored;
+
+    terminal_set_color(pass ? terminal_accent_color() : terminal_error_color()); terminal_write("TIMER PREEMPTION TEST: ");
+    terminal_writeln(pass ? "PASS" : "FAILED");
+    terminal_set_color(terminal_default_color());
+}
+
+static void command_userpreempttest(void) {
+    /*
+     * Layout:
+     *
+     *   +0x0000  user code
+     *   +0x1000  user stack
+     *   +0x3000  user counter
+     *
+     * The counter is deliberately separate from
+     * the top of the user stack.
+     */
+    const u64 user_code = ADDRESS_SPACE_USER_BASE;
+    const u64 user_stack = ADDRESS_SPACE_USER_BASE + VM_PAGE_SIZE;
+    const u64 user_stack_top = user_stack + VM_PAGE_SIZE;
+    const u64 user_counter = ADDRESS_SPACE_USER_BASE + 3ULL * VM_PAGE_SIZE;
+    const u64 user_code_size = 15ULL;
+
+    terminal_writeln("USER TIMER PREEMPTION TEST:");
+
+    PmmStats before = pmm_stats();
+
+    terminal_write("  FREE BEFORE: ");
+    terminal_write_u64(before.free_pages);
+    terminal_putchar('\n');
+
+    Thread *main_thread = thread_current();
+    bool main_ok = (
+        timer_initialized() && 
+        main_thread && 
+        main_thread->id && 
+        main_thread->state == THREAD_STATE_RUNNING && 
+        main_thread->on_run_queue && 
+        scheduler_thread_count() == 1 && 
+        !scheduler_preemption_enabled();
+    );
+
+    terminal_write("  TIMER/MAIN: ");
+    terminal_writeln(main_ok ? "PASS" : "FAILED");
+
+    if (!main_ok) return;
+
+    AddressSpace space;
+    bool space_created = address_space_create(&space);
+
+    terminal_write("  ADDRESS SPACE: ");
+    terminal_writeln(space_created ? "PASS" : "FAILED");
+
+    if (!space_created) return;
+
+    Thread user;
+    bool thread_created = thread_create(&user, &space);
+
+    terminal_write("  THREAD CREATE: ");
+    terminal_writeln(thread_created ? "PASS" : "FAILED");
+
+    if (!thread_created) {
+        address_space_destroy(&space);
+        return;
+    }
+
+    frame_t code_frame = frame_alloc();
+    frame_t stack_frame = frame_alloc();
+    frame_t counter_frame = frame_alloc();
+
+    bool frames_ok = code_frame != FRAME_INVALID && stack_frame != FRAME_INVALID && counter_frame != FRAME_INVALID;
+
+    terminal_write("  USER FRAMES: ");
+    terminal_writeln(frames_ok ? "PASS" : "FAILED");
+
+    if (!frames_ok) {
+        if (code_frame != FRAME_INVALID) (void)frame_free(code_frame);
+        if (stack_frame != FRAME_INVALID) (void)frame_free(stack_frame);
+        if (counter_frame != FRAME_INVALID) (void)frame_free(counter_frame);
+        (void)thread_destroy(&user);
+        address_space_destroy(&space);
+        return;
+    }
+
+    bool code_mapped = address_space_map_page(&space, user_code, code_frame, 0);
+    bool stack_mapped = address_space_map_page(&space, user_stack, stack_frame, VM_WRITE);
+    bool counter_mapped = address_space_map_page(&space, user_counter, counter_frame, VM_WRITE);
+    bool mappings_ok = code_mapped && stack_mapped && counter_mapped;
+
+    terminal_write("  USER MAPPINGS: ");
+    terminal_writeln(mappings_ok ? "PASS" : "FAILED");
+
+    if (!mappings_ok) {
+        frame_t ignored = FRAME_INVALID;
+
+        if (code_mapped) (void)address_space_unmap_page(&space, user_code, &ignored);
+        if (stack_mapped) (void)address_space_unmap_page(&space, user_stack, &ignored);
+        if (counter_mapped) (void)address_space_unmap_page(&space, user_counter, &ignored);
+
+        (void)frame_free(code_frame);
+        (void)frame_free(stack_frame);
+        (void)frame_free(counter_frame);
+        (void)thread_destroy(&user);
+        address_space_destroy(&space);
+        return;
+    }
+
+    u8 *code = (u8 *)phys_to_virt(frame_to_phys(code_frame));
+    volatile u64 *counter = (volatile u64 *)phys_to_virt(frame_to_phys(counter_frame));
+    bool direct_ok = code && counter;
+
+    terminal_write("  PHYSMAP ACCESS: ");
+    terminal_writeln(direct_ok ? "PASS" : "FAILED");
+
+    if (!direct_ok) {
+        frame_t ignored = FRAME_INVALID;
+        (void)address_space_unmap_page(&space, user_code, &ignored);
+        (void)address_space_unmap_page(&space, user_stack, &ignored);
+        (void)address_space_unmap_page(&space, user_counter, &ignored);
+        (void)frame_free(code_frame);
+        (void)frame_free(stack_frame);
+        (void)frame_free(counter_frame);
+        (void)thread_destroy(&user);
+        address_space_destroy(&space);
+        return;
+    }
+
+    k_memset(code, 0, (usize)VM_PAGE_SIZE);
+    *(volatile u64 *)counter = 0;
+
+    /*
+     * Ring3 program:
+     *
+     *   mov rax, user_counter
+     *
+     * loop:
+     *   inc qword [rax]
+     *   jmp loop
+     *
+     * Encoding:
+     *
+     *   48 B8 imm64       mov rax, imm64
+     *   48 FF 00          inc qword [rax]
+     *   EB FB             jmp -5
+     *
+     * There is deliberately:
+     *
+     *   no INT 0x80
+     *   no INT 0x81
+     *   no fault
+     *   no HLT
+     *   no yield
+     */
+    code[0] = 0x48;
+    code[1] = 0xB8;
+    for (u32 i = 0; i < 8U; ++i) code[2U + i] = (u8)(user_counter >> (i * 8U));
+    code[10] = 0x48;
+    code[11] = 0xFF;
+    code[12] = 0x00;
+    code[13] = 0xEB;
+    code[14] = 0xFB;
+
+    bool prepared = thread_prepare_user(&user, user_code, user_stack_top);
+    terminal_write("  PREPARE USER: ");
+    terminal_writeln(prepared ? "PASS" : "FAILED");
+
+    if (!prepared) {
+        frame_t ignored = FRAME_INVALID;
+        (void)address_space_unmap_page(&space, user_code, &ignored);
+        (void)address_space_unmap_page(&space, user_stack, &ignored);
+        (void)address_space_unmap_page(&space, user_counter, &ignored);
+        (void)frame_free(code_frame);
+        (void)frame_free(stack_frame);
+        (void)frame_free(counter_frame);
+        (void)thread_destroy(&user);
+        address_space_destroy(&space);
+        return;
+    }
+
+    interrupts_disable();
+    bool queued = scheduler_add(&user);
+    interrupts_enable();
+
+    terminal_write("  QUEUE USER: ");
+    terminal_writeln(queued ? "PASS" : "FAILED");
+
+    if (!queued) {
+        (void)thread_destroy(&user);
+        frame_t ignored = FRAME_INVALID;
+        (void)address_space_unmap_page(&space, user_code, &ignored);
+        (void)address_space_unmap_page(&space, user_stack, &ignored);
+        (void)address_space_unmap_page(&space, user_counter, &ignored);
+        (void)frame_free(code_frame);
+        (void)frame_free(stack_frame);
+        (void)frame_free(counter_frame);
+        address_space_destroy(&space);
+        return;
+    }
+
+    /*
+     * At this point:
+     *
+     *   main = RUNNING
+     *   user = READY with synthetic Ring3 frame
+     *
+     * The first PIT interrupt must switch:
+     *
+     *   main -> user
+     *
+     * and the next PIT interrupt must enter
+     * Ring0 through user's TSS.RSP0 and switch:
+     *
+     *   user -> main
+     */
+    interrupts_disable();
+
+    u64 preempt_before = scheduler_preemption_count();
+    u64 irq_before = interrupt_count(0x20);
+    u64 start_tick = timer_ticks();
+    bool enabled = scheduler_preemption_enable();
+
+    if (!enabled) {
+        bool removed = scheduler_remove(&user);
+        bool destroyed = removed && thread_destroy(&user);
+        interrupts_enable();
+        terminal_writeln("  ENABLE PREEMPTION: FAILED");
+        frame_t old_code = FRAME_INVALID;
+        frame_t old_stack = FRAME_INVALID;
+        frame_t old_counter = FRAME_INVALID;
+        bool code_unmapped = address_space_unmap_page(&space, user_code, &old_code);
+        bool stack_unmapped = address_space_unmap_page(&space, user_stack, &old_stack);
+        bool counter_unmapped = address_space_unmap_page(&space, user_counter, &old_counter);
+        if (code_unmapped) (void)frame_free(code_frame);
+        if (stack_unmapped) (void)frame_free(stack_frame);
+        if (counter_unmapped) (void)frame_free(counter_frame);
+        address_space_destroy(&space);
+        terminal_write("  CLEANUP: ");
+        terminal_writeln(removed && destroyed && code_unmapped && stack_unmapped && counter_unmapped ? "PASS" : "FAILED");
+        return;
+    }
+
+    interrupts_enable();
+
+    /*
+     * Give the timer up to two seconds.
+     *
+     * While this C code is executing we are
+     * necessarily on main. Whenever PIT chooses
+     * the user thread this loop simply stops
+     * executing until a later PIT returns main.
+     */
+    u64 timeout_ticks = timer_frequency() ? (u64)timer_frequency() * 2ULL : 200ULL;
+    bool completed = false;
+
+    while ((timer_ticks() - start_tick) < timeout_ticks) {
+        u64 switches = scheduler_preemption_count() - preempt_before;
+        u64 user_count = *counter;
+        if (user_count > 0 && switches >= 4ULL) {
+            completed = true;
+            break;
+        }
+        arch_pause();
+    }
+
+    /*
+     * This instruction only executes while main
+     * is the current thread.
+     *
+     * Once CLI completes, user can no longer be
+     * selected by another PIT before inspection.
+     */
+    interrupts_disable();
+
+    bool disabled = scheduler_preemption_disable();
+
+    u64 preempt_after = scheduler_preemption_count();
+    u64 irq_after = interrupt_count(0x20);
+    u64 tick_after = timer_ticks();
+    u64 user_count = *counter;
+    u64 switches = preempt_after - preempt_before;
+    u64 irq_delta = irq_after - irq_before;
+    u64 tick_delta = tick_after - start_tick;
+
+    bool main_restored = thread_current() == main_thread && main_thread->state == THREAD_STATE_RUNNING;
+
+    /*
+     * Because main is RUNNING, the user thread
+     * should now be the suspended READY thread.
+     *
+     * Its interrupt_rsp must point at the REAL
+     * frame created when PIT interrupted Ring3,
+     * not its original synthetic startup frame.
+     */
+    bool user_suspended = user.state == THREAD_STATE_READY && user.on_run_queue && user.interrupt_context_ready && user.interrupt_rsp;
+
+    InterruptFrame *saved = user_suspended ? (InterruptFrame *)(u64) user.interrupt_rsp : 0;
+    const InterruptStackFrame *saved_user = saved ? interrupt_user_stack(saved) : 0;
+
+    bool vector_ok = saved && saved->vector == 0x20ULL && saved->error_code == 0;
+    bool privilege_ok = saved && saved->cs == GDT_USER_CODE_SELECTOR && (saved->cs & 3ULL) == 3ULL;
+    bool rip_ok = saved && saved->rip >= user_code && saved->rip < user_code + user_code_size;
+    bool user_stack_ok = saved_user && saved_user->rsp == user_stack_top && saved_user->ss == GDT_USER_DATA_SELECTOR;
+    bool if_ok = saved && (saved->rflags & (1ULL << 9)) != 0;
+    bool rax_ok = saved && saved->rax == user_counter;
+    bool counter_ok = user_count > 0;
+    bool switch_ok = completed && switches >= 4ULL;
+
+    /* With exactly main + user runnable, every IRQ0 while preemption is enabled should cause one scheduler switch. */
+    bool irq_switch_match = irq_delta == switches && irq_delta >= 4ULL;
+    bool timer_frame_ok = vector_ok && privilege_ok && rip_ok && user_stack_ok && if_ok && rax_ok;
+
+    /* User is suspended and preemption is now disabled, so it is safe to remove/reap it. */
+    bool removed = disabled && user_suspended && scheduler_remove(&user);
+    bool queue_restored = scheduler_thread_count() == 1;
+    bool destroyed = removed && thread_destroy(&user);
+
+    frame_t old_code = FRAME_INVALID;
+    frame_t old_stack = FRAME_INVALID;
+    frame_t old_counter = FRAME_INVALID;
+
+    bool code_unmapped = address_space_unmap_page(&space, user_code, &old_code) && old_code == code_frame;
+    bool stack_unmapped = address_space_unmap_page(&space, user_stack, &old_stack) && old_stack == stack_frame;
+    bool counter_unmapped = address_space_unmap_page(&space, user_counter, &old_counter) && old_counter == counter_frame;
+    bool code_freed = code_unmapped && frame_free(code_frame);
+    bool stack_freed = stack_unmapped && frame_free(stack_frame);
+    bool counter_freed = counter_unmapped && frame_free(counter_frame);
+
+    address_space_destroy(&space);
+    PmmStats after = pmm_stats();
+
+    bool frames_restored = before.free_pages == after.free_pages;
+    interrupts_enable();
+
+    /* Printing starts only after preemption is off and the user kernel stack is gone. */
+    terminal_write("  ENABLE PREEMPTION: ");
+    terminal_writeln(enabled ? "PASS" : "FAILED");
+    terminal_write("  DISABLE PREEMPTION: ");
+    terminal_writeln(disabled ? "PASS" : "FAILED");
+    terminal_write("  USER COUNTER: ");
+    terminal_write_u64(user_count);
+    terminal_putchar('\n');
+    terminal_write("  USER RAN WITHOUT YIELD: ");
+    terminal_writeln(counter_ok ? "PASS" : "FAILED");
+    terminal_write("  TIMER TICKS: ");
+    terminal_write_u64(tick_delta);
+    terminal_putchar('\n');
+    terminal_write("  IRQ0: ");
+    terminal_write_u64(irq_delta);
+    terminal_putchar('\n');
+    terminal_write("  PREEMPTIONS: ");
+    terminal_write_u64(switches);
+    terminal_putchar('\n');
+    terminal_write("  USER FRAME RESUMED: ");
+    terminal_writeln(switch_ok ? "PASS" : "FAILED");
+    terminal_write("  IRQ/SWITCH MATCH: ");
+    terminal_writeln(irq_switch_match ? "PASS" : "FAILED");
+    terminal_write("  MAIN RESTORED: ");
+    terminal_writeln(main_restored ? "PASS" : "FAILED");
+    terminal_write("  USER SUSPENDED: ");
+    terminal_writeln(user_suspended ? "PASS" : "FAILED");
+    terminal_write("  SAVED VECTOR: ");
+    terminal_write_hex(saved ? saved->vector : 0);
+    terminal_putchar('\n');
+    terminal_write("  SAVED RIP: ");
+    terminal_write_hex(saved ? saved->rip : 0);
+    terminal_putchar('\n');
+    terminal_write("  SAVED CS: ");
+    terminal_write_hex(saved ? saved->cs : 0);
+    terminal_putchar('\n');
+    terminal_write("  SAVED USER RSP: ");
+    terminal_write_hex(saved_user ? saved_user->rsp : 0);
+    terminal_putchar('\n');
+    terminal_write("  SAVED USER SS: ");
+    terminal_write_hex(saved_user ? saved_user->ss : 0);
+    terminal_putchar('\n');
+    terminal_write("  RING3 TIMER FRAME: ");
+    terminal_writeln(timer_frame_ok ? "PASS" : "FAILED");
+    terminal_write("  REMOVE USER: ");
+    terminal_writeln(removed ? "PASS" : "FAILED");
+    terminal_write("  QUEUE RESTORED: ");
+    terminal_writeln(queue_restored ? "PASS" : "FAILED");
+    terminal_write("  DESTROY USER: ");
+    terminal_writeln(destroyed ? "PASS" : "FAILED");
+    terminal_write("  USER UNMAP: ");
+    terminal_writeln(code_unmapped && stack_unmapped && counter_unmapped ? "PASS" : "FAILED");
+    terminal_write("  USER FRAMES FREED: ");
+    terminal_writeln(code_freed && stack_freed && counter_freed ? "PASS" : "FAILED");
     terminal_write("  FREE AFTER: ");
     terminal_write_u64(after.free_pages);
     terminal_putchar('\n');
     terminal_write("  FRAME COUNT RESTORED: ");
     terminal_writeln(frames_restored ? "PASS" : "FAILED");
 
-    bool pass = main_ok && created && prepared && queued && first_yield && worker_started && worker_blocked && not_resumed_yet && current_after_block && queue_one && woke && wake_state_ok && second_yield && worker_resumed && worker_dead && main_restored && queue_restored && reaped && frames_restored;
+    bool pass = (
+        main_ok && 
+        space_created && 
+        thread_created && 
+        frames_ok && 
+        mappings_ok && 
+        direct_ok && 
+        prepared && 
+        queued && 
+        enabled && 
+        disabled && 
+        completed && 
+        counter_ok && 
+        switch_ok && 
+        irq_switch_match && 
+        main_restored && 
+        user_suspended && 
+        timer_frame_ok && 
+        removed && 
+        queue_restored && 
+        destroyed && 
+        code_unmapped && 
+        stack_unmapped && 
+        counter_unmapped && 
+        code_freed && 
+        stack_freed && 
+        counter_freed && 
+        frames_restored
+    );
 
     terminal_set_color(pass ? terminal_accent_color() : terminal_error_color());
-    terminal_write("THREAD BLOCK/WAKE TEST: ");
+    terminal_write("USER TIMER PREEMPTION TEST: ");
+    terminal_writeln(pass ? "PASS" : "FAILED");
+    terminal_set_color(terminal_default_color());
+}
+
+static void reschedtest_worker(void *argument) {
+    volatile u64 *counter = (volatile u64 *)argument;
+    if (!counter) cpu_halt_forever();
+    for (u32 i = 0; i < 3U; ++i) {
+        ++(*counter);
+        if (!scheduler_yield()) {
+            g_reschedtest_failed = true;
+            cpu_halt_forever();
+        }
+    }
+    for (;;) {
+        if (!scheduler_yield()) {
+            g_reschedtest_failed = true;
+            cpu_halt_forever();
+        }
+    }
+}
+
+static void command_reschedtest(void) {
+    terminal_writeln("INTERRUPT RESCHEDULE TEST:");
+    PmmStats before = pmm_stats();
+    terminal_write("  FREE BEFORE: "); terminal_write_u64(before.free_pages); terminal_putchar('\n');
+
+    Thread *main_thread = thread_current();
+    bool main_ok = main_thread && main_thread->state == THREAD_STATE_RUNNING && main_thread->on_run_queue && scheduler_thread_count() == 1 && !scheduler_preemption_enabled();
+
+    terminal_write("  MAIN THREAD: ");
+    terminal_writeln(main_ok ? "PASS" : "FAILED");
+
+    if (!main_ok) return;
+
+    Thread a;
+    Thread b;
+
+    bool created_a = thread_create(&a, address_space_kernel());
+    bool created_b = created_a && thread_create(&b, address_space_kernel());
+
+    terminal_write("  CREATE A: ");
+    terminal_writeln(created_a ? "PASS" : "FAILED");
+    terminal_write("  CREATE B: ");
+    terminal_writeln(created_b ? "PASS" : "FAILED");
+
+    if (!created_a || !created_b) {
+        if (created_a) (void)thread_destroy(&a);
+        return;
+    }
+
+    bool prepared_a = thread_prepare_kernel(&a, reschedtest_worker, (void *)&g_reschedtest_a_count);
+    bool prepared_b = thread_prepare_kernel(&b, reschedtest_worker, (void *)&g_reschedtest_b_count);
+
+    terminal_write("  PREPARE A: ");
+    terminal_writeln(prepared_a ? "PASS" : "FAILED");
+    terminal_write("  PREPARE B: ");
+    terminal_writeln(prepared_b ? "PASS" : "FAILED");
+
+    if (!prepared_a || !prepared_b) {
+        (void)thread_destroy(&a);
+        (void)thread_destroy(&b);
+        return;
+    }
+
+    bool queued_a = scheduler_add(&a);
+    bool queued_b = queued_a && scheduler_add(&b);
+
+    terminal_write("  QUEUE A: ");
+    terminal_writeln(queued_a ? "PASS" : "FAILED");
+    terminal_write("  QUEUE B: ");
+    terminal_writeln(queued_b ? "PASS" : "FAILED");
+
+    if (!queued_a || !queued_b) {
+        if (queued_a) (void)scheduler_remove(&a);
+        (void)thread_destroy(&a);
+        (void)thread_destroy(&b);
+        return;
+    }
+
+    g_reschedtest_a_count = 0;
+    g_reschedtest_b_count = 0;
+    g_reschedtest_failed = false;
+
+    u64 reschedule_before = scheduler_reschedule_count();
+    u64 vector_before = interrupt_count(RESCHEDULE_VECTOR);
+
+    /*
+     * Queue:
+     *
+     *   main -> A -> B -> main
+     *
+     * One call from main produces:
+     *
+     *   main --INT81--> A
+     *      A --INT81--> B
+     *      B --INT81--> main
+     *
+     * Then the original call in main returns.
+     */
+    interrupts_disable();
+
+    bool sequence_ok = true;
+    for (u32 round = 0; round < 3U; ++round) {
+        if (!scheduler_yield()) {
+            sequence_ok = false;
+            break;
+        }
+        if (thread_current() != main_thread || main_thread->state != THREAD_STATE_RUNNING) {
+            sequence_ok = false;
+            break;
+        }
+    }
+    interrupts_enable();
+
+    u64 reschedule_after = scheduler_reschedule_count();
+    u64 vector_after = interrupt_count(RESCHEDULE_VECTOR);
+    u64 reschedules = reschedule_after - reschedule_before;
+    u64 vector_delta = vector_after - vector_before;
+
+    bool counts_ok = g_reschedtest_a_count == 3ULL && g_reschedtest_b_count == 3ULL;
+    bool current_restored = thread_current() == main_thread && main_thread->state == THREAD_STATE_RUNNING;
+    bool children_suspended = (
+        a.state == THREAD_STATE_READY && 
+        b.state == THREAD_STATE_READY && 
+        a.on_run_queue && 
+        b.on_run_queue && 
+        a.interrupt_context_ready && 
+        b.interrupt_context_ready && 
+        a.interrupt_rsp && 
+        b.interrupt_rsp
+    );
+
+    /*
+     * Three complete:
+     *
+     *   main -> A -> B -> main
+     *
+     * cycles = 9 actual INT 0x81 switches.
+     */
+    bool switch_count_ok = reschedules == 9ULL && vector_delta == 9ULL;
+
+    terminal_write("  SEQUENCE: ");
+    terminal_writeln(sequence_ok ? "PASS" : "FAILED");
+    terminal_write("  A COUNT: "); terminal_write_u64(g_reschedtest_a_count); terminal_putchar('\n'); 
+    terminal_write("  B COUNT: "); terminal_write_u64(g_reschedtest_b_count); terminal_putchar('\n'); 
+    terminal_write("  COUNTS 3/3: ");
+    terminal_writeln(counts_ok ? "PASS" : "FAILED");
+    terminal_write("  INT 0x81 COUNT: "); terminal_write_u64(vector_delta); terminal_putchar('\n'); 
+    terminal_write("  RESCHEDULES: "); terminal_write_u64(reschedules); terminal_putchar('\n'); 
+    terminal_write("  NINE SWITCHES: ");
+    terminal_writeln(switch_count_ok ? "PASS" : "FAILED");
+    terminal_write("  MAIN RESTORED: ");
+    terminal_writeln(current_restored ? "PASS" : "FAILED");
+    terminal_write("  CHILDREN SUSPENDED: ");
+    terminal_writeln(children_suspended ? "PASS" : "FAILED");
+
+    /* Stop queue mutation from overlapping any ordinary IRQ handler while cleaning up. */
+    interrupts_disable();
+
+    bool removed_a = scheduler_remove(&a);
+    bool removed_b = scheduler_remove(&b);
+
+    bool queue_restored = scheduler_thread_count() == 1;
+    bool destroyed_a = removed_a && thread_destroy(&a);
+    bool destroyed_b = removed_b && thread_destroy(&b);
+
+    PmmStats after = pmm_stats();
+    bool frames_restored = before.free_pages == after.free_pages;
+
+    interrupts_enable();
+
+    terminal_write("  REMOVE A: ");
+    terminal_writeln(removed_a ? "PASS" : "FAILED");
+    terminal_write("  REMOVE B: ");
+    terminal_writeln(removed_b ? "PASS" : "FAILED");
+    terminal_write("  QUEUE RESTORED: ");
+    terminal_writeln(queue_restored ? "PASS" : "FAILED");
+    terminal_write("  DESTROY A: ");
+    terminal_writeln(destroyed_a ? "PASS" : "FAILED");
+    terminal_write("  DESTROY B: ");
+    terminal_writeln(destroyed_b ? "PASS" : "FAILED");
+    terminal_write("  FREE AFTER: "); terminal_write_u64(after.free_pages); terminal_putchar('\n'); 
+    terminal_write("  FRAME COUNT RESTORED: ");
+    terminal_writeln(frames_restored ? "PASS" : "FAILED");
+
+    bool pass = main_ok && created_a && created_b && prepared_a && prepared_b && queued_a && queued_b && sequence_ok && !g_reschedtest_failed && counts_ok && switch_count_ok && current_restored && children_suspended && removed_a && removed_b && queue_restored && destroyed_a && destroyed_b && frames_restored;
+
+    terminal_set_color(pass ? terminal_accent_color() : terminal_error_color()); terminal_write("INTERRUPT RESCHEDULE TEST: ");
     terminal_writeln(pass ? "PASS" : "FAILED");
     terminal_set_color(terminal_default_color());
 }
@@ -2363,13 +3153,17 @@ static void execute(char *line) {
     else if (k_strieq(command, "vmmtest")) command_vmmtest();
     else if (k_strieq(command, "astest")) command_astest();
     else if (k_strieq(command, "threadtest")) command_threadtest();
-    else if (k_strieq(command, "switchtest")) command_switchtest();
     else if (k_strieq(command, "schedtest")) command_schedtest();
     else if (k_strieq(command, "blocktest")) command_blocktest();
     else if (k_strieq(command, "exittest")) command_exittest();
     else if (k_strieq(command, "syscalltest")) command_syscalltest();
     else if (k_strieq(command, "userisotest")) command_userisotest();
     else if (k_strieq(command, "userpftest")) command_userpftest();
+    else if (k_strieq(command, "timer")) command_timer();
+    else if (k_strieq(command, "timertest")) command_timertest();
+    else if (k_strieq(command, "preempttest")) command_preempttest();
+    else if (k_strieq(command, "userpreempttest")) command_userpreempttest();
+    else if (k_strieq(command, "reschedtest")) command_reschedtest();
     else if (k_strieq(command, "cpu")) command_cpu();
     else if (k_strieq(command, "interrupts")) command_interrupts();
     else if (k_strieq(command, "acpi")) command_acpi();

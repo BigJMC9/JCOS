@@ -3,6 +3,8 @@
 
 #include "types.h"
 
+#define RESCHEDULE_VECTOR 0x81U
+
 typedef struct {
     u64 rax, rbx, rcx, rdx, rbp, rdi, rsi;
     u64 r8, r9, r10, r11, r12, r13, r14, r15;
@@ -15,15 +17,6 @@ typedef struct {
     u64 rflags;
 } InterruptFrame;
 
-/*
- * Present after InterruptFrame when the CPU
- * changed privilege levels, such as Ring3 -> Ring0.
- */
-typedef struct {
-    u64 rsp;
-    u64 ss;
-} InterruptStackFrame;
-
 _Static_assert(__builtin_offsetof(InterruptFrame, rax) == 0,"InterruptFrame rax offset");
 _Static_assert(__builtin_offsetof(InterruptFrame, vector) == 120, "InterruptFrame vector offset");
 _Static_assert(__builtin_offsetof(InterruptFrame, error_code) == 128, "InterruptFrame error offset");
@@ -31,6 +24,24 @@ _Static_assert(__builtin_offsetof(InterruptFrame, rip) == 136, "InterruptFrame r
 _Static_assert(__builtin_offsetof(InterruptFrame, cs) == 144, "InterruptFrame cs offset");
 _Static_assert(__builtin_offsetof(InterruptFrame, rflags) == 152, "InterruptFrame rflags offset");
 _Static_assert(sizeof(InterruptFrame) == 160, "InterruptFrame size");
+
+/*
+ * Tail of an x86-64 interrupt-return frame.
+ *
+ * In 64-bit mode IRETQ consumes RSP and SS
+ * after RIP, CS, and RFLAGS.
+ *
+ * For Ring3 -> Ring0 these contain the saved
+ * user RSP/SS. Kernel interrupt contexts also
+ * require these fields when synthesizing an
+ * IRETQ return frame.
+ */
+typedef struct {
+    u64 rsp;
+    u64 ss;
+} InterruptStackFrame;
+
+_Static_assert(sizeof(InterruptStackFrame) == 16, "InterruptStackFrame size");
 
 typedef struct {
     bool valid;
@@ -55,7 +66,7 @@ bool interrupt_from_user(const InterruptFrame *frame);
 const InterruptStackFrame * interrupt_user_stack(const InterruptFrame *frame);
 
 void idt_init(bool tss_ready);
-void interrupt_dispatch(InterruptFrame *frame);
+InterruptFrame *interrupt_dispatch(InterruptFrame *frame);
 void interrupts_enable(void);
 void interrupts_disable(void);
 u64 interrupt_count(u8 vector);

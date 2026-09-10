@@ -22,4 +22,12 @@ void interrupt_controller_eoi(u8 vector);
 InterruptControllerInfo interrupt_controller_info(void);
 const char *interrupt_controller_name(void);
 
+/*
+ * Unmask a legacy 8259 IRQ.
+ *
+ * Currently valid only while the controller is
+ * operating in PIC fallback mode.
+ */
+bool interrupt_controller_unmask_legacy_irq(u8 irq);
+
 #endif
