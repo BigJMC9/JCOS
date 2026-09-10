@@ -22,6 +22,7 @@
 #include "scheduler.h"
 #include "timer.h"
 
+
 #define INPUT_CAPACITY 128U
 
 static VfsNode *g_cwd;
@@ -1883,7 +1884,7 @@ static void command_userpreempttest(void) {
         main_thread->state == THREAD_STATE_RUNNING && 
         main_thread->on_run_queue && 
         scheduler_thread_count() == 1 && 
-        !scheduler_preemption_enabled();
+        !scheduler_preemption_enabled()
     );
 
     terminal_write("  TIMER/MAIN: ");
