@@ -3,7 +3,7 @@
 
 #include "types.h"
 #include "pmm.h"
-#include "address_space.h"
+#include "process.h"
 
 #define THREAD_KERNEL_STACK_PAGES 4ULL
 #define THREAD_KERNEL_STACK_SIZE (THREAD_KERNEL_STACK_PAGES * FRAME_SIZE)
@@ -20,7 +20,7 @@ typedef enum {
 
 typedef struct Thread {
     u64 id;
-    AddressSpace *address_space;
+    Process *process;
     ThreadState state;
 
     u64 interrupt_rsp;
@@ -57,7 +57,7 @@ bool thread_prepare_user(
  * Its loader-provided stack is not PMM-owned.
  */
 bool thread_system_init(
-    AddressSpace *kernel_space,
+    Process *kernel_process,
     u64 bootstrap_stack_base,
     u64 bootstrap_stack_size,
     u64 bootstrap_stack_top
@@ -78,7 +78,7 @@ bool thread_activate(Thread *thread);
  * Create a non-running thread with its own
  * 16 KiB kernel stack.
  */
-bool thread_create(Thread *thread, AddressSpace *address_space);
+bool thread_create(Thread *thread, Process *process);
 
 bool thread_destroy(Thread *thread);
 

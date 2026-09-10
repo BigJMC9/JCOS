@@ -22,6 +22,8 @@
 #include "partition.h"
 #include "fat32.h"
 #include "thread.h"
+#include "process.h"
+#include "endpoint.h"
 #include "scheduler.h"
 #include "timer.h"
 #include "splash.h"
@@ -30,11 +32,19 @@
 #define DIRECT_MAP_MIN_PHYSICAL 0x100000ULL
 
 static void boot_delay(void) {
-    for (volatile u64 i = 0; i < 50000000ULL; ++i) arch_pause();
+    for (volatile u64 i = 0; i < 50000000ULL; ++i) {
+        arch_pause();
+    }
 }
 
 static bool map_physical_direct_map(VmPageMap *map, const BootInfo *boot) {
-    if (!map || !boot || !boot->memory_map || !boot->memory_map_size || boot->memory_map_descriptor_size < sizeof(BootMemoryDescriptor)) return false;
+    if (!map ||
+        !boot ||
+        !boot->memory_map ||
+        !boot->memory_map_size ||
+        boot->memory_map_descriptor_size < sizeof(BootMemoryDescriptor)) {
+        return false;
+    }
     for (u64 offset = 0; offset + sizeof(BootMemoryDescriptor) <= boot->memory_map_size; offset += boot->memory_map_descriptor_size) {
 
         const BootMemoryDescriptor *descriptor = (const BootMemoryDescriptor *)(u64)(boot->memory_map + offset);
@@ -52,7 +62,9 @@ static bool map_physical_direct_map(VmPageMap *map, const BootInfo *boot) {
 
         /* PML4 must have no low alias and a valid physmap alias. */
         if (end <= DIRECT_MAP_MIN_PHYSICAL) continue;
-        if (physical < DIRECT_MAP_MIN_PHYSICAL) physical = DIRECT_MAP_MIN_PHYSICAL;
+        if (physical < DIRECT_MAP_MIN_PHYSICAL) {
+            physical = DIRECT_MAP_MIN_PHYSICAL;
+        }
 
         u64 size = end - physical;
 
@@ -164,11 +176,10 @@ static bool build_kernel_page_map(VmPageMap *map, const BootInfo *boot, const Ac
     /* The PML4 itself came from PMM conventional memory, so it must also be accessible through the direct map. */
     u64 root_physical = frame_to_phys(map->root_frame);
     if (!root_physical) goto fail;
-
     if (vmm_query_page(map, root_physical, 0, 0)) {
-        serial_write( "PAGING: PML4 unexpectedly identity mapped\n");
+        serial_write("PAGING: PML4 unexpectedly identity mapped\n");
         goto fail;
-    } 
+    }
 
     u64 root_direct = 0;
     if (!physmap_virtual_address(root_physical, &root_direct)) goto fail;
@@ -220,14 +231,21 @@ void kernel_main(BootInfo *boot) {
     arch_cli();
     (void)serial_init();
 
-    if (!boot || boot->magic != BOOT_INFO_MAGIC || boot->version != BOOT_INFO_VERSION || boot->size < sizeof(BootInfo)) {
+    if (!boot ||
+        boot->magic != BOOT_INFO_MAGIC ||
+        boot->version != BOOT_INFO_VERSION ||
+        boot->size < sizeof(BootInfo)) {
         serial_write("JA OS: invalid BootInfo.\n");
         cpu_halt_forever();
     }
 
-    if (!framebuffer_init(boot) || !terminal_init()) { serial_write("JA OS: framebuffer initialization failed.\n"); cpu_halt_forever(); }
+    if (!framebuffer_init(boot) || !terminal_init()) {
+        serial_write("JA OS: framebuffer initialization failed.\n");
+        cpu_halt_forever();
+    }
 
-    splash_show(); splash_progress(5);
+    splash_show();
+    splash_progress(5);
     /* Firmware GDT/TSS still active. Do NOT use the IST yet. */
     idt_init(false);
     splash_progress(10);
@@ -259,7 +277,9 @@ void kernel_main(BootInfo *boot) {
     vfs_init();
     bool rootfs_ok = false;
 
-    if (boot->initrd_base && boot->initrd_size) rootfs_ok = tar_mount((const void *)(u64)boot->initrd_base, boot->initrd_size);
+    if (boot->initrd_base && boot->initrd_size) {
+        rootfs_ok = tar_mount((const void *)(u64)boot->initrd_base, boot->initrd_size);
+    }
 
     splash_progress(50);
     bool acpi_ok = acpi_init(boot->acpi_rsdp);
@@ -281,16 +301,19 @@ void kernel_main(BootInfo *boot) {
     BlockDevice *boot_disk = block_find("sda");
     if (boot_disk) {
         gpt_ok = gpt_probe(boot_disk);
-        if (gpt_ok) partitions_ok = gpt_register_partitions();
+        if (gpt_ok) {
+            partitions_ok = gpt_register_partitions();
+        }
     }
     if (partitions_ok) {
         BlockDevice *esp = block_find("sda1");
-        if (esp) fat32_ok = fat32_probe(esp);
+        if (esp) {
+            fat32_ok = fat32_probe(esp);
+        }
     }
 
     u64 old_cr3 = arch_read_cr3() & ~0xFFFULL;
     u64 new_cr3 = 0;
-
     bool paging_ok = false;
 
     /*
@@ -308,7 +331,7 @@ void kernel_main(BootInfo *boot) {
         if (address_space_kernel_init()) {
             kernel_space = address_space_kernel();
 
-            if (kernel_space && build_kernel_page_map(&kernel_space->page_map,boot, acpi, ahci)) {
+            if (kernel_space && build_kernel_page_map(&kernel_space->page_map, boot, acpi, ahci)) {
                 VmPageMap *kernel_map = &kernel_space->page_map;
                 new_cr3 = address_space_cr3(kernel_space);
 
@@ -324,8 +347,7 @@ void kernel_main(BootInfo *boot) {
                         u64 root_direct = 0;
                         if (!physmap_virtual_address(root_physical, &root_direct)) {
                             paging_ok = false;
-                        } 
-                        else {
+                        } else {
                             volatile const u64 *direct = (volatile const u64 *)(u64) root_direct;
                             volatile u64 probe = direct[0];
                             (void)probe;
@@ -340,22 +362,25 @@ void kernel_main(BootInfo *boot) {
                         if (paging_ok) {
 
                             PmmStats before = pmm_stats();
-
                             u64 bitmap_physical = before.bitmap_physical;
                             u64 bitmap_direct = 0;
 
                             if (!bitmap_physical || !physmap_virtual_address(bitmap_physical, &bitmap_direct)) {
                                 paging_ok = false;
-                            } 
-                            else {
+                            } else {
                                 frame_t mapped = FRAME_INVALID;
 
-                                if (!vmm_query_page(kernel_map, bitmap_direct, &mapped, 0)) paging_ok = false;
-                                else if (mapped != phys_to_frame(bitmap_physical)) paging_ok = false;
+                                if (!vmm_query_page(kernel_map, bitmap_direct, &mapped, 0)) {
+                                    paging_ok = false;
+                                } else if (mapped != phys_to_frame(bitmap_physical)) {
+                                    paging_ok = false;
+                                }
                             }
 
                             /* Only change g_bitmap after the mapping has been structurally verified. */
-                            if (paging_ok && !pmm_enable_phys_map_access()) paging_ok = false;
+                            if (paging_ok && !pmm_enable_phys_map_access()) {
+                                paging_ok = false;
+                            }
 
                             if (paging_ok) {
                                 PmmStats probe_before = pmm_stats();
@@ -363,12 +388,13 @@ void kernel_main(BootInfo *boot) {
 
                                 if (probe == FRAME_INVALID) {
                                     paging_ok = false;
-                                } 
-                                else {
+                                } else {
                                     bool freed = frame_free(probe);
                                     PmmStats probe_after = pmm_stats();
 
-                                    if (!freed || probe_before.free_pages != probe_after.free_pages) paging_ok = false;
+                                    if (!freed || probe_before.free_pages != probe_after.free_pages) {
+                                        paging_ok = false;
+                                    }
                                 }
                             }
                         }
@@ -377,32 +403,34 @@ void kernel_main(BootInfo *boot) {
 
                         if (!physmap_virtual_address(root_physical, &root_direct)) {
                             paging_ok = false;
-                        } 
-                        else {
+                        } else {
                             frame_t mapped = FRAME_INVALID;
 
                             /* VMM now walks page tables through the physmap. */
-                            if (!vmm_query_page(kernel_map, root_direct, &mapped, 0)) paging_ok = false;
-                            else if (mapped != kernel_map->root_frame) paging_ok = false;
+                            if (!vmm_query_page(kernel_map, root_direct, &mapped, 0)) {
+                                paging_ok = false;
+                            } else if (mapped != kernel_map->root_frame) {
+                                paging_ok = false;
+                            }
                         }
                     }
                     /* ------------------------------------------------ Move AHCI CPU-side DMA accesses onto the physical direct map. ------------------------------------------------ */
                     if (paging_ok && ahci_ok) {
                         if (!ahci_enable_phys_map_access()) {
                             paging_ok = false;
-                        } 
-                        else if (!boot_disk || boot_disk->block_size != 512U) {
+                        } else if (!boot_disk || boot_disk->block_size != 512U) {
                             /* AHCI claimed initialization succeeded, so the expected SATA block device should already exist. */
                             paging_ok = false;
 
-                        } 
-                        else {
+                        } else {
                             /*
                             * Switch CPU-side AHCI DMA access to physmap,
                             * then perform a real DMA read as a runtime probe.
                             */
                             u8 sector_probe[512];
-                            if (!block_read(boot_disk, 0, 1, sector_probe)) paging_ok = false;
+                            if (!block_read(boot_disk, 0, 1, sector_probe)) {
+                                paging_ok = false;
+                            }
                         }
                     }
                 }
@@ -424,12 +452,31 @@ void kernel_main(BootInfo *boot) {
     /* If this serial message appears, we have successfully executed code after MOV CR3. */
     serial_write("JA OS: JCOS PAGE TABLES ACTIVE.\n");
 
-    bool thread_ok = thread_system_init(
-        kernel_space, 
-        boot->kernel_stack_base, 
-        boot->kernel_stack_size, 
-        boot->kernel_stack_top
-    );
+    bool process_ok = process_system_init(kernel_space);
+    if (!process_ok) {
+        serial_write("JA OS: process initialization failed.\n");
+        terminal_set_color(terminal_error_color());
+        terminal_writeln("PROCESS INITIALIZATION FAILED.");
+        terminal_set_color(terminal_default_color());
+        cpu_halt_forever();
+    }
+
+    bool endpoint_ok = endpoint_system_init();
+    if (!endpoint_ok) {
+        serial_write("JA OS: endpoint initialization failed.\n");
+
+        terminal_set_color(terminal_error_color());
+        terminal_writeln("ENDPOINT INITIALIZATION FAILED.");
+        terminal_set_color(terminal_default_color());
+
+        cpu_halt_forever();
+    }
+
+    Process *kernel_process = process_kernel();
+
+    bool thread_ok =
+        kernel_process &&
+        thread_system_init(kernel_process, boot->kernel_stack_base, boot->kernel_stack_size, boot->kernel_stack_top);
 
     if (!thread_ok) {
         serial_write("JA OS: thread initialization failed.\n");
@@ -464,11 +511,14 @@ void kernel_main(BootInfo *boot) {
 
     arch_store_gdt(&gdtr);
 
-    terminal_clear(); terminal_set_color(terminal_accent_color());
+    terminal_clear();
+    terminal_set_color(terminal_accent_color());
     terminal_writeln("JA OS - INTERACTIVE X86_64 KERNEL");
     terminal_set_color(terminal_default_color());
     terminal_writeln("UEFI BOOT SERVICES EXITED. FRAMEBUFFER + SERIAL CONSOLES ONLINE.");
-    terminal_write("IDT: READY  GDT/TSS: "); terminal_write(gdt_ok ? "READY" : "FAILED"); terminal_write("  PMM: ");
+    terminal_write("IDT: READY  GDT/TSS: ");
+    terminal_write(gdt_ok ? "READY" : "FAILED");
+    terminal_write("  PMM: ");
     terminal_writeln(pmm_ok ? "READY" : "FAILED");
     terminal_write("PAGING: ");
     terminal_writeln(paging_ok ? "JCOS CR3 ACTIVE" : "FAILED");
@@ -477,33 +527,64 @@ void kernel_main(BootInfo *boot) {
     terminal_write("  PMM PHYS MAP: ");
     terminal_writeln(pmm_phys_map_access_enabled() ? "ACTIVE" : "INACTIVE");
     terminal_writeln("  LOW PMM IDENTITY: OFF");
-    terminal_write("  PHYS MAP BASE: "); terminal_write_hex(PHYS_MAP_BASE); terminal_putchar('\n');
+    terminal_write("  PHYS MAP BASE: ");
+    terminal_write_hex(PHYS_MAP_BASE);
+    terminal_putchar('\n');
     terminal_write("  AHCI DMA PHYS MAP: ");
     terminal_writeln(ahci_phys_map_access_enabled() ? "ACTIVE" : "INACTIVE");
 
     u64 root_physical = frame_to_phys(kernel_space->page_map.root_frame);
     u64 root_direct = 0;
 
-    if (physmap_virtual_address(root_physical, &root_direct)) { terminal_write("  PML4 DIRECT: "); terminal_write_hex(root_direct); terminal_putchar('\n'); }
-    terminal_write("  CS: "); terminal_write_hex(arch_read_cs()); 
-    terminal_write("  TR: "); terminal_write_hex(arch_read_tr()); terminal_putchar('\n'); 
-    terminal_write("  RSP0: "); terminal_write_hex(gdt_rsp0()); terminal_putchar('\n'); 
-    terminal_write("  IST1: "); terminal_write_hex(gdt_ist1()); terminal_putchar('\n'); 
-    terminal_write("  OLD CR3: "); terminal_write_hex(old_cr3); terminal_putchar('\n'); 
-    terminal_write("  NEW CR3: "); terminal_write_hex(new_cr3); terminal_putchar('\n'); 
-    terminal_write("  PML4 FRAME: "); terminal_write_u64(kernel_space->page_map.root_frame);
-    terminal_write("  GDTR BASE: "); terminal_write_hex(gdtr.base); 
-    terminal_write("  LIMIT: "); terminal_write_u64(gdtr.limit); terminal_putchar('\n');
-    terminal_write("  ACPI: "); terminal_write(acpi_ok ? "READY" : "FALLBACK");
+    if (physmap_virtual_address(root_physical, &root_direct)) {
+        terminal_write("  PML4 DIRECT: ");
+        terminal_write_hex(root_direct);
+        terminal_putchar('\n');
+    }
+    terminal_write("  CS: ");
+    terminal_write_hex(arch_read_cs());
+    terminal_write("  TR: ");
+    terminal_write_hex(arch_read_tr());
+    terminal_putchar('\n');
+    terminal_write("  RSP0: ");
+    terminal_write_hex(gdt_rsp0());
+    terminal_putchar('\n');
+    terminal_write("  IST1: ");
+    terminal_write_hex(gdt_ist1());
+    terminal_putchar('\n');
+    terminal_write("  OLD CR3: ");
+    terminal_write_hex(old_cr3);
+    terminal_putchar('\n');
+    terminal_write("  NEW CR3: ");
+    terminal_write_hex(new_cr3);
+    terminal_putchar('\n');
+    terminal_write("  PML4 FRAME: ");
+    terminal_write_u64(kernel_space->page_map.root_frame);
+    terminal_write("  GDTR BASE: ");
+    terminal_write_hex(gdtr.base);
+    terminal_write("  LIMIT: ");
+    terminal_write_u64(gdtr.limit);
+    terminal_putchar('\n');
+    terminal_write("  ACPI: ");
+    terminal_write(acpi_ok ? "READY" : "FALLBACK");
     terminal_write("  IRQ: ");
     terminal_writeln(controller_ok ? interrupt_controller_name() : "FAILED");
-    terminal_write("PCI: "); terminal_write_u64(pci_device_count());
+    terminal_write("PCI: ");
+    terminal_write_u64(pci_device_count());
     terminal_writeln(" DEVICE(S)");
-    terminal_write("BLOCK DEVICES: "); terminal_write_u64(block_device_count()); terminal_putchar('\n');
+    terminal_write("BLOCK DEVICES: ");
+    terminal_write_u64(block_device_count());
+    terminal_putchar('\n');
     terminal_write("AHCI: ");
-    terminal_writeln( ahci_ok ? "DETECTED" : "NOT DETECTED");
-    terminal_write("THREADS: "); terminal_writeln( thread_ok ? "READY" : "FAILED");
-    terminal_write("SCHEDULER: "); terminal_writeln(scheduler_ok ? "READY" : "FAILED");
+    terminal_writeln(ahci_ok ? "DETECTED" : "NOT DETECTED");
+    terminal_write("PROCESSES: ");
+    terminal_writeln(process_ok ? "READY" : "FAILED");
+    terminal_write("ENDPOINTS: ");
+    terminal_writeln(endpoint_ok ? "READY" : "FAILED");
+    terminal_write("THREADS: ");
+    terminal_writeln(thread_ok ? "READY" : "FAILED");
+    terminal_write("SCHEDULER: ");
+    terminal_writeln(scheduler_ok ? "READY" : "FAILED");
     terminal_write("TIMER: ");
     if (timer_ok) {
         terminal_write("PIT ");
@@ -513,7 +594,8 @@ void kernel_main(BootInfo *boot) {
     else {
         terminal_writeln("FAILED");
     }
-    terminal_write("PS/2: "); terminal_write(keyboard_ok ? "DETECTED" : "NOT DETECTED");
+    terminal_write("PS/2: ");
+    terminal_write(keyboard_ok ? "DETECTED" : "NOT DETECTED");
     terminal_write("  COM1: ");
     terminal_writeln(serial_available() ? "READY" : "NOT DETECTED");
     terminal_write("ROOTFS: ");
@@ -523,7 +605,7 @@ void kernel_main(BootInfo *boot) {
     terminal_write("  PARTITIONS: ");
     terminal_writeln(partitions_ok ? "READY" : "FAILED");
     terminal_write("FAT32: ");
-    terminal_writeln( fat32_ok ? "READY" : "FAILED");
+    terminal_writeln(fat32_ok ? "READY" : "FAILED");
     terminal_writeln("TYPE help AND PRESS ENTER.");
     terminal_putchar('\n');
 
