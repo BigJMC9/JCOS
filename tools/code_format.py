@@ -1072,12 +1072,13 @@ def collapse_multiline_assignments(
         joined = normalize_joined_code(" ".join(parts))
         candidate = indent + joined
 
-        if len(candidate.expandtabs(4)) <= LINE_LENGTH_TARGET:
+        if len(candidate.expandtabs(4)) <= LINE_LENGTH_HARD_LIMIT:
             result.append(candidate)
             i = cursor
             continue
 
-        # The joined assignment would be harder to scan than the original.
+        # A genuinely long compound expression is left for the later logical/
+        # call wrappers. Do not force an arbitrary split through '=' here.
         # Preserve the source layout rather than creating an overlong line.
         result.append(line)
         i += 1
@@ -1780,6 +1781,92 @@ def normalize_c_spacing(lines: list[str]) -> list[str]:
     return [normalize_c_line_spacing(line) for line in lines]
 
 
+def collapse_short_multiline_defines(lines: list[str]) -> list[str]:
+    """Collapse simple continued ``#define`` directives when one line is clearer.
+
+    Examples::
+
+        #define USER_STACK \\
+            (ADDRESS_SPACE_USER_BASE + 0x100000ULL)
+
+    becomes::
+
+        #define USER_STACK (ADDRESS_SPACE_USER_BASE + 0x100000ULL)
+
+    Continuations remain multiline when the joined directive would exceed the
+    normal line target or when the macro is structurally multiline (for
+    example a ``do { ... } while (0)`` statement macro).
+    """
+
+    result: list[str] = []
+    i = 0
+
+    while i < len(lines):
+        first = lines[i]
+        stripped = first.lstrip()
+
+        if not stripped.startswith("#define ") or not first.rstrip().endswith("\\"):
+            result.append(first)
+            i += 1
+            continue
+
+        indent = first[:len(first) - len(stripped)]
+        parts = [first.rstrip()[:-1].rstrip()]
+        cursor = i + 1
+        complete = False
+
+        while cursor < len(lines):
+            current = lines[cursor]
+            current_stripped = current.strip()
+
+            if not current_stripped:
+                break
+
+            continued = current.rstrip().endswith("\\")
+            part = current.rstrip()
+            if continued:
+                part = part[:-1].rstrip()
+
+            parts.append(part.strip())
+            cursor += 1
+
+            if not continued:
+                complete = True
+                break
+
+        if not complete:
+            result.append(first)
+            i += 1
+            continue
+
+        # Statement-style macros are intentionally multiline because braces and
+        # semicolon-separated actions carry real structure that should remain
+        # visible even when the characters technically fit on one line.
+        body_text = " ".join(parts[1:])
+        structurally_multiline = (
+            "{" in body_text
+            or "}" in body_text
+            or count_top_level_semicolons(body_text) > 1
+        )
+
+        candidate = " ".join(part for part in parts if part)
+        candidate = normalize_joined_code(candidate)
+        candidate = indent + candidate
+
+        if (
+            not structurally_multiline
+            and len(candidate.expandtabs(4)) <= LINE_LENGTH_TARGET
+        ):
+            result.append(candidate)
+            i = cursor
+            continue
+
+        result.extend(lines[i:cursor])
+        i = cursor
+
+    return result
+
+
 def is_guard_statement(text: str) -> bool:
     """Return True for a short control-flow exit suitable for an inline guard."""
 
@@ -2346,8 +2433,17 @@ def _pack_wrapped_fragments(
     final_suffix: str = "",
     *,
     target: int = WRAP_LINE_TARGET,
+    keep_first_with_prefix: bool = False,
 ) -> list[str]:
-    """Greedily pack already-safe fragments into readable continuation lines."""
+    """Greedily pack already-safe fragments into readable continuation lines.
+
+    ``fragments`` are semantic units that must not be broken internally. For
+    boolean expressions this means a comparison such as ``left == right`` stays
+    on one physical line. When ``keep_first_with_prefix`` is true, the first
+    fragment also stays attached to its prefix; logical assignments therefore
+    wrap only *between* complete predicates instead of producing ``value =`` on
+    a line by itself.
+    """
 
     if not fragments:
         return [first_prefix.rstrip() + final_suffix]
@@ -2356,7 +2452,7 @@ def _pack_wrapped_fragments(
     prefix = first_prefix
     current = prefix
 
-    for fragment in fragments:
+    for fragment_index, fragment in enumerate(fragments):
         separator = "" if current == prefix else " "
         candidate = current + separator + fragment
 
@@ -2365,11 +2461,18 @@ def _pack_wrapped_fragments(
             prefix = continuation_prefix
             current = prefix + fragment
         elif current == prefix and len(candidate.expandtabs(4)) > target:
-            # If the very first fragment cannot fit beside its prefix, keep the
-            # prefix as a natural opening line and move the fragment below it.
-            result.append(current.rstrip())
-            prefix = continuation_prefix
-            current = prefix + fragment
+            if keep_first_with_prefix and fragment_index == 0:
+                # Assignment + first predicate is one readable unit. It may use
+                # the hard-limit headroom, and if exceptionally long identifiers
+                # still exceed that limit we prefer one unavoidable long atomic
+                # expression over splitting either side of '=' or a comparison.
+                current = candidate
+            else:
+                # For non-assignment constructs a prefix-only opening line is a
+                # reasonable fallback when the first fragment cannot fit.
+                result.append(current.rstrip())
+                prefix = continuation_prefix
+                current = prefix + fragment
         else:
             current = candidate
 
@@ -2507,6 +2610,7 @@ def wrap_long_logical_assignments(lines: list[str]) -> list[str]:
                 indent + "    ",
                 terms,
                 ";",
+                keep_first_with_prefix=True,
             )
         )
 
@@ -2588,6 +2692,7 @@ def compact_multiline_logical_assignments(lines: list[str]) -> list[str]:
                     indent + "    ",
                     terms,
                     ");",
+                    keep_first_with_prefix=True,
                 )
                 result.extend(packed)
                 wrapped = True
@@ -2601,6 +2706,7 @@ def compact_multiline_logical_assignments(lines: list[str]) -> list[str]:
                         indent + "    ",
                         terms,
                         ";",
+                        keep_first_with_prefix=True,
                     )
                 )
                 wrapped = True
@@ -2613,6 +2719,123 @@ def compact_multiline_logical_assignments(lines: list[str]) -> list[str]:
 
     return result
 
+
+
+def _logical_return_terms(statement: str) -> list[str] | None:
+    """Return top-level logical terms from one complete ``return`` statement.
+
+    The surrounding presentation parentheses, when present, are ignored while
+    finding ``&&``/``||`` boundaries. Individual comparisons remain atomic, so
+    a predicate such as ``left == RIGHT`` is never split across source lines.
+    """
+
+    code = strip_trailing_block_comments(statement.strip())
+    if not code.endswith(";"):
+        return None
+
+    match = re.match(r"^return(?:\s+|\s*\()", code)
+    if match is None:
+        return None
+
+    expression = code[len("return"): -1].strip()
+    if not expression:
+        return None
+
+    if expression.startswith("(") and find_matching_paren(expression, 0) == len(expression) - 1:
+        expression = expression[1:-1].strip()
+
+    terms = split_top_level_logical_terms(expression)
+    return terms if len(terms) >= 2 else None
+
+
+def _collect_multiline_return(
+    lines: list[str],
+    index: int,
+) -> tuple[str, int] | None:
+    """Collect one multiline return statement without crossing structure."""
+
+    first = lines[index]
+    stripped = first.strip()
+    if not re.match(r"^return(?:\s|$|\()", stripped):
+        return None
+    if strip_trailing_block_comments(stripped).endswith(";"):
+        return None
+    if stripped.startswith(("#", "/*")) or "{" in stripped or "}" in stripped:
+        return None
+
+    indent = statement_indent(first)
+    parts = [stripped]
+    cursor = index + 1
+    paren_depth, state = scan_parens(first)
+
+    while cursor < len(lines):
+        piece = lines[cursor].strip()
+        if not piece or piece.startswith(("#", "/*")) or "{" in piece or "}" in piece:
+            return None
+
+        parts.append(piece)
+        paren_depth, state = scan_parens(lines[cursor], paren_depth, state)
+        joined = normalize_joined_code(" ".join(parts))
+
+        if paren_depth == 0 and strip_trailing_block_comments(joined).endswith(";"):
+            return indent + joined, cursor + 1
+
+        cursor += 1
+
+    return None
+
+
+def format_logical_returns(lines: list[str]) -> list[str]:
+    """Canonicalize long/multiline boolean returns.
+
+    A logical return is formatted as::
+
+        return (
+            first_comparison &&
+            second_comparison &&
+            final_comparison
+        );
+
+    Wrapping occurs only between top-level logical terms. Assignment and
+    comparison operators therefore stay on the same physical line as both of
+    their operands. Short single-line returns are left alone.
+    """
+
+    result: list[str] = []
+    i = 0
+
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+        collected = _collect_multiline_return(lines, i)
+
+        if collected is not None:
+            statement, next_index = collected
+            terms = _logical_return_terms(statement)
+            if terms is not None:
+                indent = statement_indent(statement)
+                result.append(indent + "return (")
+                result.extend(indent + "    " + term for term in terms)
+                result.append(indent + ");")
+                i = next_index
+                continue
+
+        # A single physical line only needs expansion when it exceeds the
+        # normal line target. Compact short returns remain compact.
+        if len(line.expandtabs(4)) > LINE_LENGTH_TARGET:
+            terms = _logical_return_terms(line)
+            if terms is not None:
+                indent = statement_indent(line)
+                result.append(indent + "return (")
+                result.extend(indent + "    " + term for term in terms)
+                result.append(indent + ");")
+                i += 1
+                continue
+
+        result.append(line)
+        i += 1
+
+    return result
 
 def wrap_long_parenthesized_lines(lines: list[str]) -> list[str]:
     """Wrap long calls/declarations, packing multiple arguments per continuation line."""
@@ -2726,8 +2949,16 @@ def compact_internal_blank_lines(lines: list[str]) -> list[str]:
         ):
             continue
 
-        # Cleanup followed by return/break/continue is one compact exit phase.
-        if same_indent and is_guard_statement(next_line) and not previous_is_comment and previous_stripped != "}":
+        # Cleanup followed by a complete one-line return/break/continue is one
+        # compact exit phase. A multiline logical `return (` is a main expression
+        # block, so preserve the blank line that separates it from an earlier guard.
+        if (
+            same_indent
+            and is_guard_statement(next_line)
+            and strip_trailing_block_comments(next_stripped).endswith(";")
+            and not previous_is_comment
+            and previous_stripped != "}"
+        ):
             continue
 
         result.append(line)
@@ -2976,6 +3207,11 @@ def format_text(original: str) -> str:
 
     lines = text.splitlines()
 
+    # Prefer one-line object-like/function-like macros when they fit. Keep the
+    # continuation form only for genuinely long or structurally multiline
+    # macros such as statement macros.
+    lines = collapse_short_multiline_defines(lines)
+
     # First normalize safe whitespace. This repairs visual noise such as
     # `value =true`, `thread-> member`, `if(`, and missing spaces after commas
     # without touching strings, comments, preprocessor directives, or asm.
@@ -3010,6 +3246,7 @@ def format_text(original: str) -> str:
     # lines. Several related predicates/arguments may share a line; this keeps
     # the source compact without recreating the old 200+ column lines.
     lines = compact_multiline_logical_assignments(lines)
+    lines = format_logical_returns(lines)
     lines = wrap_long_control_conditions(lines)
     lines = wrap_long_logical_assignments(lines)
     lines = wrap_long_parenthesized_lines(lines)
