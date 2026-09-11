@@ -6,6 +6,7 @@ ROOTFS := $(BUILD)/ROOTFS.TAR
 USER_ELF_TEST := $(ROOTFS_DIR)/bin/elftest.elf
 USER_SUPERVISOR := $(ROOTFS_DIR)/bin/supervisor.elf
 .DEFAULT_GOAL := all
+.DELETE_ON_ERROR:
 
 USER_PROGRAMS := $(USER_ELF_TEST) $(USER_SUPERVISOR)
 ROOTFS_FILES := $(shell test -d $(ROOTFS_DIR) && find $(ROOTFS_DIR) -type f)
@@ -22,19 +23,33 @@ QEMU ?= qemu-system-x86_64
 OVMF_CODE ?= /mingw64/share/qemu/edk2-x86_64-code.fd
 OVMF_VARS ?= /mingw64/share/qemu/edk2-i386-vars.fd
 
+# A successful inspection is required; tool failure is not a clean ELF report.
+define CHECK_ELF_RELOCATIONS
+	@set -eu; \
+	if ! relocations="$$(LC_ALL=C $(READELF) -r "$@")"; then \
+		echo "Failed to inspect ELF relocations: $@" >&2; \
+		exit 1; \
+	fi; \
+	case "$$relocations" in \
+		*R_X86_64*) \
+			printf '%s\n' "$$relocations"; \
+			echo "Runtime relocations are unsupported: $@" >&2; \
+			exit 1 ;; \
+		'') \
+			echo "Empty ELF relocation report: $@" >&2; \
+			exit 1 ;; \
+	esac
+endef
+
 $(BUILD)/user_elftest.o: user/elftest.S include/user_abi.h | $(BUILD)
 	$(CLANG) --target=x86_64-unknown-none-elf -c $< -o $@
 
-$(USER_ELF_TEST): $(BUILD)/user_elftest.o user/elftest.ld
+$(USER_ELF_TEST): $(BUILD)/user_elftest.o user/elftest.ld Makefile.msys2
 	mkdir -p $(dir $@)
 	$(LD) -m elf_x86_64 -nostdlib -static \
 	      -T user/elftest.ld \
 	      -o $@ $(BUILD)/user_elftest.o
-	@if $(READELF) -r $@ | grep -q 'R_X86_64'; then \
-		echo "Userspace ELF has runtime relocations; unsupported."; \
-		$(READELF) -r $@; \
-		exit 1; \
-	fi
+	$(CHECK_ELF_RELOCATIONS)
 
 $(BUILD)/user_crt0.o: user/crt0.S | $(BUILD)
 	$(CLANG) --target=x86_64-unknown-none-elf -c $< -o $@
@@ -51,7 +66,7 @@ $(BUILD)/user_supervisor.o: user/supervisor.c \
 $(USER_SUPERVISOR): $(BUILD)/user_crt0.o \
                     $(BUILD)/user_syscall.o \
                     $(BUILD)/user_supervisor.o \
-                    user/supervisor.ld
+                    user/supervisor.ld Makefile.msys2
 	mkdir -p $(dir $@)
 	$(LD) -m elf_x86_64 -nostdlib -static \
 	      -T user/supervisor.ld \
@@ -59,15 +74,12 @@ $(USER_SUPERVISOR): $(BUILD)/user_crt0.o \
 	      $(BUILD)/user_crt0.o \
 	      $(BUILD)/user_syscall.o \
 	      $(BUILD)/user_supervisor.o
-	@if $(READELF) -r $@ | grep -q 'R_X86_64'; then \
-		echo "Supervisor ELF has runtime relocations; unsupported."; \
-		$(READELF) -r $@; \
-		exit 1; \
-	fi
+	$(CHECK_ELF_RELOCATIONS)
 
 $(ROOTFS): $(USER_PROGRAMS) $(ROOTFS_FILES) | $(BUILD)
 	@test -d "$(ROOTFS_DIR)" || { echo "Missing $(ROOTFS_DIR) directory"; exit 1; }
-	@test -n "$$(find "$(ROOTFS_DIR)" -type f -print -quit)" || ...
+	@files="$$(find "$(ROOTFS_DIR)" -type f -print -quit)" || exit 1; \
+		test -n "$$files" || { echo "$(ROOTFS_DIR) contains no files"; exit 1; }
 	rm -f $@
 	tar --format=ustar -cf $@ -C $(ROOTFS_DIR) .
 
@@ -137,14 +149,10 @@ endif
 $(BUILD)/kernel_%.o: kernel/%.c $(KERNEL_HEADERS) | $(BUILD)
 	$(CLANG) $(KERNEL_CFLAGS) -c $< -o $@
 
-$(KERNEL): $(BUILD)/arch.o $(KERNEL_C_OBJECTS) kernel/linker.ld
+$(KERNEL): $(BUILD)/arch.o $(KERNEL_C_OBJECTS) kernel/linker.ld Makefile.msys2
 	$(LD) -m elf_x86_64 -pie -Bsymbolic --no-dynamic-linker --no-undefined -nostdlib \
 	      -T kernel/linker.ld -o $@ $(BUILD)/arch.o $(KERNEL_C_OBJECTS)
-	@if $(READELF) -r $@ | grep -q 'R_X86_64'; then \
-		echo "Kernel has runtime relocations; this loader does not apply them."; \
-		$(READELF) -r $@; \
-		exit 1; \
-	fi
+	$(CHECK_ELF_RELOCATIONS)
 
 $(IMAGE): $(EFI) $(KERNEL) $(ROOTFS) tools/make_usb_image.py
 	$(PYTHON) tools/make_usb_image.py $(EFI) $(KERNEL) $(ROOTFS) $(IMAGE)
