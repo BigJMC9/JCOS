@@ -259,9 +259,7 @@ InterruptFrame *interrupt_dispatch(InterruptFrame *frame) {
         exception_panic(frame);
     }
     if (vector == SYSCALL_VECTOR) {
-        /* INT 0x80 entered through the DPL3 syscall gate and already switched to TSS.RSP0. */
-        syscall_dispatch(frame);
-        return frame;
+        return syscall_dispatch(frame);
     }
     if (vector == RESCHEDULE_VECTOR) {
         return scheduler_reschedule(frame);

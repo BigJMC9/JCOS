@@ -3,14 +3,13 @@ EFI := $(BUILD)/BOOTX64.EFI
 KERNEL := $(BUILD)/KERNEL.ELF
 ROOTFS_DIR := rootfs
 ROOTFS := $(BUILD)/ROOTFS.TAR
+USER_ELF_TEST := $(ROOTFS_DIR)/bin/elftest.elf
+USER_SUPERVISOR := $(ROOTFS_DIR)/bin/supervisor.elf
+.DEFAULT_GOAL := all
+
+USER_PROGRAMS := $(USER_ELF_TEST) $(USER_SUPERVISOR)
 ROOTFS_FILES := $(shell test -d $(ROOTFS_DIR) && find $(ROOTFS_DIR) -type f)
 IMAGE := $(BUILD)/JA-os.img
-
-$(ROOTFS): $(ROOTFS_FILES) | $(BUILD)
-	@test -d "$(ROOTFS_DIR)" || { echo "Missing $(ROOTFS_DIR) directory"; exit 1; }
-	@test -n "$(ROOTFS_FILES)" || { echo "$(ROOTFS_DIR) contains no files"; exit 1; }
-	rm -f $@
-	tar --format=ustar -cf $@ -C $(ROOTFS_DIR) .
 
 CLANG ?= clang
 LLD_LINK ?= lld-link
@@ -23,6 +22,55 @@ QEMU ?= qemu-system-x86_64
 OVMF_CODE ?= /mingw64/share/qemu/edk2-x86_64-code.fd
 OVMF_VARS ?= /mingw64/share/qemu/edk2-i386-vars.fd
 
+$(BUILD)/user_elftest.o: user/elftest.S include/user_abi.h | $(BUILD)
+	$(CLANG) --target=x86_64-unknown-none-elf -c $< -o $@
+
+$(USER_ELF_TEST): $(BUILD)/user_elftest.o user/elftest.ld
+	mkdir -p $(dir $@)
+	$(LD) -m elf_x86_64 -nostdlib -static \
+	      -T user/elftest.ld \
+	      -o $@ $(BUILD)/user_elftest.o
+	@if $(READELF) -r $@ | grep -q 'R_X86_64'; then \
+		echo "Userspace ELF has runtime relocations; unsupported."; \
+		$(READELF) -r $@; \
+		exit 1; \
+	fi
+
+$(BUILD)/user_crt0.o: user/crt0.S | $(BUILD)
+	$(CLANG) --target=x86_64-unknown-none-elf -c $< -o $@
+
+$(BUILD)/user_syscall.o: user/lib/syscall.S include/user_abi.h | $(BUILD)
+	$(CLANG) --target=x86_64-unknown-none-elf -c $< -o $@
+
+$(BUILD)/user_supervisor.o: user/supervisor.c \
+                            user/lib/syscall.h \
+                            include/user_abi.h \
+                            include/supervisor_protocol.h | $(BUILD)
+	$(CLANG) $(USER_CFLAGS) -c $< -o $@
+
+$(USER_SUPERVISOR): $(BUILD)/user_crt0.o \
+                    $(BUILD)/user_syscall.o \
+                    $(BUILD)/user_supervisor.o \
+                    user/supervisor.ld
+	mkdir -p $(dir $@)
+	$(LD) -m elf_x86_64 -nostdlib -static \
+	      -T user/supervisor.ld \
+	      -o $@ \
+	      $(BUILD)/user_crt0.o \
+	      $(BUILD)/user_syscall.o \
+	      $(BUILD)/user_supervisor.o
+	@if $(READELF) -r $@ | grep -q 'R_X86_64'; then \
+		echo "Supervisor ELF has runtime relocations; unsupported."; \
+		$(READELF) -r $@; \
+		exit 1; \
+	fi
+
+$(ROOTFS): $(USER_PROGRAMS) $(ROOTFS_FILES) | $(BUILD)
+	@test -d "$(ROOTFS_DIR)" || { echo "Missing $(ROOTFS_DIR) directory"; exit 1; }
+	@test -n "$$(find "$(ROOTFS_DIR)" -type f -print -quit)" || ...
+	rm -f $@
+	tar --format=ustar -cf $@ -C $(ROOTFS_DIR) .
+
 LOADER_CFLAGS := --target=x86_64-pc-win32-coff -std=c11 -ffreestanding \
                  -fno-stack-protector -fno-builtin -fno-exceptions \
                  -fno-asynchronous-unwind-tables -fno-unwind-tables \
@@ -34,9 +82,15 @@ KERNEL_CFLAGS := --target=x86_64-unknown-none-elf -std=c11 -ffreestanding \
                  -fno-asynchronous-unwind-tables -fno-unwind-tables \
                  -Wall -Wextra -Werror -O2
 
+USER_CFLAGS := --target=x86_64-unknown-none-elf -std=c11 -ffreestanding \
+               -fno-stack-protector -fno-builtin -fpie -fno-plt \
+               -fvisibility=hidden -mno-red-zone -mno-sse -mno-sse2 \
+               -fno-asynchronous-unwind-tables -fno-unwind-tables \
+               -Wall -Wextra -Werror -O2
+
 KERNEL_C_SOURCES := $(sort $(wildcard kernel/*.c))
 KERNEL_C_OBJECTS := $(patsubst kernel/%.c,$(BUILD)/kernel_%.o,$(KERNEL_C_SOURCES))
-KERNEL_HEADERS := $(wildcard kernel/*.h) include/boot_info.h
+KERNEL_HEADERS := $(wildcard kernel/*.h) $(wildcard include/*.h)
 NASM_PATH := $(shell command -v $(NASM) 2>/dev/null)
 
 .PHONY: all binaries image validate run run-headless inspect clean check-build-tools check-image-tools check-inspect-tools check-run-tools
@@ -92,9 +146,6 @@ $(KERNEL): $(BUILD)/arch.o $(KERNEL_C_OBJECTS) kernel/linker.ld
 		exit 1; \
 	fi
 
-$(ROOTFS): $(shell find $(ROOTFS_DIR) -type f) | $(BUILD)
-	tar --format=ustar -cf $@ -C $(ROOTFS_DIR) .
-
 $(IMAGE): $(EFI) $(KERNEL) $(ROOTFS) tools/make_usb_image.py
 	$(PYTHON) tools/make_usb_image.py $(EFI) $(KERNEL) $(ROOTFS) $(IMAGE)
 
@@ -119,3 +170,4 @@ run-headless: check-run-tools $(IMAGE) tools/run_qemu.sh
 
 clean:
 	rm -rf $(BUILD)
+	rm -f $(USER_PROGRAMS)

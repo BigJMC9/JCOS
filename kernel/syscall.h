@@ -3,15 +3,21 @@
 
 #include "types.h"
 #include "interrupts.h"
+#include "../include/user_abi.h"
 
 #define SYSCALL_VECTOR 0x80U
 
-#define SYSCALL_THREAD_ID 0ULL
+#define SYSCALL_THREAD_ID            JCOS_SYSCALL_THREAD_ID
+#define SYSCALL_IPC_TRY_SEND         JCOS_SYSCALL_IPC_TRY_SEND
+#define SYSCALL_IPC_TRY_RECEIVE      JCOS_SYSCALL_IPC_TRY_RECEIVE
+#define SYSCALL_THREAD_EXIT          JCOS_SYSCALL_THREAD_EXIT
+#define SYSCALL_IPC_RECEIVE_BLOCKING JCOS_SYSCALL_IPC_RECEIVE_BLOCKING
+#define SYSCALL_IPC_SEND_BLOCKING    JCOS_SYSCALL_IPC_SEND_BLOCKING
 
-#define SYSCALL_RESULT_INVALID (~0ULL)
+#define SYSCALL_RESULT_FAILED        JCOS_SYSCALL_RESULT_FAILED
+#define SYSCALL_RESULT_OK            JCOS_SYSCALL_RESULT_OK
+#define SYSCALL_RESULT_INVALID       JCOS_SYSCALL_RESULT_INVALID
 
-void syscall_dispatch(
-    InterruptFrame *frame
-);
+InterruptFrame *syscall_dispatch(InterruptFrame *frame);
 
 #endif

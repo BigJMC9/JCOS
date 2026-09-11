@@ -25,6 +25,7 @@
 #include "process.h"
 #include "endpoint.h"
 #include "scheduler.h"
+#include "supervisor.h"
 #include "timer.h"
 #include "splash.h"
 
@@ -494,6 +495,18 @@ void kernel_main(BootInfo *boot) {
         terminal_set_color(terminal_default_color());
         cpu_halt_forever();
     }
+
+    bool supervisor_ok = supervisor_start();
+
+    if (!supervisor_ok) {
+        serial_write("JA OS: supervisor initialization failed.\n");
+        terminal_set_color(terminal_error_color());
+        terminal_writeln("SUPERVISOR INITIALIZATION FAILED.");
+        terminal_set_color(terminal_default_color());
+
+        cpu_halt_forever();
+    }
+
     bool timer_ok = timer_init(100U);
 
     splash_progress(85);
@@ -585,6 +598,8 @@ void kernel_main(BootInfo *boot) {
     terminal_writeln(thread_ok ? "READY" : "FAILED");
     terminal_write("SCHEDULER: ");
     terminal_writeln(scheduler_ok ? "READY" : "FAILED");
+    terminal_write("SUPERVISOR: ");
+    terminal_writeln(supervisor_ok ? "READY" : "FAILED");
     terminal_write("TIMER: ");
     if (timer_ok) {
         terminal_write("PIT ");
