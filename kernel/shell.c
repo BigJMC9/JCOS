@@ -29,6 +29,7 @@
 #include "user_elf.h"
 #include "supervisor.h"
 #include "user_runtime_test.h"
+#include "user_runtime_block_test.h"
 
 #define INPUT_CAPACITY 128U
 
@@ -192,6 +193,7 @@ static void command_help(void) {
     terminal_writeln("  userpftest  test recoverable Ring3 page fault");
     terminal_writeln("  userelftest test filesystem ELF Ring3 loader");
     terminal_writeln("  userruntimetest test shared Ring3 C runtime");
+    terminal_writeln("  userruntimeblocktest test blocking Ring3 C runtime");
     terminal_writeln("  timer       show PIT timer state");
     terminal_writeln("  timertest   test periodic IRQ0 ticks");
     terminal_writeln("  preempttest test timer-driven involuntary switching");
@@ -6564,6 +6566,7 @@ static void execute(char *line) {
     else if (k_strieq(command, "userpftest")) command_userpftest();
     else if (k_strieq(command, "userelftest")) command_userelftest();
     else if (k_strieq(command, "userruntimetest")) user_runtime_test_run();
+    else if (k_strieq(command, "userruntimeblocktest")) user_runtime_block_test_run();
     else if (k_strieq(command, "timer")) command_timer();
     else if (k_strieq(command, "timertest")) command_timertest();
     else if (k_strieq(command, "preempttest")) command_preempttest();
