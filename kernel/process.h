@@ -5,6 +5,8 @@
 #include "address_space.h"
 #include "capability.h"
 
+struct Thread;
+
 typedef struct Process {
     u64 id;
 
@@ -25,6 +27,13 @@ typedef struct Process {
      * yet have a general kernel heap.
      */
     AddressSpace owned_address_space;
+
+    /*
+    * Intrusive list of Threads owned by this
+    * Process.
+    */
+    struct Thread *thread_head;
+    struct Thread *thread_tail;
 
     u64 thread_count;
 
@@ -61,12 +70,10 @@ CapabilityTable *process_capabilities(Process *process);
 
 u64 process_thread_count(const Process *process);
 
-/*
- * Thread ownership accounting.
- *
- * These are used by the thread subsystem.
- */
-bool process_thread_attach(Process *process);
-bool process_thread_detach(Process *process);
+bool process_thread_attach(Process *process, struct Thread *thread);
+bool process_thread_detach(Process *process, struct Thread *thread);
+bool process_thread_contains(const Process *process, const struct Thread *thread);
+
+struct Thread *process_thread_first(const Process *process);
 
 #endif

@@ -125,4 +125,6 @@ bool capability_revoke(
     CapabilityHandle handle
 );
 
+bool capability_revoke_all(CapabilityTable *table);
+
 #endif

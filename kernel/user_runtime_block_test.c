@@ -24,7 +24,8 @@
 #define USER_RTB_STARTUP_SIZE (2ULL * sizeof(u64))
 #define USER_RTB_RFLAGS_IF (1ULL << 9)
 
-_Static_assert(JCOS_RTB_RESULT_ADDRESS == ADDRESS_SPACE_USER_BASE + (2ULL * VM_PAGE_SIZE), "runtime blocking result address mismatch");
+_Static_assert(JCOS_RTB_RESULT_ADDRESS == ADDRESS_SPACE_USER_BASE + (2ULL * VM_PAGE_SIZE),
+    "runtime blocking result address mismatch");
 
 static void print_test(const char *name, bool pass) {
     terminal_write("  ");
@@ -144,7 +145,8 @@ static void fill_prefill(IpcMessage *message) {
 }
 
 static bool prefill_matches(const IpcMessage *message) {
-    return message_matches(message, JCOS_RTB_PREFILL_WORD0, JCOS_RTB_PREFILL_WORD1, JCOS_RTB_PREFILL_WORD2, JCOS_RTB_PREFILL_WORD3);
+    return message_matches(message, JCOS_RTB_PREFILL_WORD0, JCOS_RTB_PREFILL_WORD1, JCOS_RTB_PREFILL_WORD2,
+        JCOS_RTB_PREFILL_WORD3);
 }
 
 static bool tx_matches(const IpcMessage *message) {
@@ -153,14 +155,12 @@ static bool tx_matches(const IpcMessage *message) {
 
 static bool endpoint_references_thread(const Endpoint *endpoint, const Thread *thread) {
     if (!endpoint || !thread) return false;
-
     return (endpoint->waiting_receiver == thread || endpoint->waiting_sender == thread);
 }
 
 static bool drain_endpoint(Endpoint *endpoint) {
     if (!endpoint) return false;
     if (endpoint->waiting_receiver || endpoint->waiting_sender || endpoint->waiting_sender_message_ready) return false;
-
     if (!endpoint_message_ready(endpoint)) return true;
 
     IpcMessage discard;
@@ -215,13 +215,11 @@ void user_runtime_block_test_run(void) {
 
     AddressSpace *space = 0;
     CapabilityTable *user_caps = 0;
-
     CapabilityHandle kernel_receive_send_handle = CAPABILITY_INVALID_HANDLE;
     CapabilityHandle kernel_send_send_handle = CAPABILITY_INVALID_HANDLE;
     CapabilityHandle kernel_send_receive_handle = CAPABILITY_INVALID_HANDLE;
     CapabilityHandle user_receive_handle = CAPABILITY_INVALID_HANDLE;
     CapabilityHandle user_send_handle = CAPABILITY_INVALID_HANDLE;
-
     frame_t stack_frame = FRAME_INVALID;
     bool process_created = false;
     bool receive_endpoint_created = false;
@@ -264,7 +262,6 @@ void user_runtime_block_test_run(void) {
     bool tx_payload = false;
     bool endpoints_idle = false;
     bool fault_captured = false;
-
     volatile JcosRuntimeBlockTestResult *result = 0;
     process_created = process_create(&process);
     print_test("PROCESS CREATE", process_created);
@@ -279,9 +276,7 @@ void user_runtime_block_test_run(void) {
     print_test("ADDRESS SPACE", space_ok);
     print_test("USER CAP TABLE EMPTY", user_caps_empty);
 
-    if (!space_ok || !user_caps_empty) {
-        goto cleanup;
-    }
+    if (!space_ok || !user_caps_empty) goto cleanup;
 
     receive_endpoint_created = endpoint_create(&receive_endpoint);
     send_endpoint_created = receive_endpoint_created && endpoint_create(&send_endpoint);
@@ -436,10 +431,18 @@ void user_runtime_block_test_run(void) {
         !user.on_run_queue && user.interrupt_context_ready && user.interrupt_rsp &&
         receive_endpoint.waiting_receiver == &user && scheduler_thread_count() == 1ULL;
 
+    bool receive1_wait_owned = receive1_blocked &&
+        thread_wait_matches(&user, THREAD_WAIT_IPC_RECEIVE, &receive_endpoint);
+
+    bool blocked_destroy_rejected = receive1_wait_owned && !thread_destroy(&user) &&
+        process_thread_count(&process) == 1ULL;
+
     print_test("BLOCKING FAILURE CONTRACT", preblock_contract);
     print_test("C ENTRY STACK ALIGNMENT", entry_alignment);
     print_test("THREAD ID", thread_id_ok);
     print_test("RECEIVE 1 BLOCKED", receive1_blocked);
+    print_test("RECEIVE 1 WAIT OWNED", receive1_wait_owned);
+    print_test("BLOCKED DESTROY REJECTED", blocked_destroy_rejected);
 
     if (!preblock_contract || !entry_alignment || !thread_id_ok || !receive1_blocked) goto cleanup;
 
@@ -451,7 +454,11 @@ void user_runtime_block_test_run(void) {
         receive_endpoint.waiting_receiver == &user && endpoint_message_ready(&receive_endpoint) &&
         scheduler_thread_count() == 2ULL;
 
+    bool receive1_wake_reserved = receive1_woken &&
+        thread_wait_matches(&user, THREAD_WAIT_IPC_RECEIVE, &receive_endpoint);
+
     print_test("RECEIVE 1 WAKE", receive1_woken);
+    print_test("RECEIVE 1 WAKE RESERVED", receive1_wake_reserved);
 
     if (!receive1_woken) goto cleanup;
     second_schedule = schedule_once();
@@ -462,6 +469,9 @@ void user_runtime_block_test_run(void) {
         !user.on_run_queue && user.interrupt_context_ready && user.interrupt_rsp &&
         receive_endpoint.waiting_receiver == &user && !endpoint_message_ready(&receive_endpoint) &&
         scheduler_thread_count() == 1ULL;
+
+    bool receive2_wait_owned = receive2_blocked &&
+        thread_wait_matches(&user, THREAD_WAIT_IPC_RECEIVE, &receive_endpoint);
 
     print_test("RECEIVE 1 RETURNED", receive1_returned);
     print_test("RECEIVE 1 ABI REGISTERS", result && result->receive1_probe_mask == JCOS_RTB_PROBE_EXPECTED);
@@ -506,6 +516,8 @@ void user_runtime_block_test_run(void) {
         send_endpoint.waiting_sender == &user && send_endpoint. waiting_sender_message_ready &&
         endpoint_message_ready(&send_endpoint) && scheduler_thread_count() == 1ULL;
 
+    bool send_wait_owned = send_blocked && thread_wait_matches(&user, THREAD_WAIT_IPC_SEND, &send_endpoint);
+
     staged_payload = send_blocked && tx_matches(&send_endpoint. waiting_sender_message);
 
     print_test("RECEIVE 2 RETURNED", receive2_returned);
@@ -539,6 +551,8 @@ void user_runtime_block_test_run(void) {
         send_endpoint.waiting_sender == &user && !send_endpoint. waiting_sender_message_ready &&
         endpoint_message_ready(&send_endpoint) && scheduler_thread_count() == 2ULL;
 
+    bool send_wake_reserved = send_promoted && thread_wait_matches(&user, THREAD_WAIT_IPC_SEND, &send_endpoint);
+
     print_test("PREFILL RECEIVE", prefill_received);
     print_test("PREFILL PAYLOAD", prefill_payload);
     print_test("STAGED MESSAGE PROMOTED", send_promoted);
@@ -562,6 +576,7 @@ void user_runtime_block_test_run(void) {
         !user.on_run_queue && !user.interrupt_context_ready && !user.interrupt_rsp &&
         send_endpoint.waiting_sender == 0 && scheduler_thread_count() == 1ULL;
 
+    bool wait_released = user_dead && !thread_wait_active(&user);
     UserFaultInfo fault;
     k_memset(&fault, 0, sizeof(fault));
     fault_captured = interrupt_last_user_fault(&fault);
@@ -571,6 +586,10 @@ void user_runtime_block_test_run(void) {
     print_test("C COMPLETION", completion_ok);
     print_test("THREAD EXIT", user_dead);
     print_test("NO USER FAULT", !fault_captured);
+    print_test("RECEIVE 2 WAIT OWNED", receive2_wait_owned);
+    print_test("SEND WAIT OWNED", send_wait_owned);
+    print_test("SEND WAKE RESERVED", send_wake_reserved);
+    print_test("WAIT RELEASED", wait_released);
 
     if (!send_returned || !completion_ok || !user_dead || fault_captured) goto cleanup;
 
@@ -634,11 +653,9 @@ cleanup: {
 
                 stack_clean = frame_free(stack_frame);
 
-            } 
-            else stack_clean = false;
+            } else stack_clean = false;
 
-        } 
-        else if (safe_to_release && stack_allocated && !stack_mapped) stack_clean = frame_free(stack_frame);
+        } else if (safe_to_release && stack_allocated && !stack_mapped) stack_clean = frame_free(stack_frame);
 
         bool image_clean = !image_loaded;
         if (safe_to_release && image_loaded) image_clean = user_elf_unload(&process, &image);
@@ -654,7 +671,7 @@ cleanup: {
         bool send_drained = !send_endpoint_created;
 
         if (safe_to_release && receive_endpoint_created) receive_drained = drain_endpoint(&receive_endpoint);
-        if (safe_to_release && send_endpoint_created)  send_drained = drain_endpoint(&send_endpoint);
+        if (safe_to_release && send_endpoint_created) send_drained = drain_endpoint(&send_endpoint);
 
         bool kernel_receive_send_revoked = !kernel_receive_send_cap;
         bool kernel_send_send_revoked = !kernel_send_send_cap;
@@ -672,12 +689,8 @@ cleanup: {
             if (kernel_send_receive_cap) {
                 kernel_send_receive_revoked = capability_revoke(kernel_caps, kernel_send_receive_handle);
             }
-            if (user_caps && user_receive_cap) {
-                user_receive_revoked = capability_revoke(user_caps, user_receive_handle);
-            }
-            if (user_caps && user_send_cap) {
-                user_send_revoked = capability_revoke(user_caps, user_send_handle);
-            }
+            if (user_caps && user_receive_cap) user_receive_revoked = capability_revoke(user_caps, user_receive_handle);
+            if (user_caps && user_send_cap) user_send_revoked = capability_revoke(user_caps, user_send_handle);
         }
 
         bool kernel_caps_restored = kernel_caps && capability_table_count(kernel_caps) == kernel_caps_before;
@@ -730,7 +743,9 @@ cleanup: {
             fourth_schedule && send_returned && completion_ok && user_dead && !fault_captured &&
             tx_received && tx_payload && endpoints_idle && safe_to_release && thread_reaped &&
             stack_clean && image_clean && kernel_caps_restored && user_caps_restored &&
-            receive_endpoint_clean && send_endpoint_clean && process_clean && frames_restored;
+            receive_endpoint_clean && send_endpoint_clean && process_clean && frames_restored &&
+            receive1_wait_owned && blocked_destroy_rejected && receive1_wake_reserved &&
+            receive2_wait_owned && send_wait_owned && send_wake_reserved && wait_released;
 
         terminal_set_color(pass ? terminal_accent_color() : terminal_error_color());
         terminal_write("USER C BLOCKING RUNTIME TEST: ");

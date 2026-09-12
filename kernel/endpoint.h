@@ -34,6 +34,7 @@ typedef struct Endpoint {
     IpcMessage waiting_sender_message;
     bool waiting_sender_message_ready;
 
+    bool closed;
     bool initialized;
 } Endpoint;
 
@@ -46,5 +47,6 @@ bool endpoint_try_receive(Endpoint *endpoint, IpcMessage *out_message);
 bool endpoint_message_ready(const Endpoint *endpoint);
 bool endpoint_receiver_waiting(const Endpoint *endpoint);
 bool endpoint_sender_waiting(const Endpoint *endpoint);
+bool endpoint_closed(const Endpoint *endpoint);
 
 #endif

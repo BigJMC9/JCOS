@@ -30,6 +30,10 @@
 #include "supervisor.h"
 #include "user_runtime_test.h"
 #include "user_runtime_block_test.h"
+#include "user_ipc_cancel_test.h"
+#include "force_thread_test.h"
+#include "process_terminate_test.h"
+#include "r2_stress_test.h"
 
 #define INPUT_CAPACITY 128U
 
@@ -176,15 +180,19 @@ static void command_help(void) {
     terminal_writeln("  astest      test address-space ownership/sharing");
     terminal_writeln("  supervisortest test long-lived Ring3 supervisor");
     terminal_writeln("  threadtest  test thread lifecycle and kernel stacks");
+    terminal_writeln("  forcethreadtest test forced IPC thread termination");
     terminal_writeln("  captest     test capability handles/rights/revoke");
     terminal_writeln("  endpointtest test endpoint object and capability rights");
     terminal_writeln("  ipctest     test non-blocking capability IPC");
     terminal_writeln("  ipcblocktest test blocking IPC receive/wakeup");
     terminal_writeln("  ipcsendblocktest test blocking IPC send/wakeup");
+    terminal_writeln("  r2stresstest stress IPC/process lifetime recovery");
     terminal_writeln("  useripctest test Ring3 capability IPC syscalls");
+    terminal_writeln("  useripccanceltest test Ring3 IPC cancellation/close");
     terminal_writeln("  useripcblocktest test Ring3 blocking IPC receive");
     terminal_writeln("  useripcsendblocktest test Ring3 blocking IPC send");
     terminal_writeln("  processtest test process/address-space/capability ownership");
+    terminal_writeln("  processkilltest test forced multi-thread process termination");
     terminal_writeln("  schedtest   test round-robin full-frame scheduling");
     terminal_writeln("  blocktest   test thread blocking and wakeup");
     terminal_writeln("  exittest    test permanent current-thread termination");
@@ -6548,16 +6556,20 @@ static void execute(char *line) {
     else if (k_strieq(command, "vmmtest")) command_vmmtest();
     else if (k_strieq(command, "astest")) command_astest();
     else if (k_strieq(command, "threadtest")) command_threadtest();
+    else if (k_strieq(command, "forcethreadtest")) force_thread_test_run();
     else if (k_strieq(command, "supervisortest")) command_supervisortest();
     else if (k_strieq(command, "captest")) command_captest();
     else if (k_strieq(command, "endpointtest")) command_endpointtest();
     else if (k_strieq(command, "ipctest")) command_ipctest();
     else if (k_strieq(command, "ipcblocktest")) command_ipcblocktest();
     else if (k_strieq(command, "ipcsendblocktest")) command_ipcsendblocktest();
+    else if (k_strieq(command, "r2stresstest")) r2_stress_test_run();
     else if (k_strieq(command, "useripctest")) command_useripctest();
+    else if (k_strieq(command, "useripccanceltest")) user_ipc_cancel_test_run();
     else if (k_strieq(command, "useripcblocktest")) command_useripcblocktest();
     else if (k_strieq(command, "useripcsendblocktest")) command_useripcsendblocktest();
     else if (k_strieq(command, "processtest")) command_processtest();
+    else if (k_strieq(command, "processkilltest")) process_terminate_test_run();
     else if (k_strieq(command, "schedtest")) command_schedtest();
     else if (k_strieq(command, "blocktest")) command_blocktest();
     else if (k_strieq(command, "exittest")) command_exittest();

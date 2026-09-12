@@ -56,6 +56,9 @@ InterruptFrame *scheduler_preempt(InterruptFrame *frame);
  */
 InterruptFrame *scheduler_terminate_current_from_interrupt(InterruptFrame *frame);
 
+bool scheduler_can_terminate_thread(const Thread *thread);
+bool scheduler_terminate_thread(Thread *thread);
+
 /*
  * Permanently terminate the running thread.
  *

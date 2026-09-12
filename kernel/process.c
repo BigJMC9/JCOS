@@ -1,5 +1,6 @@
 #include "process.h"
 #include "lib.h"
+#include "thread.h"
 
 static Process g_kernel_process;
 
@@ -64,7 +65,9 @@ bool process_destroy(Process *process) {
     }
 
     /* The address space must remain alive until every thread belonging to this process has been destroyed/reaped. */
-    if (process->thread_count != 0ULL) return false;
+    if (process->thread_count != 0ULL || process->thread_head || process->thread_tail) {
+        return false;
+    }
     /* Capabilities represent authority owned by the process. Require explicit revocation before destroying the process. */
     if (capability_table_count(&process->capabilities) != 0U) return false;
     address_space_destroy(&process->owned_address_space);
@@ -87,28 +90,113 @@ u64 process_thread_count(const Process *process) {
     return process->thread_count;
 }
 
-bool process_thread_attach(Process *process) {
-    if (!g_initialized ||
-        !process ||
-        !process->initialized ||
-        !process->id ||
-        !process->address_space ||
-        !address_space_cr3(process->address_space) ||
-        process->thread_count == ~0ULL) {
-
+bool process_thread_contains(const Process *process, const Thread *thread) {
+    if (!g_initialized || !process || !process->initialized || !thread || !thread->id || thread->process != process) {
         return false;
     }
 
-    ++process->thread_count;
+    const Thread *current = process->thread_head;
 
+    for (u64 i = 0; i < process->thread_count; ++i) {
+        if (!current || !current->id || current->process != process) {
+            return false;
+        }
+
+        if (current == thread) return true;
+        current = current->process_next;
+    }
+    return false;
+}
+
+
+Thread *process_thread_first(const Process *process) {
+    if (!g_initialized || !process || !process->initialized || !process->thread_count) {
+        return 0;
+    }
+    return process->thread_head;
+}
+
+
+bool process_thread_attach(Process *process, Thread *thread) {
+    if (!g_initialized || !process || !process->initialized || !process->id || !thread || !thread->id ||
+        thread->process != process || process->thread_count == ~0ULL) {
+        return false;
+    }
+    if (process_thread_contains(process, thread)) return false;
+    if (thread->process_prev || thread->process_next) return false;
+
+    if (!process->thread_count) {
+        if (process->thread_head || process->thread_tail) return false;
+
+        process->thread_head = thread;
+        process->thread_tail = thread;
+
+    } else {
+        if (!process->thread_head || !process->thread_tail || process->thread_tail->process_next) {
+            return false;
+        }
+
+        thread->process_prev = process->thread_tail;
+        process->thread_tail->process_next = thread;
+        process->thread_tail = thread;
+    }
+    ++process->thread_count;
     return true;
 }
 
-bool process_thread_detach(Process *process) {
-    if (!g_initialized || !process || !process->initialized || !process->id || !process->thread_count) {
+bool process_thread_detach(Process *process, Thread *thread) {
+    if (!g_initialized || !process || !process->initialized || !process->id || !process->thread_count ||
+        !thread || !thread->id || thread->process != process) {
         return false;
     }
+
+    if (!process_thread_contains(process, thread)) {
+        return false;
+    }
+
+    Thread *previous = thread->process_prev;
+    Thread *next = thread->process_next;
+
+    /* Validate every linkage before changing anything. */
+    if (previous) {
+        if (previous->process_next != thread) {
+            return false;
+        }
+
+    } else if (process->thread_head != thread) {
+        return false;
+    }
+
+    if (next) {
+        if (next->process_prev != thread) {
+            return false;
+        }
+
+    } else if (process->thread_tail != thread) {
+        return false;
+    }
+
+    if (process->thread_count == 1ULL) {
+        if (process->thread_head != thread || process->thread_tail != thread || previous || next) {
+            return false;
+        }
+    }
+
+    if (previous) previous->process_next = next;
+    else process->thread_head = next;
+
+    if (next) next->process_prev = previous;
+    else process->thread_tail = previous;
+
+    thread->process_prev = 0;
+    thread->process_next = 0;
+
     --process->thread_count;
+
+    if (!process->thread_count) {
+        process->thread_head = 0;
+        process->thread_tail = 0;
+    }
 
     return true;
 }

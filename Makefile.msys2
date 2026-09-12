@@ -6,11 +6,12 @@ ROOTFS := $(BUILD)/ROOTFS.TAR
 USER_ELF_TEST := $(ROOTFS_DIR)/bin/elftest.elf
 USER_SUPERVISOR := $(ROOTFS_DIR)/bin/supervisor.elf
 USER_RUNTIME_TEST := $(ROOTFS_DIR)/bin/runtimetest.elf
+USER_RUNTIME_CANCEL_TEST := $(ROOTFS_DIR)/bin/runtimecanceltest.elf
 USER_RUNTIME_BLOCK_TEST := $(ROOTFS_DIR)/bin/runtimeblocktest.elf
 .DEFAULT_GOAL := all
 .DELETE_ON_ERROR:
 
-USER_PROGRAMS := $(USER_ELF_TEST) $(USER_SUPERVISOR) $(USER_RUNTIME_TEST) $(USER_RUNTIME_BLOCK_TEST)
+USER_PROGRAMS := $(USER_ELF_TEST) $(USER_SUPERVISOR) $(USER_RUNTIME_TEST) $(USER_RUNTIME_BLOCK_TEST) $(USER_RUNTIME_CANCEL_TEST)
 ROOTFS_FILES := $(shell test -d $(ROOTFS_DIR) && find $(ROOTFS_DIR) -type f)
 IMAGE := $(BUILD)/JA-os.img
 
@@ -83,6 +84,29 @@ $(BUILD)/user_runtime_test.o: user/runtime_test.c \
                               include/user_abi.h \
                               include/runtime_test_abi.h | $(BUILD)
 	$(CLANG) $(USER_CFLAGS) -c $< -o $@
+
+$(BUILD)/user_runtime_cancel_test.o: \
+        user/runtime_cancel_test.c \
+        user/lib/syscall.h \
+        include/user_abi.h \
+        include/runtime_cancel_test_abi.h | $(BUILD)
+	$(CLANG) $(USER_CFLAGS) -c $< -o $@
+
+
+$(USER_RUNTIME_CANCEL_TEST): \
+        $(BUILD)/user_crt0.o \
+        $(BUILD)/user_syscall.o \
+        $(BUILD)/user_runtime_cancel_test.o \
+        user/runtime_cancel_test.ld \
+        Makefile.msys2
+	mkdir -p $(dir $@)
+	$(LD) -m elf_x86_64 -nostdlib -static \
+	      -T user/runtime_cancel_test.ld \
+	      -o $@ \
+	      $(BUILD)/user_crt0.o \
+	      $(BUILD)/user_syscall.o \
+	      $(BUILD)/user_runtime_cancel_test.o
+	$(CHECK_ELF_RELOCATIONS)
 
 $(BUILD)/user_runtime_block_probe.o: \
         user/runtime_block_probe.S \

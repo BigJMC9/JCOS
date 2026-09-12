@@ -168,9 +168,6 @@ bool thread_system_init(Process *kernel_process, u64 bootstrap_stack_base, u64 b
 
     k_memset(&g_bootstrap_thread, 0, sizeof(g_bootstrap_thread));
 
-    /* Adopt the boot thread as the first thread owned by the kernel process. */
-    if (!process_thread_attach(kernel_process)) return false;
-
     g_bootstrap_thread.id = 1;
     g_bootstrap_thread.process = kernel_process;
     g_bootstrap_thread.state = THREAD_STATE_RUNNING;
@@ -179,6 +176,11 @@ bool thread_system_init(Process *kernel_process, u64 bootstrap_stack_base, u64 b
     g_bootstrap_thread.kernel_stack_top = stack_top;
     g_bootstrap_thread.kernel_stack_size = stack_top - bootstrap_stack_base;
     g_bootstrap_thread.owns_kernel_stack = false;
+
+    if (!process_thread_attach(kernel_process, &g_bootstrap_thread)) {
+        k_memset(&g_bootstrap_thread, 0, sizeof(g_bootstrap_thread));
+        return false;
+    }
 
     g_current_thread = &g_bootstrap_thread;
     g_next_thread_id = 2;
@@ -198,11 +200,8 @@ bool thread_activate(Thread *thread) {
     }
 
     if (thread->kernel_stack_top & 0xFULL) return false;
-
     AddressSpace *space = process_address_space(thread->process);
-
     if (!space) return false;
-
     u64 target_cr3 = address_space_cr3(space);
 
     if (!target_cr3) return false;
@@ -225,7 +224,6 @@ bool thread_activate(Thread *thread) {
     if ((arch_read_cr3() & ~0xFFFULL) != target_cr3) arch_write_cr3(target_cr3);
 
     previous->state = THREAD_STATE_READY;
-
     thread->state = THREAD_STATE_RUNNING;
 
     g_current_thread = thread;
@@ -246,9 +244,7 @@ bool thread_create(Thread *thread, Process *process) {
     k_memset(thread, 0, sizeof(*thread));
 
     u64 physical = pmm_alloc_pages(THREAD_KERNEL_STACK_PAGES);
-
     if (!physical) return false;
-
     void *direct = phys_to_virt(physical);
 
     if (!direct) {
@@ -272,12 +268,6 @@ bool thread_create(Thread *thread, Process *process) {
 
     k_memset(direct, 0, (usize)THREAD_KERNEL_STACK_SIZE);
 
-    /* From this point onward the process owns one additional Thread object. */
-    if (!process_thread_attach(process)) {
-        (void)release_kernel_stack(physical, THREAD_KERNEL_STACK_SIZE);
-        return false;
-    }
-
     thread->id = g_next_thread_id++;
     thread->process = process;
     thread->state = THREAD_STATE_READY;
@@ -286,29 +276,133 @@ bool thread_create(Thread *thread, Process *process) {
     thread->kernel_stack_top = virtual_top;
     thread->kernel_stack_size = THREAD_KERNEL_STACK_SIZE;
     thread->owns_kernel_stack = true;
+    if (!process_thread_attach(process, thread)) {
+        (void)release_kernel_stack(physical, THREAD_KERNEL_STACK_SIZE);
+        k_memset(thread, 0, sizeof(*thread));
+        return false;
+    }
+    ++g_next_thread_id;
     return true;
+}
+
+bool thread_wait_begin(Thread *thread, ThreadWaitKind kind, void *object) {
+    if (!g_initialized || !thread || thread != g_current_thread || !thread->id || !object || kind == THREAD_WAIT_NONE) {
+        return false;
+    }
+
+    if (thread->state != THREAD_STATE_RUNNING || !thread->on_run_queue) return false;
+    if (thread->wait_kind != THREAD_WAIT_NONE || thread->wait_object) return false;
+
+    thread->wait_kind = kind;
+    thread->wait_result = THREAD_WAIT_RESULT_PENDING;
+    thread->wait_object = object;
+    return true;
+}
+
+bool thread_wait_matches(const Thread *thread, ThreadWaitKind kind, const void *object) {
+    if (!g_initialized || !thread || !thread->id || !object || kind == THREAD_WAIT_NONE) return false;
+    return (thread->wait_kind == kind && thread->wait_object == object);
+}
+
+bool thread_wait_cancel(Thread *thread, ThreadWaitKind kind, void *object) {
+    if (!g_initialized || !thread || !thread->id || !object || kind == THREAD_WAIT_NONE) {
+        return false;
+    }
+
+    if (!thread_wait_matches(thread, kind, object)) {
+        return false;
+    }
+
+    if (thread->wait_result != THREAD_WAIT_RESULT_PENDING) {
+        return false;
+    }
+
+    /*
+     * Cancellation may be initiated by another
+     * Thread which owns/manages the waited object.
+     *
+     * The owning subsystem must serialize this
+     * transition.
+     */
+    thread->wait_result = THREAD_WAIT_RESULT_CANCELLED;
+    return true;
+}
+
+bool thread_wait_cancelled(const Thread *thread, ThreadWaitKind kind, const void *object) {
+    if (!thread_wait_matches(thread, kind, object)) {
+        return false;
+    }
+
+    return thread->wait_result == THREAD_WAIT_RESULT_CANCELLED;
+}
+
+bool thread_wait_end(Thread *thread, ThreadWaitKind kind, void *object) {
+    if (!g_initialized || !thread || thread != g_current_thread || !thread->id || !object || kind == THREAD_WAIT_NONE) {
+        return false;
+    }
+    if (!thread_wait_matches(thread, kind, object)) return false;
+
+    thread->wait_kind = THREAD_WAIT_NONE;
+    thread->wait_result = THREAD_WAIT_RESULT_NONE;
+    thread->wait_object = 0;
+    return true;
+}
+
+bool thread_wait_abort(Thread *thread, ThreadWaitKind kind, void *object) {
+    if (!g_initialized || !thread || thread == g_current_thread || !thread->id || !object || kind == THREAD_WAIT_NONE) {
+        return false;
+    }
+    if (thread->state != THREAD_STATE_BLOCKED && thread->state != THREAD_STATE_READY) {
+        return false;
+    }
+    if (!thread_wait_matches(thread, kind, object)) {
+        return false;
+    }
+
+    thread->wait_kind = THREAD_WAIT_NONE;
+    thread->wait_result = THREAD_WAIT_RESULT_NONE;
+    thread->wait_object = 0;
+    return true;
+}
+
+bool thread_wait_active(const Thread *thread) {
+    if (!g_initialized || !thread || !thread->id) return false;
+    return (thread->wait_kind != THREAD_WAIT_NONE || thread->wait_result != THREAD_WAIT_RESULT_NONE || thread->wait_object != 0);
 }
 
 bool thread_destroy(Thread *thread) {
     if (!g_initialized || !thread || thread == g_current_thread || !thread->id || !thread->process ||
         thread->state == THREAD_STATE_INVALID || thread->state == THREAD_STATE_RUNNING ||
-        thread->on_run_queue) {
+        thread->state == THREAD_STATE_BLOCKED || thread->on_run_queue) {
         return false;
     }
+
+    /* Another kernel object still owns a reference to this Thread. */
+    if (thread_wait_active(thread)) return false;
 
     Process *process = thread->process;
 
     /* Refuse to start destruction if the process ownership accounting is already invalid. */
-    if (!process_thread_count(process)) return false;
-    if (!process_thread_detach(process)) return false;
+    if (!process_thread_count(process) || !process_thread_contains(process, thread)) return false;
 
     bool result = true;
 
     if (thread->owns_kernel_stack) {
-        result = release_kernel_stack(thread->kernel_stack_physical, thread->kernel_stack_size);
+        if (!release_kernel_stack(thread->kernel_stack_physical, thread->kernel_stack_size)) result = false;
     }
 
+    /*
+    * Resource release succeeded.
+    *
+    * Failure of a prevalidated ownership unlink at
+    * this point is an internal kernel invariant
+    * failure.
+    */
+    if (!process_thread_detach(process, thread)) cpu_halt_forever();    
+
     thread->process = 0;
+    thread->process_prev = 0;
+    thread->process_next = 0;
     thread->entry = 0;
     thread->argument = 0;
     thread->kernel_stack_physical = 0;
@@ -322,5 +416,8 @@ bool thread_destroy(Thread *thread) {
     thread->state = THREAD_STATE_DEAD;
     thread->interrupt_rsp = 0;
     thread->interrupt_context_ready = false;
+    thread->wait_kind = THREAD_WAIT_NONE;
+    thread->wait_result = THREAD_WAIT_RESULT_NONE;
+    thread->wait_object = 0;
     return result;
 }

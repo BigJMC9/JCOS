@@ -5,6 +5,7 @@
 #include "process.h"
 #include "endpoint.h"
 #include "capability.h"
+#include "thread.h"
 
 bool ipc_try_send(
     Process *process,
@@ -29,5 +30,8 @@ bool ipc_send_blocking(
     CapabilityHandle handle,
     const IpcMessage *message
 );
+
+bool ipc_endpoint_close(Endpoint *endpoint);
+bool ipc_abort_thread_wait(Thread *thread);
 
 #endif

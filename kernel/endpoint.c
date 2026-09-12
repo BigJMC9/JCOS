@@ -38,7 +38,7 @@ bool endpoint_destroy(Endpoint *endpoint) {
 
 bool endpoint_try_send(Endpoint *endpoint, const IpcMessage *message) {
     if (!g_initialized || !endpoint || !message) return false;
-    if (!endpoint->initialized || !endpoint->id) return false;
+    if (!endpoint->initialized || !endpoint->id || endpoint->closed) return false;
     if (!message->word_count || message->word_count > IPC_MESSAGE_MAX_WORDS) return false;
     if (endpoint->message_ready) return false;
 
@@ -58,7 +58,7 @@ bool endpoint_try_receive(Endpoint *endpoint, IpcMessage *out_message) {
     k_memset(out_message, 0, sizeof(*out_message));
 
     if (!g_initialized || !endpoint) return false;
-    if (!endpoint->initialized || !endpoint->id) return false;
+    if (!endpoint->initialized || !endpoint->id || endpoint->closed) return false;
     if (!endpoint->message_ready) return false;
 
     *out_message = endpoint->message;
@@ -82,4 +82,9 @@ bool endpoint_receiver_waiting(const Endpoint *endpoint) {
 bool endpoint_sender_waiting(const Endpoint *endpoint) {
     if (!g_initialized || !endpoint || !endpoint->initialized || !endpoint->id) return false;
     return endpoint->waiting_sender != 0;
+}
+
+bool endpoint_closed(const Endpoint *endpoint) {
+    if (!g_initialized || !endpoint || !endpoint->initialized || !endpoint->id) return false;
+    return endpoint->closed;
 }

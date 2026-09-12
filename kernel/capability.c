@@ -51,17 +51,22 @@ u32 capability_table_count(const CapabilityTable *table) {
     return table->count;
 }
 
-bool capability_insert(CapabilityTable *table, void *object, CapabilityType type, CapabilityRights rights, CapabilityHandle *out_handle) {
+bool capability_insert(CapabilityTable *table, void *object, CapabilityType type, CapabilityRights rights,
+    CapabilityHandle *out_handle) {
     if (!out_handle) return false;
     *out_handle = CAPABILITY_INVALID_HANDLE;
 
-    if (!table || !table->initialized || !object || !capability_type_valid(type) || !rights || table->count >= CAPABILITY_TABLE_CAPACITY) return false;
+    if (!table || !table->initialized || !object || !capability_type_valid(type) || !rights ||
+        table->count >= CAPABILITY_TABLE_CAPACITY) {
+        return false;
+    }
     for (u32 i = 0; i < CAPABILITY_TABLE_CAPACITY; ++i) {
-
         CapabilitySlot *slot = &table->slots[i];
         if (slot->occupied) continue;
 
-        /* Defensive repair in case corrupted or future initialization code ever leaves a free slot at generation zero. */
+        /*
+         * Defensive repair in case corrupted or future initialization code ever leaves a free slot at generation zero.
+         */
         if (!slot->generation) slot->generation = 1U;
         CapabilityHandle handle = capability_make_handle(i, slot->generation);
 
@@ -78,7 +83,8 @@ bool capability_insert(CapabilityTable *table, void *object, CapabilityType type
     return false;
 }
 
-bool capability_lookup_rights(const CapabilityTable *table, CapabilityHandle handle, CapabilityType expected_type, CapabilityRights required_rights, void **out_object) {
+bool capability_lookup_rights(const CapabilityTable *table, CapabilityHandle handle,
+    CapabilityType expected_type, CapabilityRights required_rights, void **out_object) {
     if (!out_object) return false;
     *out_object = 0;
 
@@ -96,7 +102,8 @@ bool capability_lookup_rights(const CapabilityTable *table, CapabilityHandle han
     return true;
 }
 
-bool capability_lookup(const CapabilityTable *table, CapabilityHandle handle, CapabilityType expected_type, void **out_object) {
+bool capability_lookup(const CapabilityTable *table, CapabilityHandle handle, CapabilityType expected_type,
+    void **out_object) {
     return capability_lookup_rights(table, handle, expected_type, 0, out_object);
 }
 
@@ -120,6 +127,41 @@ bool capability_revoke(CapabilityTable *table, CapabilityHandle handle) {
     slot->generation = next_generation;
 
     --table->count;
+    return true;
+}
 
+bool capability_revoke_all(CapabilityTable *table) {
+    if (!table || !table->initialized) {
+        return false;
+    }
+
+    u32 occupied = 0;
+
+    /* Validate the complete table before modifying a single slot. */
+    for (u32 i = 0; i < CAPABILITY_TABLE_CAPACITY; ++i) {
+        CapabilitySlot *slot = &table->slots[i];
+
+        if (!slot->occupied) continue;
+        if (!slot->object || !slot->generation || !capability_type_valid(slot->type) || !slot->rights) {
+            return false;
+        }
+
+        ++occupied;
+    }
+
+    if (occupied != table->count) return false;
+    for (u32 i = 0; i < CAPABILITY_TABLE_CAPACITY; ++i) {
+        CapabilitySlot *slot = &table->slots[i];
+
+        if (!slot->occupied) continue;
+
+        slot->object = 0;
+        slot->rights = 0;
+        slot->type = CAPABILITY_TYPE_NONE;
+        slot->occupied = false;
+        slot->generation = capability_next_generation(slot->generation);
+    }
+
+    table->count = 0;
     return true;
 }

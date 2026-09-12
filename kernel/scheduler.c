@@ -407,6 +407,49 @@ u64 scheduler_reschedule_count(void) {
     return g_initialized ? g_reschedule_count : 0;
 }
 
+bool scheduler_can_terminate_thread(const Thread *thread) {
+    if (!g_initialized || !thread || thread == thread_current() || !thread->id) {
+        return false;
+    }
+
+    if (thread->state == THREAD_STATE_READY) {
+        if (thread->on_run_queue) {
+            if (!thread->run_next || !thread->interrupt_context_ready || !thread->interrupt_rsp) {
+                return false;
+            }
+            return true;
+        }
+        return thread->run_next == 0;
+    }
+
+    if (thread->state == THREAD_STATE_BLOCKED) {
+        return (
+            !thread->on_run_queue &&
+            !thread->run_next &&
+            thread->interrupt_context_ready &&
+            thread->interrupt_rsp
+        );
+    }
+    return false;
+}
+
+bool scheduler_terminate_thread(Thread *thread) {
+    if (!scheduler_can_terminate_thread(thread)) return false;
+
+    /* Another kernel object must not retain a reference to this Thread. */
+    if (thread_wait_active(thread)) return false;
+    if (thread->state == THREAD_STATE_READY && thread->on_run_queue) {
+        if (!scheduler_unlink(thread)) return false;
+    }
+
+    thread->state = THREAD_STATE_DEAD;
+    thread->interrupt_rsp = 0;
+    thread->interrupt_context_ready = false;
+    thread->run_next = 0;
+    thread->on_run_queue = false;
+    return true;
+}
+
 InterruptFrame *scheduler_terminate_current_from_interrupt(InterruptFrame *frame) {
     return scheduler_exit_from_interrupt(frame, false);
 }
