@@ -17,6 +17,7 @@ typedef u64 vm_flags_t;
  */
 #define VM_WRITE (1ULL << 0)
 #define VM_USER  (1ULL << 1)
+#define VM_EXEC  (1ULL << 2)
 
 typedef struct {
     frame_t root_frame;
@@ -92,6 +93,11 @@ bool vmm_page_map_share_pml4_entry(
     VmPageMap *source,
     u16 index
 );
+
+bool vmm_enable_nx(void);
+bool vmm_nx_enabled(void);
+bool vmm_enable_write_protect(void);
+bool vmm_write_protect_enabled(void);
 
 void vmm_enable_phys_map_access(void);
 bool vmm_phys_map_access_enabled(void);

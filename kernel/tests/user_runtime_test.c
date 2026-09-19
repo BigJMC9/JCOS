@@ -163,8 +163,9 @@ void user_runtime_test_run(void) {
 
     image_layout_ok = fixture->image.entry == ADDRESS_SPACE_USER_BASE && fixture->image.page_count == 2U;
 
-    mappings_ok = text_mapping && data_mapping && !(text_flags & VM_WRITE) && (text_flags & VM_USER) &&
-        (data_flags & VM_WRITE) && (data_flags & VM_USER);
+    mappings_ok = text_mapping && data_mapping && !(text_flags & VM_WRITE) &&
+        (text_flags & VM_USER) && (text_flags & VM_EXEC) &&
+        (data_flags & VM_WRITE) && (data_flags & VM_USER) && !(data_flags & VM_EXEC);
 
     print_test("ELF LAYOUT", image_layout_ok);
     print_test("TEXT/DATA MAPPINGS", mappings_ok);

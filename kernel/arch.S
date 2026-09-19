@@ -16,6 +16,8 @@
 .global arch_write_msr
 .global arch_cpuid
 .global arch_read_cs
+.global arch_read_cr0
+.global arch_write_cr0
 .global arch_read_cr2
 .global arch_read_cr3
 .global arch_write_cr3
@@ -129,6 +131,12 @@ arch_cpuid:
 arch_read_cs:
     xor eax, eax
     mov ax, cs
+    ret
+arch_read_cr0:
+    mov rax, cr0
+    ret
+arch_write_cr0:
+    mov cr0, rdi
     ret
 arch_read_cr2:
     mov rax, cr2

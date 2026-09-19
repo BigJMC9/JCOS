@@ -14,6 +14,7 @@
 #include "user_elf.h"
 #include "vfs.h"
 #include "vmm.h"
+#include "user_stack.h"
 
 #define SUPERVISOR_PATH "/bin/supervisor.elf"
 #define SUPERVISOR_USER_STACK (ADDRESS_SPACE_USER_BASE + 0x100000ULL)
@@ -88,7 +89,8 @@ static bool supervisor_release(void) {
     if (g_supervisor.stack_mapped) {
         frame_t mapped = FRAME_INVALID;
         frame_t old = FRAME_INVALID;
-        if (!space || !address_space_query_page(space, SUPERVISOR_USER_STACK, &mapped, 0) || mapped != g_supervisor.stack_frame) return false;
+        if (!space || !user_stack_mapping_valid(space, SUPERVISOR_USER_STACK, g_supervisor.stack_frame)) return false;
+        if (!address_space_query_page(space, SUPERVISOR_USER_STACK, &mapped, 0) || mapped != g_supervisor.stack_frame) return false;
         if (!address_space_unmap_page(space, SUPERVISOR_USER_STACK, &old)) return false;
         g_supervisor.stack_mapped = false;
         if (old != g_supervisor.stack_frame) return false;
@@ -213,7 +215,7 @@ bool supervisor_start(void) {
 
     g_supervisor.stack_frame_allocated = true;
 
-    if (!address_space_map_page(space, SUPERVISOR_USER_STACK, g_supervisor.stack_frame, VM_WRITE)) goto fail;
+    if (!user_stack_map_page(space, SUPERVISOR_USER_STACK, g_supervisor.stack_frame)) goto fail;
 
     g_supervisor.stack_mapped = true;
     u8 *stack = (u8 *)phys_to_virt(frame_to_phys(g_supervisor.stack_frame));
@@ -353,4 +355,9 @@ u64 supervisor_thread_id(void) {
         supervisor_running()
             ? g_supervisor.thread.id
             : 0;
+}
+bool supervisor_stack_guarded(void) {
+    if (!supervisor_running() || !g_supervisor.stack_mapped) return false;
+    AddressSpace *space = process_address_space(&g_supervisor.process);
+    return space && user_stack_mapping_valid(space, SUPERVISOR_USER_STACK, g_supervisor.stack_frame);
 }

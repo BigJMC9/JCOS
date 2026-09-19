@@ -23,6 +23,8 @@ void arch_write_msr(u32 msr, u64 value);
 void arch_cpuid(u32 leaf, u32 subleaf, u32 *a, u32 *b, u32 *c, u32 *d);
 u16 arch_read_cs(void);
 
+u64 arch_read_cr0(void);
+void arch_write_cr0(u64 value);
 u64 arch_read_cr2(void);
 u64 arch_read_cr3(void);
 void arch_write_cr3(u64 value);

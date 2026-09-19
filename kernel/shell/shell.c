@@ -1451,7 +1451,7 @@ static void command_useripctest(void) {
         return;
     }
 
-    bool code_mapped = address_space_map_page(space, user_code, code_frame, 0);
+    bool code_mapped = address_space_map_page(space, user_code, code_frame, VM_EXEC);
     bool stack_mapped = address_space_map_page(space, user_stack, stack_frame, VM_WRITE);
     bool result_mapped = address_space_map_page(space, user_result, result_frame, VM_WRITE);
     bool mappings_ok = code_mapped && stack_mapped && result_mapped;
@@ -1892,7 +1892,6 @@ static void command_useripcblocktest(void) {
         if (send_cap) (void)capability_revoke(kernel_caps, send_handle);
 
         (void)endpoint_destroy(&endpoint);
-
         (void)process_destroy(&process);
         return;
     }
@@ -1904,11 +1903,8 @@ static void command_useripcblocktest(void) {
 
     if (!thread_created) {
         (void)capability_revoke(kernel_caps, send_handle);
-
         (void)capability_revoke(user_caps, receive_handle);
-
         (void)endpoint_destroy(&endpoint);
-
         (void)process_destroy(&process);
         return;
     }
@@ -1926,17 +1922,14 @@ static void command_useripcblocktest(void) {
         if (result_frame != FRAME_INVALID) (void)frame_free(result_frame);
 
         (void)thread_destroy(&user);
-
         (void)capability_revoke(kernel_caps, send_handle);
-
         (void)capability_revoke(user_caps, receive_handle);
-
         (void)endpoint_destroy(&endpoint);
         (void)process_destroy(&process);
         return;
     }
 
-    bool code_mapped = address_space_map_page(space, user_code, code_frame, 0);
+    bool code_mapped = address_space_map_page(space, user_code, code_frame, VM_EXEC);
     bool stack_mapped = address_space_map_page(space, user_stack, stack_frame, VM_WRITE);
     bool result_mapped = address_space_map_page(space, user_result, result_frame, VM_WRITE);
     bool mappings_ok = code_mapped && stack_mapped && result_mapped;
@@ -2414,7 +2407,7 @@ static void command_useripcsendblocktest(void) {
 
     if (!frames_ok) return;
 
-    bool code_mapped = address_space_map_page(space, user_code, code_frame, 0);
+    bool code_mapped = address_space_map_page(space, user_code, code_frame, VM_EXEC);
     bool stack_mapped = address_space_map_page(space, user_stack, stack_frame, VM_WRITE);
     bool result_mapped = address_space_map_page(space, user_result, result_frame, VM_WRITE);
     bool mappings_ok = code_mapped && stack_mapped && result_mapped;
@@ -3523,7 +3516,7 @@ static void command_syscalltest(void) {
         return;
     }
 
-    bool code_mapped = address_space_map_page(space, user_code, code_frame, 0);
+    bool code_mapped = address_space_map_page(space, user_code, code_frame, VM_EXEC);
     bool stack_mapped = address_space_map_page(space, user_stack, stack_frame, VM_WRITE);
     bool mappings_ok = code_mapped && stack_mapped;
     terminal_write("  USER MAPPINGS: ");
@@ -3812,7 +3805,7 @@ static void command_userisotest(void) {
         return;
     }
 
-    bool code_mapped = address_space_map_page(space, user_code, code_frame, 0);
+    bool code_mapped = address_space_map_page(space, user_code, code_frame, VM_EXEC);
     bool stack_mapped = address_space_map_page(space, user_stack, stack_frame, VM_WRITE);
     bool mappings_ok = code_mapped && stack_mapped;
     terminal_write("  USER MAPPINGS: ");
@@ -4007,7 +4000,7 @@ static void command_userpftest(void) {
         return;
     }
 
-    bool code_mapped = address_space_map_page(space, user_code, code_frame, 0);
+    bool code_mapped = address_space_map_page(space, user_code, code_frame, VM_EXEC);
     bool stack_mapped = address_space_map_page(space, user_stack, stack_frame, VM_WRITE);
     bool mappings_ok = code_mapped && stack_mapped;
     terminal_write("  USER MAPPINGS: ");
@@ -4718,7 +4711,7 @@ static void command_userpreempttest(void) {
         return;
     }
 
-    bool code_mapped = address_space_map_page(space, user_code, code_frame, 0);
+    bool code_mapped = address_space_map_page(space, user_code, code_frame, VM_EXEC);
     bool stack_mapped = address_space_map_page(space, user_stack, stack_frame, VM_WRITE);
     bool counter_mapped = address_space_map_page(space, user_counter, counter_frame, VM_WRITE);
     bool mappings_ok = code_mapped && stack_mapped && counter_mapped;
@@ -5988,7 +5981,7 @@ static void command_userfault(void) {
         return;
     }
 
-    bool code_mapped = address_space_map_page(space, user_code, code_frame, 0);
+    bool code_mapped = address_space_map_page(space, user_code, code_frame, VM_EXEC);
     bool stack_mapped = address_space_map_page(space, user_stack, stack_frame, VM_WRITE);
 
     if (!code_mapped || !stack_mapped) {

@@ -9,6 +9,7 @@
 #include "terminal.h"
 #include "thread.h"
 #include "test_output.h"
+#include "kernel_stack.h"
 
 /* Never publish references to stack-local fixtures; retain failures for diagnosis. */
 static Process g_process;
@@ -107,10 +108,18 @@ void stack_reclaim_test_run(void) {
         process_thread_can_detach(&g_process, target);
     if (!check("THREE-THREAD OWNERSHIP LIST", list_ok)) goto failed;
 
+    bool guards_ok = kernel_stack_arena_ready();
+    for (u32 i = 0; guards_ok && i < ARRAY_COUNT(g_threads); ++i) {
+        guards_ok = kernel_stack_mapping_valid(
+            g_threads[i].kernel_stack_physical, g_threads[i].kernel_stack_base);
+    }
+    if (!check("GUARDED KERNEL STACK MAPPINGS", guards_ok)) goto failed;
+
     /* Reap a DEAD middle node, with live ownership links on both sides. */
     if (!check("TARGET STOPPED", task_terminate_thread(target) &&
             target->state == THREAD_STATE_DEAD && !target->on_run_queue)) goto failed;
     frame_t stack_first = phys_to_frame(target->kernel_stack_physical);
+    u64 target_stack_base = target->kernel_stack_base;
     u64 stack_pages = target->kernel_stack_size / FRAME_SIZE;
     if (!check("STACK SPAN VALID", stack_pages == THREAD_KERNEL_STACK_PAGES &&
             span_live(stack_first, stack_pages))) goto failed;
@@ -146,6 +155,8 @@ void stack_reclaim_test_run(void) {
     if (!check("IDENTITY/LIST/OWNERSHIP RETAINED", metadata_kept)) goto failed;
     if (!check("NO STACK FRAME FREED", span_live(stack_first, stack_pages) &&
             pmm_stats().free_pages == free_before_failure)) goto failed;
+    if (!check("GUARDS RESTORED AFTER FAILED REAP",
+            kernel_stack_mapping_valid(target->kernel_stack_physical, target->kernel_stack_base))) goto failed;
 
     bool canaries = true;
     for (u64 i = 0; i < stack_pages; ++i) {
@@ -163,6 +174,7 @@ void stack_reclaim_test_run(void) {
         g_threads[0].process_next == &g_threads[2] &&
         g_threads[2].process_prev == &g_threads[0];
     if (!check("MIDDLE NODE UNLINKED ONCE", unlinked)) goto failed;
+    if (!check("STACK VIRTUAL SLOT RELEASED", kernel_stack_virtual_released(target_stack_base))) goto failed;
     if (!check("EXACT STACK COUNT RELEASED", pmm_stats().free_pages ==
             free_before_failure + stack_pages)) goto failed;
     if (!check("SECOND DESTROY REJECTED", !thread_destroy(target) &&

@@ -33,6 +33,18 @@
 #define DIRECT_MAP_MIN_PHYSICAL 0x100000ULL
 #define BOOT_STAGE_COUNT 22U
 
+extern const u8 __kernel_text_start[] __attribute__((visibility("hidden")));
+extern const u8 __kernel_text_end[] __attribute__((visibility("hidden")));
+extern const u8 __kernel_data_start[] __attribute__((visibility("hidden")));
+extern const u8 __kernel_data_end[] __attribute__((visibility("hidden")));
+
+typedef struct {
+    u64 text_base;
+    u64 text_end;
+    u64 data_base;
+    u64 data_end;
+} KernelImageLayout;
+
 static bool map_physical_direct_map(VmPageMap *map, const BootInfo *boot) {
     if (!map ||
         !boot ||
@@ -84,6 +96,63 @@ static bool map_optional_range(VmPageMap *map, u64 base, u64 size) {
         vmm_identity_map_range(map, base, size, VM_WRITE);
 }
 
+
+static bool kernel_image_layout(const BootInfo *boot, KernelImageLayout *layout) {
+    if (!boot || !layout || !boot->kernel_base || !boot->kernel_size) return false;
+    if (boot->kernel_base > ~0ULL - boot->kernel_size) return false;
+
+    layout->text_base = (u64)(const void *)__kernel_text_start;
+    layout->text_end = (u64)(const void *)__kernel_text_end;
+    layout->data_base = (u64)(const void *)__kernel_data_start;
+    layout->data_end = (u64)(const void *)__kernel_data_end;
+
+    u64 kernel_end = boot->kernel_base + boot->kernel_size;
+    u64 page_mask = VM_PAGE_SIZE - 1ULL;
+    if ((layout->text_base | layout->text_end | layout->data_base | layout->data_end) & page_mask) return false;
+    if (layout->text_base != boot->kernel_base) return false;
+    if (layout->text_base >= layout->text_end || layout->text_end != layout->data_base) return false;
+    if (layout->data_base >= layout->data_end || layout->data_end != kernel_end) return false;
+    if (boot->kernel_entry < layout->text_base || boot->kernel_entry >= layout->text_end) return false;
+    return true;
+}
+
+static bool kernel_range_permissions_valid(const VmPageMap *map, u64 base, u64 end, vm_flags_t expected) {
+    if (!map || !base || end <= base || (base & (VM_PAGE_SIZE - 1ULL)) || (end & (VM_PAGE_SIZE - 1ULL))) {
+        return false;
+    }
+    for (u64 address = base; address < end; address += VM_PAGE_SIZE) {
+        frame_t frame = FRAME_INVALID;
+        vm_flags_t flags = 0;
+        if (!vmm_query_page(map, address, &frame, &flags) || frame != phys_to_frame(address)) return false;
+        if ((flags & (VM_WRITE | VM_USER | VM_EXEC)) != expected) return false;
+
+        u64 direct = 0;
+        if (!physmap_virtual_address(address, &direct)) return false;
+        if (vmm_query_page(map, direct, 0, 0)) return false;
+    }
+    return true;
+}
+
+static bool kernel_image_permissions_valid(const VmPageMap *map, const BootInfo *boot) {
+    KernelImageLayout layout;
+    if (!kernel_image_layout(boot, &layout)) return false;
+    if (!kernel_range_permissions_valid(map, layout.text_base, layout.text_end, VM_EXEC)) return false;
+    if (!kernel_range_permissions_valid(map, layout.data_base, layout.data_end, VM_WRITE)) return false;
+
+    if (!boot->kernel_stack_base || !boot->kernel_stack_size ||
+        (boot->kernel_stack_base & (VM_PAGE_SIZE - 1ULL)) ||
+        (boot->kernel_stack_size & (VM_PAGE_SIZE - 1ULL)) ||
+        boot->kernel_stack_base > ~0ULL - boot->kernel_stack_size) return false;
+    u64 stack_end = boot->kernel_stack_base + boot->kernel_stack_size;
+    for (u64 address = boot->kernel_stack_base; address < stack_end; address += VM_PAGE_SIZE) {
+        frame_t frame = FRAME_INVALID;
+        vm_flags_t flags = 0;
+        if (!vmm_query_page(map, address, &frame, &flags) || frame != phys_to_frame(address)) return false;
+        if ((flags & (VM_WRITE | VM_USER | VM_EXEC)) != VM_WRITE) return false;
+    }
+    return true;
+}
+
 static bool identity_mapping_valid(const VmPageMap *map, u64 address) {
     if (!map || !address) return false;
 
@@ -102,6 +171,11 @@ static bool identity_mapping_valid(const VmPageMap *map, u64 address) {
 
 static bool build_kernel_page_map(VmPageMap *map, const BootInfo *boot, const AcpiInfo *acpi, const AhciInfo *ahci) {
     if (!map || !boot) return false;
+    KernelImageLayout layout;
+    if (!kernel_image_layout(boot, &layout)) {
+        serial_write("PAGING: kernel image layout invalid\n");
+        return false;
+    }
 
     /* PMM bitmap must exist only through its physmap alias. */
     if (!map_physical_direct_map(map, boot)) {
@@ -114,7 +188,8 @@ static bool build_kernel_page_map(VmPageMap *map, const BootInfo *boot, const Ac
     /* Explicit low identity mappings required by the currently running kernel follow. */
     if (!map_optional_range(map, (u64)boot, sizeof(BootInfo))) goto fail;
     if (!map_optional_range(map, boot->memory_map, boot->memory_map_size)) goto fail;
-    if (!map_optional_range(map, boot->kernel_base, boot->kernel_size)) goto fail;
+    if (!vmm_identity_map_range(map, layout.text_base, layout.text_end - layout.text_base, VM_EXEC)) goto fail;
+    if (!vmm_identity_map_range(map, layout.data_base, layout.data_end - layout.data_base, VM_WRITE)) goto fail;
     if (!map_optional_range(map, boot->kernel_stack_base, boot->kernel_stack_size)) goto fail;
     if (!map_optional_range(map, boot->initrd_base, boot->initrd_size)) goto fail;
 
@@ -156,7 +231,8 @@ static bool build_kernel_page_map(VmPageMap *map, const BootInfo *boot, const Ac
     }
 
     /* Validate the absolutely critical mappings before touching CR3. */
-    if (!identity_mapping_valid(map, boot->kernel_base)) goto fail;
+    if (!identity_mapping_valid(map, boot->kernel_entry)) goto fail;
+    if (!kernel_image_permissions_valid(map, boot)) goto fail;
     ArchDescriptorTablePointer gdtr;
 
     gdtr.limit = 0;
@@ -351,6 +427,7 @@ void kernel_main(BootInfo *boot) {
     u64 old_cr3 = arch_read_cr3() & ~0xFFFULL;
     u64 new_cr3 = 0;
     bool paging_ok = false;
+    bool kernel_wx_ok = false;
 
     /*
     * The current VMM is four-level x86-64 paging.
@@ -359,8 +436,9 @@ void kernel_main(BootInfo *boot) {
     * the kernel with CR4.LA57 enabled.
     */
     AddressSpace *kernel_space = 0;
+    bool nx_ok = vmm_enable_nx();
 
-    if (!(arch_read_cr4() & CR4_LA57)) {
+    if (nx_ok && !(arch_read_cr4() & CR4_LA57)) {
 
         const AhciInfo *ahci = ahci_get();
 
@@ -377,6 +455,7 @@ void kernel_main(BootInfo *boot) {
                     arch_write_cr3(new_cr3);
                     u64 active_cr3 = arch_read_cr3() & ~0xFFFULL;
                     paging_ok = active_cr3 == new_cr3;
+                    if (paging_ok && !vmm_enable_write_protect()) paging_ok = false;
 
                     if (paging_ok) {
                         u64 root_physical = frame_to_phys(kernel_map->root_frame);
@@ -393,6 +472,8 @@ void kernel_main(BootInfo *boot) {
                     if (paging_ok) {
 
                         vmm_enable_phys_map_access();
+                        kernel_wx_ok = vmm_write_protect_enabled() && kernel_image_permissions_valid(kernel_map, boot);
+                        if (!kernel_wx_ok) paging_ok = false;
 
                         /* Move PMM metadata to the physmap and probe alloc/free. */
                         if (paging_ok) {
@@ -585,6 +666,12 @@ void kernel_main(BootInfo *boot) {
     terminal_writeln(pmm_ok ? "READY" : "FAILED");
     terminal_write("PAGING: ");
     terminal_writeln(paging_ok ? "JCOS CR3 ACTIVE" : "FAILED");
+    terminal_write("  NX: ");
+    terminal_writeln(vmm_nx_enabled() ? "ACTIVE" : "INACTIVE");
+    terminal_write("  CR0.WP: ");
+    terminal_writeln(vmm_write_protect_enabled() ? "ACTIVE" : "INACTIVE");
+    terminal_write("  KERNEL W^X: ");
+    terminal_writeln(kernel_wx_ok ? "ACTIVE" : "FAILED");
     terminal_write("  PHYS MAP: ");
     terminal_writeln(vmm_phys_map_access_enabled() ? "ACTIVE" : "INACTIVE");
     terminal_write("  PMM PHYS MAP: ");

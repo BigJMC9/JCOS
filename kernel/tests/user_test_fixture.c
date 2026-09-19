@@ -11,6 +11,7 @@
 #include "terminal.h"
 #include "user_elf_test.h"
 #include "vmm_test.h"
+#include "user_stack.h"
 
 static UserTestFixture g_fixture;
 static bool g_last_result;
@@ -159,9 +160,12 @@ bool user_fixture_stack_allocate(UserTestFixture *f, u32 i, u64 address) {
         address < ADDRESS_SPACE_USER_BASE || address > ADDRESS_SPACE_USER_LIMIT - VM_PAGE_SIZE ||
         (address & (VM_PAGE_SIZE - 1ULL))) return false;
     AddressSpace *space = process_address_space(&f->process);
-    if (!space || address_space_query_page(space, address, 0, 0)) return false;
+    if (!space || !user_stack_slot_available(space, address)) return false;
     for (u32 j = 0; j < USER_FIXTURE_STACKS; ++j) {
-        if (f->stacks[j].allocated && f->stacks[j].virtual_address == address) return false;
+        if (!f->stacks[j].allocated) continue;
+        u64 other = f->stacks[j].virtual_address;
+        u64 distance = address > other ? address - other : other - address;
+        if (distance < 2ULL * VM_PAGE_SIZE) return false;
     }
     frame_t frame = frame_alloc();
     if (frame == FRAME_INVALID) return false;
@@ -179,7 +183,7 @@ bool user_fixture_stack_map(UserTestFixture *f, u32 i) {
     void *direct = phys_to_virt(frame_to_phys(stack->frame));
     if (!space || !direct) return false;
     k_memset(direct, 0, (usize)VM_PAGE_SIZE);
-    bool result = address_space_map_page(space, stack->virtual_address, stack->frame, VM_WRITE);
+    bool result = user_stack_map_page(space, stack->virtual_address, stack->frame);
     if (result) stack->mapped = true;
     else note_unpublished(f);
     return result;
@@ -263,8 +267,8 @@ static bool stack_release(UserTestFixture *f, u32 i) {
     if (stack->mapped) {
         AddressSpace *space = process_address_space(&f->process);
         frame_t found = FRAME_INVALID, old = FRAME_INVALID;
-        if (!space || !address_space_query_page(space, stack->virtual_address, &found, 0) ||
-            found != stack->frame) return false;
+        if (!space || !user_stack_mapping_valid(space, stack->virtual_address, stack->frame)) return false;
+        if (!address_space_query_page(space, stack->virtual_address, &found, 0) || found != stack->frame) return false;
         if (!address_space_unmap_page(space, stack->virtual_address, &old)) return false;
         stack->mapped = false;
         if (old != stack->frame) return false;

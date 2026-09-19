@@ -8,6 +8,7 @@
 #include "object_storage.h"
 #include "construction_test.h"
 #include "pmm_test.h"
+#include "kernel_stack.h"
 
 static Thread g_bootstrap_thread;
 static Thread *g_current_thread;
@@ -20,6 +21,7 @@ static bool g_initialized;
 static void *g_thread_storage[THREAD_STORAGE_CAPACITY];
 /* No Thread/Process pointer escapes a failed constructor. */
 static u64 g_unpublished_stack;
+static u64 g_unpublished_stack_virtual;
 static struct {
     Thread *target;
     ThreadCreateTestFault fault;
@@ -93,29 +95,21 @@ static bool thread_build_interrupt_context(Thread *thread, u64 rip, u64 cs, u64 
     return true;
 }
 
-static bool release_kernel_stack(u64 physical, u64 size) {
-    if (!physical || !size) return false;
-    if (physical & (FRAME_SIZE - 1ULL)) return false;
-    if (size & (FRAME_SIZE - 1ULL)) return false;
-
-    frame_t first = phys_to_frame(physical);
-
-    if (first == FRAME_INVALID) return false;
-
-    return frame_free_range(first, size / FRAME_SIZE);
-}
-
 bool thread_reclaim_unpublished_stack(void) {
     u64 flags = thread_reclaim_irq_save();
-    bool result = !g_unpublished_stack || release_kernel_stack(g_unpublished_stack, THREAD_KERNEL_STACK_SIZE);
-    if (result) g_unpublished_stack = 0;
+    bool result = !g_unpublished_stack ||
+        kernel_stack_discard_unpublished(g_unpublished_stack, g_unpublished_stack_virtual);
+    if (result) {
+        g_unpublished_stack = 0;
+        g_unpublished_stack_virtual = 0;
+    }
     thread_reclaim_irq_restore(flags);
     return result;
 }
 
 bool thread_creation_cleanup_pending(void) {
     u64 flags = thread_reclaim_irq_save();
-    bool pending = g_unpublished_stack != 0;
+    bool pending = g_unpublished_stack != 0 || g_unpublished_stack_virtual != 0;
     thread_reclaim_irq_restore(flags);
     return pending;
 }
@@ -139,7 +133,7 @@ bool thread_test_fail_create_once(Thread *target, ThreadCreateTestFault fault, b
         (fault == THREAD_CREATE_TEST_ALLOCATE && fail_rollback)) return false;
     u64 flags = thread_reclaim_irq_save();
     bool valid = !g_create_fault.armed && !thread_storage_live(target) && !g_unpublished_stack &&
-        !pmm_test_free_failure_armed();
+        !g_unpublished_stack_virtual && !pmm_test_free_failure_armed();
     if (valid) {
         g_create_fault.target = target;
         g_create_fault.fault = fault;
@@ -227,9 +221,9 @@ bool thread_prepare_user(Thread *thread, u64 user_rip, u64 user_rsp) {
     vm_flags_t stack_flags = 0;
 
     if (!address_space_query_page(space, code_page, &code_frame, &code_flags)) return false;
-    if (!(code_flags & VM_USER)) return false;
+    if (!(code_flags & VM_USER) || !(code_flags & VM_EXEC) || (code_flags & VM_WRITE)) return false;
     if (!address_space_query_page(space, stack_page, &stack_frame, &stack_flags)) return false;
-    if (!(stack_flags & VM_USER) || !(stack_flags & VM_WRITE)) return false;
+    if (!(stack_flags & VM_USER) || !(stack_flags & VM_WRITE) || (stack_flags & VM_EXEC)) return false;
 
     thread->entry = 0;
     thread->argument = 0;
@@ -249,6 +243,7 @@ bool thread_system_init(Process *kernel_process, u64 bootstrap_stack_base, u64 b
     AddressSpace *kernel_space = process_address_space(kernel_process);
 
     if (!kernel_space || !kernel_space->kernel || !address_space_cr3(kernel_space)) return false;
+    if (!kernel_stack_arena_init(kernel_space, bootstrap_stack_base)) return false;
     if (bootstrap_stack_base > ~0ULL - bootstrap_stack_size) return false;
 
     u64 stack_end = bootstrap_stack_base + bootstrap_stack_size;
@@ -326,7 +321,8 @@ static bool thread_create_locked(Thread *thread, Process *process) {
 
     /* Existing callers may pass fresh uninitialized storage. Do not read it. */
     k_memset(thread, 0, sizeof(*thread));
-    if (!g_initialized || !process || !g_next_thread_id || g_unpublished_stack) return false;
+    if (!g_initialized || !process || !g_next_thread_id || !kernel_stack_arena_ready() ||
+        g_unpublished_stack || g_unpublished_stack_virtual) return false;
     u32 slot = object_storage_empty(g_thread_storage, THREAD_STORAGE_CAPACITY);
     if (slot == THREAD_STORAGE_CAPACITY) return false;
 
@@ -342,11 +338,14 @@ static bool thread_create_locked(Thread *thread, Process *process) {
     if (thread_create_fault(thread, THREAD_CREATE_TEST_ACCESS, physical)) goto fail;
     void *direct = phys_to_virt(physical);
     if (!direct) goto fail;
-    u64 virtual_base = (u64)(void *)direct;
+    k_memset(direct, 0, (usize)THREAD_KERNEL_STACK_SIZE);
+
+    u64 virtual_base = 0;
+    if (!kernel_stack_map(slot, physical, &virtual_base)) goto fail;
+    g_unpublished_stack_virtual = virtual_base;
     if (virtual_base > ~0ULL - THREAD_KERNEL_STACK_SIZE) goto fail;
     u64 virtual_top = virtual_base + THREAD_KERNEL_STACK_SIZE;
     if (virtual_top & 0xFULL) goto fail;
-    k_memset(direct, 0, (usize)THREAD_KERNEL_STACK_SIZE);
 
     thread->id = g_next_thread_id;
     thread->process = process;
@@ -362,6 +361,7 @@ static bool thread_create_locked(Thread *thread, Process *process) {
     /* Publication commit: no fallible operation after ownership attachment. */
     g_thread_storage[slot] = thread;
     g_unpublished_stack = 0;
+    g_unpublished_stack_virtual = 0;
     ++g_next_thread_id;
     return true;
 
@@ -488,7 +488,7 @@ static bool thread_destroy_locked(Thread *thread) {
     if (!process_thread_can_detach(process, thread)) return false;
 
     if (thread->owns_kernel_stack &&
-        !release_kernel_stack(thread->kernel_stack_physical, thread->kernel_stack_size)) return false;
+        !kernel_stack_release(thread->kernel_stack_physical, thread->kernel_stack_base)) return false;
 
     /*
     * Resource release succeeded.

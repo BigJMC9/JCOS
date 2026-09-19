@@ -322,6 +322,7 @@ static bool map_segment(AddressSpace *space, const VfsNode *file, const Elf64Pro
     vm_flags_t flags = 0;
 
     if (segment->flags & ELF64_PF_W) flags |= VM_WRITE;
+    if (segment->flags & ELF64_PF_X) flags |= VM_EXEC;
 
     /*
      * Allocate and zero every page before

@@ -12,6 +12,14 @@
 #define PTE_WRITE   (1ULL << 1)
 #define PTE_USER    (1ULL << 2)
 #define PTE_HUGE    (1ULL << 7)
+#define PTE_NX      (1ULL << 63)
+
+#define CR0_WRITE_PROTECT        (1ULL << 16)
+#define IA32_EFER_MSR            0xC0000080U
+#define IA32_EFER_NXE            (1ULL << 11)
+#define CPUID_EXTENDED_MAX       0x80000000U
+#define CPUID_EXTENDED_FEATURES  0x80000001U
+#define CPUID_EXTENDED_NX        (1U << 20)
 
 /*
  * Bits 12..51 contain the physical address.
@@ -32,6 +40,7 @@
  * active, this becomes true.
  */
 static bool g_use_phys_map;
+static bool g_nx_enabled;
 
 /* UP normal context only. No NMI callers, PCID, or remote page-map users. */
 static u64 vmm_irq_save(void) {
@@ -183,6 +192,49 @@ void vmm_enable_phys_map_access(void) {
 
 bool vmm_phys_map_access_enabled(void) {
     return g_use_phys_map;
+}
+
+bool vmm_enable_nx(void) {
+    if (g_nx_enabled) return true;
+
+    u32 a = 0, b = 0, c = 0, d = 0;
+    arch_cpuid(CPUID_EXTENDED_MAX, 0, &a, &b, &c, &d);
+    (void)b;
+    (void)c;
+    (void)d;
+    if (a < CPUID_EXTENDED_FEATURES) return false;
+
+    arch_cpuid(CPUID_EXTENDED_FEATURES, 0, &a, &b, &c, &d);
+    (void)a;
+    (void)b;
+    (void)c;
+    if (!(d & CPUID_EXTENDED_NX)) return false;
+
+    u64 efer = arch_read_msr(IA32_EFER_MSR);
+    if (!(efer & IA32_EFER_NXE)) {
+        arch_write_msr(IA32_EFER_MSR, efer | IA32_EFER_NXE);
+        efer = arch_read_msr(IA32_EFER_MSR);
+    }
+
+    g_nx_enabled = (efer & IA32_EFER_NXE) != 0;
+    return g_nx_enabled;
+}
+
+bool vmm_nx_enabled(void) {
+    return g_nx_enabled;
+}
+
+bool vmm_enable_write_protect(void) {
+    u64 cr0 = arch_read_cr0();
+    if (!(cr0 & CR0_WRITE_PROTECT)) {
+        arch_write_cr0(cr0 | CR0_WRITE_PROTECT);
+        cr0 = arch_read_cr0();
+    }
+    return (cr0 & CR0_WRITE_PROTECT) != 0;
+}
+
+bool vmm_write_protect_enabled(void) {
+    return (arch_read_cr0() & CR0_WRITE_PROTECT) != 0;
 }
 
 static frame_t entry_frame(u64 entry) {
@@ -433,8 +485,9 @@ static bool map_page_locked(VmPageMap *map, u64 virtual_address, frame_t frame, 
     if (map->shared_source && !map_active(map)) return false;
     if (!page_aligned(virtual_address) || !virtual_address_canonical(virtual_address)) return false;
     if (!valid_mapping_frame(frame)) return false;
+    if (!g_nx_enabled) return false;
     /* Refuse flags we do not understand yet. */
-    if (flags & ~(VM_WRITE | VM_USER)) return false;
+    if (flags & ~(VM_WRITE | VM_USER | VM_EXEC)) return false;
 
     u32 i4 = pml4_index(virtual_address);
     if (!map_owns_pml4_index(map,i4)) return false;
@@ -536,10 +589,11 @@ static bool map_page_locked(VmPageMap *map, u64 virtual_address, frame_t frame, 
     }
 
     u64 physical = frame_to_phys(frame);
-    u64 entry_flags = PTE_PRESENT;
+    u64 entry_flags = PTE_PRESENT | PTE_NX;
 
     if (flags & VM_WRITE) entry_flags |= PTE_WRITE;
     if (flags & VM_USER) entry_flags |= PTE_USER;
+    if (flags & VM_EXEC) entry_flags &= ~PTE_NX;
 
     pt[i1] = physical | entry_flags;
 
@@ -603,10 +657,58 @@ bool vmm_query_page(const VmPageMap *map, u64 virtual_address, frame_t *frame, v
         /* Permissions are effective only when every level permits them. */
         if ((pml4e & PTE_WRITE) && (pdpte & PTE_WRITE) && (pde & PTE_WRITE) && (pte & PTE_WRITE)) result |= VM_WRITE;
         if ((pml4e & PTE_USER) && (pdpte & PTE_USER) && (pde & PTE_USER) && (pte & PTE_USER)) result |= VM_USER;
+        if (!((pml4e | pdpte | pde | pte) & PTE_NX)) result |= VM_EXEC;
 
         *flags = result;
     }
 
+    return true;
+}
+
+static vm_flags_t vmm_test_entry_flags(u64 entry) {
+    if (!(entry & PTE_PRESENT)) return 0;
+    vm_flags_t flags = 0;
+    if (entry & PTE_WRITE) flags |= VM_WRITE;
+    if (entry & PTE_USER) flags |= VM_USER;
+    if (!(entry & PTE_NX)) flags |= VM_EXEC;
+    return flags;
+}
+
+bool vmm_test_page_walk(const VmPageMap *map, u64 virtual_address, VmmTestPageWalk *out) {
+    if (!out) return false;
+    k_memset(out, 0, sizeof(*out));
+
+    frame_t mapped = FRAME_INVALID;
+    vm_flags_t effective = 0;
+    if (!vmm_query_page(map, virtual_address, &mapped, &effective)) return false;
+
+    u64 *pml4 = table_pointer(map->root_frame);
+    if (!pml4) return false;
+    u32 i4 = pml4_index(virtual_address);
+    u64 pml4e = pml4[i4];
+
+    frame_t ignored = FRAME_INVALID;
+    u64 *pdpt = 0;
+    if (!existing_table(pml4, i4, &ignored, &pdpt)) return false;
+    u32 i3 = pdpt_index(virtual_address);
+    u64 pdpte = pdpt[i3];
+
+    u64 *pd = 0;
+    if (!existing_table(pdpt, i3, &ignored, &pd)) return false;
+    u32 i2 = pd_index(virtual_address);
+    u64 pde = pd[i2];
+
+    u64 *pt = 0;
+    if (!existing_table(pd, i2, &ignored, &pt)) return false;
+    u64 pte = pt[pt_index(virtual_address)];
+    if (!(pte & PTE_PRESENT) || entry_frame(pte) != mapped) return false;
+
+    out->frame = mapped;
+    out->pml4_flags = vmm_test_entry_flags(pml4e);
+    out->pdpt_flags = vmm_test_entry_flags(pdpte);
+    out->pd_flags = vmm_test_entry_flags(pde);
+    out->pt_flags = vmm_test_entry_flags(pte);
+    out->effective_flags = effective;
     return true;
 }
 

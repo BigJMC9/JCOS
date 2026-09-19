@@ -11,9 +11,12 @@
 #include "process_terminate_test.h"
 #include "lifetime_ipc_acceptance_test.h"
 #include "lifetime_stress_test.h"
+#include "permission_audit_test.h"
 #include "stack_reclaim_test.h"
 #include "user_ipc_cancel_test.h"
 #include "user_process_cleanup_test.h"
+#include "user_protection_test.h"
+#include "user_stack_guard_test.h"
 #include "user_runtime_block_test.h"
 #include "user_runtime_test.h"
 #include "user_test_fixture.h"
@@ -43,6 +46,7 @@ static void kernel_test_registry_init(void) {
     kernel_test_add("capability-lifetime", "capability lifetime and safe storage reuse", KERNEL_TEST_LIFETIME, capability_lifetime_test_run, 0);
     kernel_test_add("constructor", "creation rollback and storage lifetime", KERNEL_TEST_LIFETIME, constructor_test_run, 0);
     kernel_test_add("stack-reclaim", "atomic kernel-stack release and retry", KERNEL_TEST_MEMORY, stack_reclaim_test_run, 0);
+    kernel_test_add("permission-audit", "effective page-table W/U/X permission audit", KERNEL_TEST_MEMORY, permission_audit_test_run, user_fixture_cleanup_retry_run);
     kernel_test_add("elf-reclaim", "ELF cleanup failure and retry", KERNEL_TEST_MEMORY, elf_reclaim_test_run, 0);
     kernel_test_add("vmm-reclaim", "page-table cleanup failure and retry", KERNEL_TEST_MEMORY, vmm_reclaim_test_run, 0);
     kernel_test_add("force-thread", "forced IPC thread termination", KERNEL_TEST_TASK, force_thread_test_run, force_thread_cleanup_run);
@@ -53,6 +57,8 @@ static void kernel_test_registry_init(void) {
     kernel_test_add("timeout", "IPC timeout/deadline ordering", KERNEL_TEST_IPC, ipc_timeout_order_test_run, ipc_timeout_order_cleanup_run);
     kernel_test_add("user-ipc-cancel", "Ring3 IPC cancellation and close", KERNEL_TEST_USERSPACE, user_ipc_cancel_test_run, user_fixture_cleanup_retry_run);
     kernel_test_add("user-process-cleanup", "shared user-process cleanup", KERNEL_TEST_USERSPACE, user_process_cleanup_test_run, user_fixture_cleanup_retry_run);
+    kernel_test_add("user-protection", "hardware NX and W^X enforcement", KERNEL_TEST_USERSPACE, user_protection_test_run, user_fixture_cleanup_retry_run);
+    kernel_test_add("user-stack-guard", "guarded user-stack overflow containment", KERNEL_TEST_USERSPACE, user_stack_guard_test_run, user_fixture_cleanup_retry_run);
     kernel_test_add("user-runtime", "shared Ring3 C runtime", KERNEL_TEST_USERSPACE, user_runtime_test_run, user_fixture_cleanup_retry_run);
     kernel_test_add("user-runtime-block", "blocking Ring3 C runtime", KERNEL_TEST_USERSPACE, user_runtime_block_test_run, user_fixture_cleanup_retry_run);
     kernel_test_add("lifetime-stress", "IPC/process lifetime recovery stress", KERNEL_TEST_ACCEPTANCE, lifetime_stress_test_run, user_fixture_cleanup_retry_run);

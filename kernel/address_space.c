@@ -178,6 +178,8 @@ bool address_space_map_page(AddressSpace *space, u64 virtual_address, frame_t fr
     if (!space_storage_live(space)) return false;
     if (!space->kernel) {
         if (!user_virtual_address(virtual_address)) return false;
+        /* User mappings are W^X at the address-space boundary. */
+        if ((flags & VM_WRITE) && (flags & VM_EXEC)) return false;
 
         /* Every mapping owned by a user address space must be reachable from CPL3. */
         flags |= VM_USER;

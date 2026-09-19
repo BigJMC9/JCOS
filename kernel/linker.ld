@@ -15,12 +15,17 @@ SECTIONS
 
     .text : ALIGN(0x1000)
     {
+        PROVIDE_HIDDEN(__kernel_text_start = .);
         *(.text*)
         *(.rodata*)
     } :text
 
+    . = ALIGN(0x1000);
+    PROVIDE_HIDDEN(__kernel_text_end = .);
+
     .data : ALIGN(0x1000)
     {
+        PROVIDE_HIDDEN(__kernel_data_start = .);
         *(.data*)
         *(.got*)
     } :data
@@ -30,6 +35,9 @@ SECTIONS
         *(COMMON)
         *(.bss*)
     } :data
+
+    . = ALIGN(0x1000);
+    PROVIDE_HIDDEN(__kernel_data_end = .);
 
     /DISCARD/ :
     {
