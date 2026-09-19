@@ -179,19 +179,11 @@ InterruptFrame *syscall_dispatch(InterruptFrame *frame) {
         case SYSCALL_THREAD_EXIT: {
             Thread *thread = thread_current();
 
-            /*
-             * Currently have no idle thread.
-             *
-             * User thread may only
-             * exit when another runnable thread
-             * exists to receive control.
-             *
-             * Reject transitional/manual
-             * Ring3 probes which are not owned
-             * by the scheduler run queue.
-             */
+            /* Reject transitional/manual Ring3 probes which are not owned by
+             * the scheduler. The scheduler-private idle context is a valid
+             * successor when this is the final ordinary runnable Thread. */
             if (!thread || !thread->id || !thread->on_run_queue || thread->state != THREAD_STATE_RUNNING ||
-                scheduler_thread_count() < 2) {
+                !scheduler_can_terminate_current()) {
                 frame->rax = SYSCALL_RESULT_FAILED;
                 return frame;
             }

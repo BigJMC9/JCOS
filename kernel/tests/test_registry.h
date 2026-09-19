@@ -20,6 +20,7 @@ typedef struct {
     KernelTestGroup group;
     void (*run)(void);
     void (*cleanup)(void);
+    bool live_preemption;
 } KernelTest;
 
 u32 kernel_test_registry_count(void);

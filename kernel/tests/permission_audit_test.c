@@ -8,6 +8,7 @@
 #include "physmap.h"
 #include "pmm.h"
 #include "process.h"
+#include "scheduler.h"
 #include "supervisor.h"
 #include "terminal.h"
 #include "thread.h"
@@ -134,15 +135,17 @@ void permission_audit_test_run(void) {
     bool kernel_text_ok = layout_ok && kernel_range_exact(kernel_map, text_base, text_end, VM_EXEC);
     bool kernel_data_ok = layout_ok && kernel_range_exact(kernel_map, data_base, data_end, VM_WRITE);
     bool bootstrap_ok = bootstrap_stack_exact(kernel_map, main);
+    bool idle_stack_ok = scheduler_idle_context_ready() && scheduler_idle_stack_guarded();
     bool supervisor_before = supervisor_stack_guarded();
     print_check("KERNEL LINKER LAYOUT", layout_ok);
     print_check("KERNEL TEXT / RODATA RX", kernel_text_ok);
     print_check("KERNEL DATA / BSS RW-NX", kernel_data_ok);
     print_check("KERNEL IMAGE PHYSMAP ALIASES ABSENT", kernel_text_ok && kernel_data_ok);
     print_check("BOOTSTRAP STACK RW-NX", bootstrap_ok);
+    print_check("SCHEDULER IDLE STACK GUARDED RW-NX", idle_stack_ok);
     print_check("SUPERVISOR USER STACK GUARDED", supervisor_before);
 
-    if (!layout_ok || !kernel_text_ok || !kernel_data_ok || !bootstrap_ok || !supervisor_before ||
+    if (!layout_ok || !kernel_text_ok || !kernel_data_ok || !bootstrap_ok || !idle_stack_ok || !supervisor_before ||
         !user_fixture_available()) {
         terminal_set_color(terminal_error_color());
         terminal_writeln("PAGE PERMISSION AUDIT TEST: FAILED");

@@ -6648,6 +6648,59 @@ static void shell_list_tests(const char *filter) {
     }
 }
 
+#define SHELL_TEST_RFLAGS_IF (1ULL << 9)
+
+static u64 shell_test_irq_save(void) {
+    u64 flags;
+    __asm__ volatile ("pushfq; popq %0" : "=r"(flags) : : "memory");
+    interrupts_disable();
+    return flags;
+}
+
+static void shell_test_irq_restore(u64 flags) {
+    if (flags & SHELL_TEST_RFLAGS_IF) interrupts_enable();
+}
+
+static bool shell_run_test_mode(void (*run)(void), bool live_preemption) {
+    if (!run) return false;
+
+    u64 flags = shell_test_irq_save();
+    bool original = scheduler_preemption_enabled();
+    bool ready = true;
+
+    if (live_preemption) {
+        ready = original;
+    } else if (original) {
+        ready = scheduler_preemption_disable();
+    }
+    shell_test_irq_restore(flags);
+
+    if (!ready) {
+        terminal_set_color(terminal_error_color());
+        terminal_writeln(live_preemption ?
+            "TEST REQUIRES NORMAL PREEMPTION POLICY ACTIVE." :
+            "FAILED TO QUIESCE PREEMPTION FOR DETERMINISTIC TEST.");
+        terminal_set_color(terminal_default_color());
+        return false;
+    }
+
+    run();
+
+    flags = shell_test_irq_save();
+    bool current = scheduler_preemption_enabled();
+    bool restored = true;
+    if (original && !current) restored = scheduler_preemption_enable();
+    else if (!original && current) restored = scheduler_preemption_disable();
+    shell_test_irq_restore(flags);
+
+    if (!restored) {
+        terminal_set_color(terminal_error_color());
+        terminal_writeln("FAILED TO RESTORE SCHEDULER PREEMPTION POLICY AFTER TEST.");
+        terminal_set_color(terminal_default_color());
+    }
+    return restored;
+}
+
 static void command_test(const char *args) {
     char first[64];
     char second[64];
@@ -6678,7 +6731,7 @@ static void command_test(const char *args) {
             terminal_set_color(terminal_default_color());
             return;
         }
-        local->run();
+        (void)shell_run_test_mode(local->run, false);
         return;
     }
 
@@ -6693,7 +6746,7 @@ static void command_test(const char *args) {
     }
 
     if (!has_second) {
-        test->run();
+        (void)shell_run_test_mode(test->run, test->live_preemption);
         return;
     }
 
@@ -6709,7 +6762,7 @@ static void command_test(const char *args) {
         return;
     }
 
-    test->cleanup();
+    (void)shell_run_test_mode(test->cleanup, test->live_preemption);
 }
 
 static void execute(char *line) {

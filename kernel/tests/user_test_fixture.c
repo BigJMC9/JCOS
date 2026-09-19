@@ -35,7 +35,7 @@ static bool main_ready(void) {
     Thread *main = thread_current();
     Process *kernel = process_kernel();
     return main && kernel && main->process == kernel && main->state == THREAD_STATE_RUNNING &&
-        main->on_run_queue && scheduler_thread_count() == 1ULL && !scheduler_preemption_enabled();
+        main->on_run_queue && scheduler_thread_count() == 1ULL;
 }
 
 bool user_fixture_hooks_idle(void) {
@@ -91,6 +91,7 @@ UserTestFixture *user_fixture_begin(const char *label) {
     f->kernel_tail = f->kernel_process->thread_tail;
     f->supervisor_pid = supervisor_process_id();
     f->supervisor_tid = supervisor_thread_id();
+    f->preemption_enabled = scheduler_preemption_enabled();
     f->checks_ok = true;
     f->active = true;
     g_last_result = false;
@@ -221,7 +222,7 @@ bool user_fixture_schedule_once(void) {
 static bool execution_owner_ok(const UserTestFixture *f) {
     return canonical(f) && thread_current() == f->main_thread && f->main_thread->process == f->kernel_process &&
         f->main_thread->state == THREAD_STATE_RUNNING && f->main_thread->on_run_queue &&
-        !scheduler_preemption_enabled();
+        scheduler_preemption_enabled() == f->preemption_enabled;
 }
 
 bool user_fixture_quiesce(UserTestFixture *f) {
@@ -380,7 +381,8 @@ bool user_fixture_baselines(const UserTestFixture *f) {
         thread_object_count() != f->thread_count || address_space_object_count() != f->space_count ||
         process_thread_count(f->kernel_process) != f->kernel_thread_count ||
         f->kernel_process->thread_head != f->kernel_head || f->kernel_process->thread_tail != f->kernel_tail ||
-        capability_table_count(f->kernel_caps) != f->kernel_cap_count) return false;
+        capability_table_count(f->kernel_caps) != f->kernel_cap_count ||
+        scheduler_preemption_enabled() != f->preemption_enabled) return false;
     for (u32 i = 0; i < CAPABILITY_TABLE_CAPACITY; ++i) {
         const CapabilitySlot *before = &f->kernel_slots[i], *now = &f->kernel_caps->slots[i];
         if (before->occupied != now->occupied) return false;

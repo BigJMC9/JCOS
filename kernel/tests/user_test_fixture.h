@@ -81,6 +81,7 @@ typedef struct {
     u64 free_pages;
     u64 supervisor_pid;
     u64 supervisor_tid;
+    bool preemption_enabled;
 } UserTestFixture;
 
 /* Returns false before changing anything when another migrated test is retained. */

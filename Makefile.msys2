@@ -168,13 +168,13 @@ LOADER_CFLAGS := --target=x86_64-pc-win32-coff -std=c11 -ffreestanding \
 
 KERNEL_CFLAGS := --target=x86_64-unknown-none-elf -std=c11 -ffreestanding \
                  -fno-stack-protector -fno-builtin -fpie -fno-plt \
-                 -fvisibility=hidden -mno-red-zone -mno-sse -mno-sse2 \
+                 -fvisibility=hidden -mno-red-zone -mgeneral-regs-only -mno-sse -mno-sse2 \
                  -fno-asynchronous-unwind-tables -fno-unwind-tables \
                  -Wall -Wextra -Werror -O2
 
 USER_CFLAGS := --target=x86_64-unknown-none-elf -std=c11 -ffreestanding \
                -fno-stack-protector -fno-builtin -fpie -fno-plt \
-               -fvisibility=hidden -mno-red-zone -mno-sse -mno-sse2 \
+               -fvisibility=hidden -mno-red-zone -mgeneral-regs-only -mno-sse -mno-sse2 \
                -fno-asynchronous-unwind-tables -fno-unwind-tables \
                -Wall -Wextra -Werror -O2
 

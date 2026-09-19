@@ -43,11 +43,21 @@ bool scheduler_block_current(void);
 bool scheduler_wait_current(void);
 u64 scheduler_idle_wait_count(void);
 
+bool scheduler_idle_context_ready(void);
+bool scheduler_idle_active(void);
+bool scheduler_idle_stack_guarded(void);
+u64 scheduler_idle_entry_count(void);
+u64 scheduler_idle_resume_count(void);
+
 bool scheduler_wake(Thread *thread);
 
 /*
- * Enable/disable must be called with interrupts
- * disabled.
+ * Normal single-CPU runtime policy is enabled once the PIT is established,
+ * before boot enables hardware interrupts. These controls remain available to
+ * the diagnostic harness so deterministic tests can temporarily quiesce timer
+ * switching and then restore the previous policy state.
+ *
+ * Enable/disable must be called with interrupts disabled.
  */
 bool scheduler_preemption_enable(void);
 bool scheduler_preemption_disable(void);
@@ -70,6 +80,7 @@ InterruptFrame *scheduler_terminate_current_from_interrupt(InterruptFrame *frame
 
 bool scheduler_can_terminate_thread(const Thread *thread);
 bool scheduler_terminate_thread(Thread *thread);
+bool scheduler_can_terminate_current(void);
 
 /*
  * Permanently terminate the running thread.

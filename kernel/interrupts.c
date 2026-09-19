@@ -117,9 +117,10 @@ static bool user_exception_is_terminable(u64 vector) {
      * Start conservatively.
      *
      * #UD proves isolation now.
+     * #NM enforces the R4 no-FP/SIMD userspace profile.
      * #PF is the next important case.
      */
-    return vector == 6ULL || vector == 14ULL;
+    return vector == 6ULL || vector == 7ULL || vector == 14ULL;
 }
 
 static InterruptFrame *user_exception_terminate(InterruptFrame *frame) {
@@ -127,7 +128,8 @@ static InterruptFrame *user_exception_terminate(InterruptFrame *frame) {
 
     Thread *thread = thread_current();
 
-    if (!frame || !thread || !thread->id || !thread->on_run_queue || thread->state != THREAD_STATE_RUNNING || scheduler_thread_count() < 2) cpu_halt_forever();
+    if (!frame || !thread || !thread->id || !thread->on_run_queue ||
+        thread->state != THREAD_STATE_RUNNING || !scheduler_can_terminate_current()) cpu_halt_forever();
 
     const InterruptStackFrame *user = interrupt_user_stack(frame);
 
@@ -251,8 +253,9 @@ InterruptFrame *interrupt_dispatch(InterruptFrame *frame) {
         if (interrupt_from_user(frame) && user_exception_is_terminable(frame->vector)) {
             Thread *current = thread_current();
 
-            /* Scheduler-managed user threads can be isolated. Transitional manual Ring3 probes still use the old panic. */
-            if (current && current->on_run_queue && current->state == THREAD_STATE_RUNNING && scheduler_thread_count() >= 2) {
+            /* Scheduler-managed user threads can be isolated even when the
+             * scheduler-private idle context is their only successor. */
+            if (current && scheduler_can_terminate_current()) {
                 return user_exception_terminate(frame);
             }
         }

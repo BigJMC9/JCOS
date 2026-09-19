@@ -12,11 +12,13 @@
 #define KERNEL_STACK_ARENA_SIZE 0x01000000ULL
 #define KERNEL_STACK_ARENA_BASE (ADDRESS_SPACE_USER_BASE - KERNEL_STACK_ARENA_SIZE)
 #define KERNEL_STACK_PT_SPAN 0x200000ULL
+#define KERNEL_STACK_IDLE_SLOT ((u32)THREAD_STORAGE_CAPACITY)
+#define KERNEL_STACK_TOTAL_SLOTS ((u64)THREAD_STORAGE_CAPACITY + 1ULL)
 
 _Static_assert(FRAME_SIZE == VM_PAGE_SIZE, "kernel stack frame/page size mismatch");
 _Static_assert((KERNEL_STACK_ARENA_BASE & (KERNEL_STACK_PT_SPAN - 1ULL)) == 0,
     "kernel stack arena must start on a page-table span");
-_Static_assert((u64)THREAD_STORAGE_CAPACITY * KERNEL_STACK_SLOT_SIZE <= KERNEL_STACK_ARENA_SIZE,
+_Static_assert(KERNEL_STACK_TOTAL_SLOTS * KERNEL_STACK_SLOT_SIZE <= KERNEL_STACK_ARENA_SIZE,
     "kernel stack arena too small for thread storage capacity");
 
 static AddressSpace *g_kernel_space;
@@ -28,7 +30,7 @@ static bool kernel_map_active(void) {
 }
 
 static bool slot_stack_base(u32 slot, u64 *base_out) {
-    if (!base_out || !slot || slot >= THREAD_STORAGE_CAPACITY) return false;
+    if (!base_out || !slot || (u64)slot >= KERNEL_STACK_TOTAL_SLOTS) return false;
     u64 slot_offset = (u64)slot * KERNEL_STACK_SLOT_SIZE;
     if (slot_offset > KERNEL_STACK_ARENA_SIZE - KERNEL_STACK_SLOT_SIZE) return false;
     u64 slot_base = KERNEL_STACK_ARENA_BASE + slot_offset;
@@ -48,7 +50,7 @@ static bool stack_base_valid(u64 stack_base) {
     u64 offset = slot_start - KERNEL_STACK_ARENA_BASE;
     if (offset % KERNEL_STACK_SLOT_SIZE) return false;
     u64 slot = offset / KERNEL_STACK_SLOT_SIZE;
-    return slot > 0 && slot < THREAD_STORAGE_CAPACITY;
+    return slot > 0 && slot < KERNEL_STACK_TOTAL_SLOTS;
 }
 
 static bool slot_clear(u64 stack_base) {
@@ -120,7 +122,7 @@ bool kernel_stack_arena_init(AddressSpace *kernel_space, u64 probe_physical) {
     if (probe == FRAME_INVALID) return false;
 
     g_kernel_space = kernel_space;
-    u64 used = (u64)THREAD_STORAGE_CAPACITY * KERNEL_STACK_SLOT_SIZE;
+    u64 used = KERNEL_STACK_TOTAL_SLOTS * KERNEL_STACK_SLOT_SIZE;
     u64 end = KERNEL_STACK_ARENA_BASE + used;
     for (u64 address = KERNEL_STACK_ARENA_BASE; address < end; address += KERNEL_STACK_PT_SPAN) {
         if (!page_absent(address)) return false;
@@ -138,13 +140,13 @@ bool kernel_stack_arena_ready(void) {
     return g_arena_ready;
 }
 
-bool kernel_stack_map(u32 storage_slot, u64 physical, u64 *virtual_base_out) {
+static bool map_slot(u32 slot, u64 physical, u64 *virtual_base_out) {
     if (virtual_base_out) *virtual_base_out = 0;
     if (!g_arena_ready || !kernel_map_active() || !physical || !virtual_base_out) return false;
     if (physical & (FRAME_SIZE - 1ULL)) return false;
 
     u64 stack_base = 0;
-    if (!slot_stack_base(storage_slot, &stack_base) || !slot_clear(stack_base)) return false;
+    if (!slot_stack_base(slot, &stack_base) || !slot_clear(stack_base)) return false;
     frame_t first = phys_to_frame(physical);
     if (first == FRAME_INVALID) return false;
 
@@ -167,6 +169,15 @@ bool kernel_stack_map(u32 storage_slot, u64 physical, u64 *virtual_base_out) {
     if (!kernel_stack_mapping_valid(physical, stack_base)) cpu_halt_forever();
     *virtual_base_out = stack_base;
     return true;
+}
+
+bool kernel_stack_map(u32 storage_slot, u64 physical, u64 *virtual_base_out) {
+    if (storage_slot >= THREAD_STORAGE_CAPACITY) return false;
+    return map_slot(storage_slot, physical, virtual_base_out);
+}
+
+bool kernel_stack_map_scheduler_idle(u64 physical, u64 *virtual_base_out) {
+    return map_slot(KERNEL_STACK_IDLE_SLOT, physical, virtual_base_out);
 }
 
 bool kernel_stack_discard_unpublished(u64 physical, u64 stack_base) {

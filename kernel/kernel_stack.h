@@ -20,6 +20,10 @@ bool kernel_stack_arena_ready(void);
 
 bool kernel_stack_map(u32 storage_slot, u64 physical, u64 *virtual_base_out);
 
+/* One guarded arena slot is reserved for the scheduler-private idle context.
+ * It is not a Thread storage slot and is never exposed through thread counts. */
+bool kernel_stack_map_scheduler_idle(u64 physical, u64 *virtual_base_out);
+
 /* Constructor rollback: mapping is discarded before the PMM range is freed.
  * A failed PMM free leaves the allocation owned but no longer published. */
 bool kernel_stack_discard_unpublished(u64 physical, u64 virtual_base);

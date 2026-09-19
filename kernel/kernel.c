@@ -24,6 +24,7 @@
 #include "thread.h"
 #include "process.h"
 #include "endpoint.h"
+#include "execution_profile.h"
 #include "scheduler.h"
 #include "supervisor.h"
 #include "timer.h"
@@ -620,6 +621,15 @@ void kernel_main(BootInfo *boot) {
         cpu_halt_forever();
     }
 
+    bool execution_profile_ok = execution_profile_init();
+    if (!execution_profile_ok) {
+        serial_write("JA OS: restricted execution profile initialization failed.\n");
+        terminal_set_color(terminal_error_color());
+        terminal_writeln("EXECUTION PROFILE INITIALIZATION FAILED.");
+        terminal_set_color(terminal_default_color());
+        cpu_halt_forever();
+    }
+
     ++boot_stage;
     splash_update(boot_stage, BOOT_STAGE_COUNT, "Starting userspace supervisor");
     bool supervisor_ok = supervisor_start();
@@ -643,6 +653,15 @@ void kernel_main(BootInfo *boot) {
 
     ++boot_stage;
     splash_update(boot_stage, BOOT_STAGE_COUNT, "Enabling hardware interrupts");
+    bool preemption_ok = timer_ok && scheduler_preemption_enable();
+    if (!preemption_ok) {
+        serial_write("JA OS: runtime timer preemption policy failed to start.\n");
+        terminal_set_color(terminal_error_color());
+        if (!timer_ok) terminal_writeln("PIT TIMER INITIALIZATION FAILED; RUNTIME PREEMPTION UNAVAILABLE.");
+        else terminal_writeln("SCHEDULER PREEMPTION POLICY INITIALIZATION FAILED.");
+        terminal_set_color(terminal_default_color());
+        cpu_halt_forever();
+    }
     interrupts_enable();
 
     ++boot_stage;
@@ -735,6 +754,8 @@ void kernel_main(BootInfo *boot) {
     terminal_writeln(thread_ok ? "READY" : "FAILED");
     terminal_write("SCHEDULER: ");
     terminal_writeln(scheduler_ok ? "READY" : "FAILED");
+    terminal_write("EXECUTION PROFILE: ");
+    terminal_writeln(execution_profile_ok && execution_profile_fp_simd_restricted() ? "UP / FP-SIMD RESTRICTED" : "FAILED");
     terminal_write("SUPERVISOR: ");
     terminal_writeln(supervisor_ok ? "READY" : "FAILED");
     terminal_write("TIMER: ");
@@ -746,6 +767,8 @@ void kernel_main(BootInfo *boot) {
     else {
         terminal_writeln("FAILED");
     }
+    terminal_write("PREEMPTION: ");
+    terminal_writeln(preemption_ok && scheduler_preemption_enabled() ? "ACTIVE" : "FAILED");
     terminal_write("PS/2: ");
     terminal_write(keyboard_ok ? "DETECTED" : "NOT DETECTED");
     terminal_write("  COM1: ");

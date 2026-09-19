@@ -316,6 +316,47 @@ bool thread_activate(Thread *thread) {
     return true;
 }
 
+bool thread_scheduler_enter_idle(u64 idle_stack_top) {
+    if (!g_initialized || !g_current_thread || !idle_stack_top || (idle_stack_top & 0xFULL)) return false;
+
+    Thread *previous = g_current_thread;
+    if (!thread_storage_live(previous) || !previous->id || previous->state != THREAD_STATE_DEAD ||
+        previous->on_run_queue || previous->run_next || previous->interrupt_context_ready ||
+        previous->interrupt_rsp || thread_wait_active(previous)) return false;
+
+    Process *kernel = process_kernel();
+    AddressSpace *space = kernel ? process_address_space(kernel) : 0;
+    u64 target_cr3 = space ? address_space_cr3(space) : 0;
+    if (!kernel || !kernel->kernel || !space || !space->kernel || !target_cr3) return false;
+
+    gdt_set_rsp0(idle_stack_top);
+    if ((arch_read_cr3() & ~0xFFFULL) != target_cr3) arch_write_cr3(target_cr3);
+
+    /* No ordinary Thread owns execution while the scheduler-private idle
+     * continuation is running. The DEAD Thread remains storage-owned until its
+     * normal reaper destroys it after another Thread resumes. */
+    g_current_thread = 0;
+    return true;
+}
+
+bool thread_scheduler_activate_from_idle(Thread *thread) {
+    if (!g_initialized || g_current_thread || !thread_storage_live(thread) || !thread->id ||
+        !thread->process || thread->state != THREAD_STATE_READY || !thread->on_run_queue ||
+        !thread->run_next || !thread->interrupt_context_ready || !thread->interrupt_rsp ||
+        !thread->kernel_stack_top || (thread->kernel_stack_top & 0xFULL)) return false;
+
+    AddressSpace *space = process_address_space(thread->process);
+    u64 target_cr3 = space ? address_space_cr3(space) : 0;
+    if (!space || !target_cr3) return false;
+
+    gdt_set_rsp0(thread->kernel_stack_top);
+    if ((arch_read_cr3() & ~0xFFFULL) != target_cr3) arch_write_cr3(target_cr3);
+
+    thread->state = THREAD_STATE_RUNNING;
+    g_current_thread = thread;
+    return true;
+}
+
 static bool thread_create_locked(Thread *thread, Process *process) {
     if (!thread || thread_storage_live(thread)) return false;
 

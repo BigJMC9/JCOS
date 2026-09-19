@@ -118,6 +118,16 @@ Thread *thread_current(void);
 bool thread_activate(Thread *thread);
 
 /*
+ * Scheduler-private idle transition. The idle context is not a Thread and is
+ * deliberately absent from Process/Thread object accounting. Enter requires
+ * the previous current Thread to have been committed DEAD and detached from
+ * the run queue. Activate-from-idle accepts only a normal READY queued Thread.
+ * Both calls require local interrupts to be disabled.
+ */
+bool thread_scheduler_enter_idle(u64 idle_stack_top);
+bool thread_scheduler_activate_from_idle(Thread *thread);
+
+/*
  * Create a non-running thread with its own
  * 16 KiB kernel stack.
  */

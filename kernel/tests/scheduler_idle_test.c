@@ -46,8 +46,14 @@ static bool idle_until_tick(u64 *wait_delta) {
     if (wait_delta) *wait_delta = 0;
     u64 ticks = timer_ticks();
     u64 waits = scheduler_idle_wait_count();
-    for (u32 i = 0; i < 16U && timer_ticks() == ticks; ++i) {
+
+    /* IF may already be set here. PIT can therefore advance the tick after the
+     * snapshot above but before a loop condition is evaluated. Always execute
+     * at least one scheduler wait so this test proves the idle-wait path rather
+     * than occasionally observing a tick that happened just before it. */
+    for (u32 i = 0; i < 16U; ++i) {
         if (!scheduler_wait_current()) return false;
+        if (timer_ticks() != ticks) break;
     }
     u64 delta = scheduler_idle_wait_count() - waits;
     if (wait_delta) *wait_delta = delta;

@@ -14,6 +14,19 @@ typedef enum {
 static SerialParseState g_serial_state;
 static u32 g_serial_parameter;
 
+#define INPUT_RFLAGS_IF (1ULL << 9)
+
+static u64 input_irq_save(void) {
+    u64 flags;
+    __asm__ volatile ("pushfq; popq %0" : "=r"(flags) : : "memory");
+    interrupts_disable();
+    return flags;
+}
+
+static void input_irq_restore(u64 flags) {
+    if (flags & INPUT_RFLAGS_IF) interrupts_enable();
+}
+
 static void event_clear(KeyEvent *event) {
     event->key = KEY_NONE;
     event->character = 0;
@@ -104,10 +117,10 @@ static bool serial_event_from_byte(u8 byte, KeyEvent *event) {
 bool input_poll(KeyEvent *event) {
     if (!event) return false;
 
-    interrupts_disable();
+    u64 flags = input_irq_save();
     ps2_poll();
     bool have_ps2 = ps2_get_event(event);
-    interrupts_enable();
+    input_irq_restore(flags);
 
     if (have_ps2) return true;
 

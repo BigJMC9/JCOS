@@ -11,12 +11,14 @@
 #include "process.h"
 #include "scheduler.h"
 #include "thread.h"
+#include "timer.h"
 #include "user_elf.h"
 #include "vfs.h"
 #include "vmm.h"
 #include "user_stack.h"
 
 #define SUPERVISOR_PATH "/bin/supervisor.elf"
+#define SUPERVISOR_CALL_TIMEOUT_SECONDS 2ULL
 #define SUPERVISOR_USER_STACK (ADDRESS_SPACE_USER_BASE + 0x100000ULL)
 #define SUPERVISOR_USER_STACK_TOP (SUPERVISOR_USER_STACK + VM_PAGE_SIZE)
 #define SUPERVISOR_INITIAL_STACK_SIZE (2ULL * sizeof(u64))
@@ -73,6 +75,34 @@ static bool supervisor_schedule_once(void) {
 
     supervisor_interrupt_restore(flags);
     return result;
+}
+
+static u64 supervisor_call_timeout_ticks(void) {
+    if (!timer_initialized()) return 0;
+    u32 frequency = timer_frequency();
+    return frequency ? (u64)frequency * SUPERVISOR_CALL_TIMEOUT_SECONDS : 0;
+}
+
+static bool supervisor_thread_dead(void) {
+    return g_supervisor.thread.state == THREAD_STATE_DEAD &&
+        !g_supervisor.thread.on_run_queue && !g_supervisor.thread.interrupt_context_ready &&
+        !g_supervisor.thread.interrupt_rsp;
+}
+
+static bool supervisor_wait_thread_dead(u64 timeout_ticks) {
+    if (!timeout_ticks || !timer_initialized()) return false;
+
+    u64 started = timer_ticks();
+    while (!supervisor_thread_dead()) {
+        if ((u64)(timer_ticks() - started) >= timeout_ticks) return false;
+
+        /* If the reply woke the caller before the supervisor executed its
+         * THREAD_EXIT syscall, keep scheduling boundedly until that terminal
+         * transition happens. READY is the only valid non-dead state here. */
+        if (g_supervisor.thread.state != THREAD_STATE_READY || !g_supervisor.thread.on_run_queue) return false;
+        if (!supervisor_schedule_once()) return false;
+    }
+    return true;
 }
 
 static bool supervisor_release(void) {
@@ -270,19 +300,19 @@ bool supervisor_ping(u64 cookie, u64 *out_cookie) {
 
     if (!ipc_try_send(kernel_process, g_supervisor.kernel_send_handle, &request)) return false;
 
-    /* Supervisor runs, replies, loops and blocks on its next RECEIVE. */
-    if (!supervisor_schedule_once()) return false;
-
     IpcMessage reply;
-
     k_memset(&reply, 0, sizeof(reply));
 
-    if (!ipc_try_receive(kernel_process, g_supervisor.kernel_receive_handle, &reply)) return false;
+    /* Do not assume one scheduler turn is enough. The caller blocks until the
+     * reply actually arrives, peer death/cancellation completes the wait, or a
+     * bounded PIT-backed timeout expires. */
+    u64 timeout = supervisor_call_timeout_ticks();
+    if (!timeout || !ipc_receive_blocking_for(kernel_process, g_supervisor.kernel_receive_handle,
+            &reply, timeout)) return false;
 
     bool valid = reply.word_count == 2U && reply.words[0] == SUPERVISOR_REPLY_PONG &&
         reply.words[1] == cookie && g_supervisor.thread.state == THREAD_STATE_BLOCKED &&
-        !g_supervisor.thread.on_run_queue && endpoint_receiver_waiting(&g_supervisor.command_endpoint) &&
-        scheduler_thread_count() == 1ULL;
+        !g_supervisor.thread.on_run_queue && endpoint_receiver_waiting(&g_supervisor.command_endpoint);
 
     if (!valid) return false;
 
@@ -299,6 +329,8 @@ bool supervisor_stop(void) {
     Process *kernel_process = process_kernel();
 
     if (!kernel_process) return false;
+    if (g_supervisor.thread.state != THREAD_STATE_BLOCKED ||
+        !endpoint_receiver_waiting(&g_supervisor.command_endpoint)) return false;
 
     IpcMessage request;
     k_memset(&request, 0, sizeof(request));
@@ -308,19 +340,18 @@ bool supervisor_stop(void) {
 
     if (!ipc_try_send(kernel_process, g_supervisor.kernel_send_handle, &request)) return false;
 
-    /* User receives SHUTDOWN, replies STOPPED, then exits through SYSCALL_THREAD_EXIT. */
-    if (!supervisor_schedule_once()) return false;
-
     IpcMessage reply;
-
     k_memset(&reply, 0, sizeof(reply));
 
-    bool received = ipc_try_receive(kernel_process, g_supervisor.kernel_receive_handle, &reply);
-    bool reply_ok = received && reply.word_count == 1U && reply.words[0] == SUPERVISOR_REPLY_STOPPED;
+    /* Shutdown is a two-phase synchronous operation: receive the STOPPED reply,
+     * then observe the supervisor's THREAD_EXIT. Neither phase may depend on one
+     * particular scheduler turn. */
+    u64 timeout = supervisor_call_timeout_ticks();
+    if (!timeout || !ipc_receive_blocking_for(kernel_process, g_supervisor.kernel_receive_handle,
+            &reply, timeout)) return false;
 
-    bool thread_dead = g_supervisor.thread.state == THREAD_STATE_DEAD &&
-        !g_supervisor.thread.on_run_queue && !g_supervisor.thread.interrupt_context_ready &&
-        !g_supervisor.thread.interrupt_rsp;
+    bool reply_ok = reply.word_count == 1U && reply.words[0] == SUPERVISOR_REPLY_STOPPED;
+    bool thread_dead = reply_ok && supervisor_wait_thread_dead(timeout);
 
     bool endpoints_idle = !endpoint_message_ready(&g_supervisor.command_endpoint) &&
         !endpoint_message_ready(&g_supervisor.reply_endpoint) &&
@@ -329,7 +360,7 @@ bool supervisor_stop(void) {
         !endpoint_receiver_waiting(&g_supervisor.reply_endpoint) &&
         !endpoint_sender_waiting(&g_supervisor.reply_endpoint);
 
-    if (!reply_ok || !thread_dead || !endpoints_idle || scheduler_thread_count() != 1ULL) return false;
+    if (!reply_ok || !thread_dead || !endpoints_idle) return false;
 
     /* Thread is dead now, so transactional resource destruction is safe. */
     g_supervisor.active = false;

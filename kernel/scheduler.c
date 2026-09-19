@@ -1,7 +1,13 @@
 #include "scheduler.h"
 #include "arch.h"
+#include "gdt.h"
+#include "kernel_stack.h"
+#include "lib.h"
+#include "physmap.h"
+#include "pmm.h"
 
 #define SCHEDULER_RFLAGS_IF (1ULL << 9)
+#define SCHEDULER_RFLAGS_FIXED (1ULL << 1)
 
 typedef enum {
     SCHEDULER_TRAP_INVALID = 0,
@@ -21,6 +27,16 @@ static bool g_preemption_enabled;
 static u64 g_preemption_count;
 static u64 g_idle_wait_count;
 
+static u64 g_idle_stack_physical;
+static u64 g_idle_stack_base;
+static u64 g_idle_stack_top;
+static bool g_idle_context_ready;
+static bool g_idle_active;
+static u64 g_idle_entry_count;
+static u64 g_idle_resume_count;
+
+static NORETURN void scheduler_idle_loop(void);
+
 static bool scheduler_interrupt_frame_valid(const Thread *thread, const InterruptFrame *frame) {
     if (!thread || 
         !frame || 
@@ -39,11 +55,91 @@ static bool scheduler_interrupt_frame_valid(const Thread *thread, const Interrup
     return true;
 }
 
+static bool scheduler_idle_runtime_frame_valid(const InterruptFrame *frame) {
+    if (!frame || !g_idle_context_ready || !g_idle_stack_base || !g_idle_stack_top ||
+        g_idle_stack_top <= g_idle_stack_base) return false;
+    u64 address = (u64)(const void *)frame;
+    return address >= g_idle_stack_base && address <= g_idle_stack_top - sizeof(InterruptFrame);
+}
+
+static bool scheduler_idle_frame_build(u64 stack_base, u64 stack_top, InterruptFrame **out_frame) {
+    if (out_frame) *out_frame = 0;
+    if (!out_frame || !stack_base || stack_top <= stack_base || (stack_top & 0xFULL)) return false;
+
+    const u64 frame_size = sizeof(InterruptFrame) + sizeof(InterruptStackFrame);
+    if (stack_top - stack_base < frame_size + sizeof(u64)) return false;
+
+    u64 anchor = stack_top - sizeof(u64);
+    u64 frame_address = anchor - frame_size;
+    if (frame_address < stack_base) return false;
+
+    *(u64 *)(u64)anchor = 0;
+    InterruptFrame *frame = (InterruptFrame *)(u64)frame_address;
+    InterruptStackFrame *stack = (InterruptStackFrame *)((u8 *)frame + sizeof(InterruptFrame));
+    k_memset(frame, 0, (usize)frame_size);
+
+    frame->rip = (u64)(void *)scheduler_idle_loop;
+    frame->cs = GDT_KERNEL_CODE_SELECTOR;
+    frame->rflags = SCHEDULER_RFLAGS_FIXED;
+    stack->rsp = anchor;
+    stack->ss = GDT_KERNEL_DATA_SELECTOR;
+    *out_frame = frame;
+    return true;
+}
+
+static bool scheduler_idle_stack_init(void) {
+    if (g_idle_context_ready || g_idle_stack_physical || g_idle_stack_base || g_idle_stack_top) return false;
+
+    u64 physical = pmm_alloc_pages(THREAD_KERNEL_STACK_PAGES);
+    if (!physical) return false;
+    frame_t first = phys_to_frame(physical);
+    if (first == FRAME_INVALID) return false;
+
+    void *direct = phys_to_virt(physical);
+    if (!direct) {
+        (void)frame_free_range(first, THREAD_KERNEL_STACK_PAGES);
+        return false;
+    }
+    k_memset(direct, 0, (usize)THREAD_KERNEL_STACK_SIZE);
+
+    u64 base = 0;
+    if (!kernel_stack_map_scheduler_idle(physical, &base)) {
+        (void)frame_free_range(first, THREAD_KERNEL_STACK_PAGES);
+        return false;
+    }
+    if (!base || base > ~0ULL - THREAD_KERNEL_STACK_SIZE) {
+        (void)kernel_stack_discard_unpublished(physical, base);
+        return false;
+    }
+
+    u64 top = base + THREAD_KERNEL_STACK_SIZE;
+    InterruptFrame *probe = 0;
+    if ((top & 0xFULL) || !scheduler_idle_frame_build(base, top, &probe) || !probe ||
+        !kernel_stack_mapping_valid(physical, base)) {
+        (void)kernel_stack_discard_unpublished(physical, base);
+        return false;
+    }
+
+    g_idle_stack_physical = physical;
+    g_idle_stack_base = base;
+    g_idle_stack_top = top;
+    g_idle_context_ready = true;
+    return true;
+}
+
+static NORETURN void scheduler_idle_loop(void) {
+    for (;;) {
+        if (!g_idle_active) cpu_halt_forever();
+        __asm__ volatile ("sti; hlt; cli" : : : "memory");
+    }
+}
+
 bool scheduler_init(void) {
     if (g_initialized) return false;
 
     Thread *current = thread_current();
     if (!current || !current->id || current->state != THREAD_STATE_RUNNING || current->on_run_queue) return false;
+    if (!scheduler_idle_stack_init()) return false;
 
     /* The bootstrap thread starts as the only runnable thread. */
     current->run_next = current;
@@ -57,6 +153,9 @@ bool scheduler_init(void) {
     g_preemption_count = 0;
     g_reschedule_count = 0;
     g_idle_wait_count = 0;
+    g_idle_active = false;
+    g_idle_entry_count = 0;
+    g_idle_resume_count = 0;
 
     return true;
 }
@@ -74,7 +173,16 @@ bool scheduler_add(Thread *thread) {
     InterruptFrame *frame = (InterruptFrame *)(u64) thread->interrupt_rsp;
 
     if (!scheduler_interrupt_frame_valid(thread, frame)) return false;
-    if (!g_run_head || !g_run_tail || !g_run_count) return false;
+    if (!g_run_count) {
+        if (!g_idle_active || g_run_head || g_run_tail) return false;
+        thread->run_next = thread;
+        thread->on_run_queue = true;
+        g_run_head = thread;
+        g_run_tail = thread;
+        g_run_count = 1;
+        return true;
+    }
+    if (!g_run_head || !g_run_tail) return false;
 
     thread->run_next = g_run_head;
     g_run_tail->run_next = thread;
@@ -132,6 +240,25 @@ static bool scheduler_find_next_interrupt_thread(Thread *current, Thread **out_t
         if (!candidate) return false;
         if (candidate != current && candidate->on_run_queue && candidate->state == THREAD_STATE_READY && candidate-> interrupt_context_ready && candidate->interrupt_rsp) {
             InterruptFrame *saved = (InterruptFrame *)(u64) candidate-> interrupt_rsp;
+            if (scheduler_interrupt_frame_valid(candidate, saved)) {
+                *out_thread = candidate;
+                *out_frame = saved;
+                return true;
+            }
+        }
+        candidate = candidate->run_next;
+    }
+    return false;
+}
+
+static bool scheduler_find_idle_ready(Thread **out_thread, InterruptFrame **out_frame) {
+    if (!out_thread || !out_frame || !g_idle_active || !g_run_head || !g_run_tail || !g_run_count) return false;
+    Thread *candidate = g_run_head;
+    for (u64 inspected = 0; inspected < g_run_count; ++inspected) {
+        if (!candidate || !candidate->run_next) return false;
+        if (candidate->on_run_queue && candidate->state == THREAD_STATE_READY &&
+            candidate->interrupt_context_ready && candidate->interrupt_rsp) {
+            InterruptFrame *saved = (InterruptFrame *)(u64)candidate->interrupt_rsp;
             if (scheduler_interrupt_frame_valid(candidate, saved)) {
                 *out_thread = candidate;
                 *out_frame = saved;
@@ -215,6 +342,28 @@ u64 scheduler_idle_wait_count(void) {
     return g_initialized ? g_idle_wait_count : 0;
 }
 
+bool scheduler_idle_context_ready(void) {
+    return g_initialized && g_idle_context_ready && g_idle_stack_physical && g_idle_stack_base &&
+        g_idle_stack_top == g_idle_stack_base + THREAD_KERNEL_STACK_SIZE;
+}
+
+bool scheduler_idle_active(void) {
+    return g_initialized && g_idle_active;
+}
+
+bool scheduler_idle_stack_guarded(void) {
+    return scheduler_idle_context_ready() &&
+        kernel_stack_mapping_valid(g_idle_stack_physical, g_idle_stack_base);
+}
+
+u64 scheduler_idle_entry_count(void) {
+    return g_initialized ? g_idle_entry_count : 0;
+}
+
+u64 scheduler_idle_resume_count(void) {
+    return g_initialized ? g_idle_resume_count : 0;
+}
+
 bool scheduler_wake(Thread *thread) {
     if (!g_initialized || 
         !thread || 
@@ -241,12 +390,29 @@ u64 scheduler_thread_count(void) {
     return g_initialized ? g_run_count : 0;
 }
 
+bool scheduler_can_terminate_current(void) {
+    if (!g_initialized || g_idle_active || !g_run_count || !g_run_head || !g_run_tail) return false;
+    Thread *current = thread_current();
+    if (!current || !current->id || !current->on_run_queue || current->state != THREAD_STATE_RUNNING ||
+        !current->run_next) return false;
+
+    if (g_run_count == 1ULL) {
+        return scheduler_idle_context_ready() && scheduler_idle_stack_guarded() &&
+            g_run_head == current && g_run_tail == current && current->run_next == current;
+    }
+
+    Thread *chosen = 0;
+    InterruptFrame *chosen_frame = 0;
+    return scheduler_find_next_interrupt_thread(current, &chosen, &chosen_frame);
+}
+
 bool scheduler_preemption_enable(void) {
-    if (!g_initialized || 
-        g_preemption_enabled || 
-        !g_run_head || 
-        !g_run_tail || 
-        g_run_count < 2
+    if (!g_initialized ||
+        g_preemption_enabled ||
+        g_idle_active ||
+        !g_run_head ||
+        !g_run_tail ||
+        !g_run_count
     )    return false;
 
     Thread *current = thread_current();
@@ -380,12 +546,30 @@ static InterruptFrame *scheduler_block_from_interrupt(InterruptFrame *frame) {
     return chosen_frame;
 }
 
+static InterruptFrame *scheduler_resume_from_idle(InterruptFrame *frame) {
+    if (!frame || !g_idle_active) return frame;
+    if (!scheduler_idle_runtime_frame_valid(frame)) cpu_halt_forever();
+    if (!g_run_count) return frame;
+
+    Thread *chosen = 0;
+    InterruptFrame *chosen_frame = 0;
+    if (!scheduler_find_idle_ready(&chosen, &chosen_frame)) cpu_halt_forever();
+    if (!thread_scheduler_activate_from_idle(chosen)) cpu_halt_forever();
+
+    chosen->interrupt_rsp = 0;
+    chosen->interrupt_context_ready = false;
+    g_idle_active = false;
+    ++g_idle_resume_count;
+    ++g_reschedule_count;
+    return chosen_frame;
+}
+
 static InterruptFrame *scheduler_exit_from_interrupt(InterruptFrame *frame, bool count_reschedule) {
     if (!frame || 
         !g_initialized || 
         !g_run_head || 
         !g_run_tail || 
-        g_run_count < 2
+        !g_run_count
     )   cpu_halt_forever();
 
     Thread *dying = thread_current();
@@ -396,6 +580,26 @@ static InterruptFrame *scheduler_exit_from_interrupt(InterruptFrame *frame, bool
         !dying->run_next || 
         !scheduler_interrupt_frame_valid(dying, frame)
     )    cpu_halt_forever();
+
+    if (g_run_count == 1ULL) {
+        if (!scheduler_can_terminate_current()) cpu_halt_forever();
+
+        InterruptFrame *idle_frame = 0;
+        if (!scheduler_idle_frame_build(g_idle_stack_base, g_idle_stack_top, &idle_frame) || !idle_frame) {
+            cpu_halt_forever();
+        }
+        if (!scheduler_unlink(dying)) cpu_halt_forever();
+
+        dying->state = THREAD_STATE_DEAD;
+        dying->interrupt_rsp = 0;
+        dying->interrupt_context_ready = false;
+
+        if (!thread_scheduler_enter_idle(g_idle_stack_top)) cpu_halt_forever();
+        g_idle_active = true;
+        ++g_idle_entry_count;
+        if (count_reschedule) ++g_reschedule_count;
+        return idle_frame;
+    }
 
     Thread *chosen = 0;
     InterruptFrame *chosen_frame = 0;
@@ -437,6 +641,7 @@ InterruptFrame *scheduler_reschedule(InterruptFrame *frame) {
 }
 
 InterruptFrame *scheduler_preempt(InterruptFrame *frame) {
+    if (g_idle_active) return scheduler_resume_from_idle(frame);
     if (!frame || !g_preemption_enabled) return frame;
 
     return scheduler_switch_ready_from_interrupt(frame, true);
@@ -494,7 +699,7 @@ InterruptFrame *scheduler_terminate_current_from_interrupt(InterruptFrame *frame
 }
 
 NORETURN void scheduler_exit_current(void) {
-    if (!g_initialized || !g_run_head || !g_run_tail || g_run_count < 2) cpu_halt_forever();
+    if (!scheduler_can_terminate_current()) cpu_halt_forever();
 
     Thread *current = thread_current();
 
