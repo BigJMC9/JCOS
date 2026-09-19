@@ -33,7 +33,7 @@
 #include "user_ipc_cancel_test.h"
 #include "force_thread_test.h"
 #include "process_terminate_test.h"
-#include "r2_stress_test.h"
+#include "lifetime_stress_test.h"
 #include "stack_reclaim_test.h"
 #include "elf_reclaim_test.h"
 #include "vmm_reclaim_test.h"
@@ -44,7 +44,7 @@
 #include "ipc_wait_order_test.h"
 #include "peer_death_test.h"
 #include "ipc_timeout_order_test.h"
-#include "r2_acceptance_test.h"
+#include "lifetime_ipc_acceptance_test.h"
 #include "test_registry.h"
 
 #define INPUT_CAPACITY 128U
@@ -6429,9 +6429,6 @@ static void shell_registry_init(void) {
     shell_add_command("ipctest", "ipctest", "legacy alias for test ipc", SHELL_GROUP_DEVELOPMENT, command_ipctest, 0, false);
     shell_add_command("ipcblocktest", "ipcblocktest", "legacy receive-block test alias", SHELL_GROUP_DEVELOPMENT, command_ipcblocktest, 0, false);
     shell_add_command("ipcsendblocktest", "ipcsendblocktest", "legacy send-block test alias", SHELL_GROUP_DEVELOPMENT, command_ipcsendblocktest, 0, false);
-    shell_add_command("r2stresstest", "r2stresstest", "legacy test alias", SHELL_GROUP_DEVELOPMENT, r2_stress_test_run, 0, false);
-    shell_add_command("r2finaltest", "r2finaltest", "legacy test alias", SHELL_GROUP_DEVELOPMENT, r2_acceptance_test_run, 0, false);
-    shell_add_command("r2finalcleanupretry", "r2finalcleanupretry", "legacy cleanup alias", SHELL_GROUP_DEVELOPMENT, r2_acceptance_cleanup_run, 0, false);
     shell_add_command("stackreclaimtest", "stackreclaimtest", "legacy test alias", SHELL_GROUP_DEVELOPMENT, stack_reclaim_test_run, 0, false);
     shell_add_command("waitordertest", "waitordertest", "legacy test alias", SHELL_GROUP_DEVELOPMENT, ipc_wait_order_test_run, 0, false);
     shell_add_command("waitcleanupretry", "waitcleanupretry", "legacy cleanup alias", SHELL_GROUP_DEVELOPMENT, ipc_wait_order_cleanup_run, 0, false);

@@ -9,8 +9,8 @@
 #include "lib.h"
 #include "peer_death_test.h"
 #include "process_terminate_test.h"
-#include "r2_acceptance_test.h"
-#include "r2_stress_test.h"
+#include "lifetime_ipc_acceptance_test.h"
+#include "lifetime_stress_test.h"
 #include "stack_reclaim_test.h"
 #include "user_ipc_cancel_test.h"
 #include "user_process_cleanup_test.h"
@@ -55,8 +55,8 @@ static void kernel_test_registry_init(void) {
     kernel_test_add("user-process-cleanup", "shared user-process cleanup", KERNEL_TEST_USERSPACE, user_process_cleanup_test_run, user_fixture_cleanup_retry_run);
     kernel_test_add("user-runtime", "shared Ring3 C runtime", KERNEL_TEST_USERSPACE, user_runtime_test_run, user_fixture_cleanup_retry_run);
     kernel_test_add("user-runtime-block", "blocking Ring3 C runtime", KERNEL_TEST_USERSPACE, user_runtime_block_test_run, user_fixture_cleanup_retry_run);
-    kernel_test_add("lifetime-stress", "IPC/process lifetime recovery stress", KERNEL_TEST_ACCEPTANCE, r2_stress_test_run, user_fixture_cleanup_retry_run);
-    kernel_test_add("final-acceptance", "integrated lifetime and IPC robustness gate", KERNEL_TEST_ACCEPTANCE, r2_acceptance_test_run, r2_acceptance_cleanup_run);
+    kernel_test_add("lifetime-stress", "IPC/process lifetime recovery stress", KERNEL_TEST_ACCEPTANCE, lifetime_stress_test_run, user_fixture_cleanup_retry_run);
+    kernel_test_add("lifetime-ipc-acceptance", "integrated lifetime and IPC robustness gate", KERNEL_TEST_ACCEPTANCE, lifetime_ipc_acceptance_test_run, lifetime_ipc_acceptance_cleanup_run);
 }
 
 u32 kernel_test_registry_count(void) {
