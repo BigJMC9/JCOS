@@ -1,0 +1,4 @@
+#ifndef JA_OS_USER_PROCESS_CLEANUP_TEST_H
+#define JA_OS_USER_PROCESS_CLEANUP_TEST_H
+void user_process_cleanup_test_run(void);
+#endif

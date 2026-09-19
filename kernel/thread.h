@@ -29,7 +29,10 @@ typedef enum {
     THREAD_WAIT_RESULT_NONE = 0,
 
     THREAD_WAIT_RESULT_PENDING,
-    THREAD_WAIT_RESULT_CANCELLED
+    THREAD_WAIT_RESULT_CANCELLED,
+    THREAD_WAIT_RESULT_COMPLETED,
+    THREAD_WAIT_RESULT_PEER_CLOSED,
+    THREAD_WAIT_RESULT_TIMED_OUT
 } ThreadWaitResult;
 
 typedef struct Thread {
@@ -70,9 +73,14 @@ typedef struct Thread {
     ThreadWaitKind wait_kind;
     ThreadWaitResult wait_result;
     void *wait_object;
+    /* Boot-unique operation identity, not a scheduler wake counter. */
+    u64 wait_id;
 
     struct Thread *run_next;
     bool on_run_queue;
+
+    /* Owned by occupied capability slots; changed only by capability.c. */
+    u64 capability_refs;
 } Thread;
 
 bool thread_prepare_kernel(
@@ -113,21 +121,26 @@ bool thread_activate(Thread *thread);
  * Create a non-running thread with its own
  * 16 KiB kernel stack.
  */
+/* false leaves fresh output empty; unpublished rollback failures are retained
+ * in one module-owned slot. Live storage is rejected unchanged. */
 bool thread_create(Thread *thread, Process *process);
+bool thread_reclaim_unpublished_stack(void);
+bool thread_creation_cleanup_pending(void);
+u32 thread_object_count(void);
+bool thread_storage_in_use(const Thread *thread);
 
 /*
- * Wait reservations are kernel-internal
- * lifetime relationships.
- *
- * For now only the current RUNNING thread may
- * establish/release its own reservation.
- *
- * Cancellation from another thread will be
- * introduced separately.
+ * Kernel-internal wait ownership. The object owner must serialize publishing
+ * its reverse link, predicate checks, completion, parking, and detachment.
+ * Only the current thread ends a terminal wait; forced termination aborts it.
+ * Delayed completion must carry wait_id: pointer identity alone is insufficient.
+ * A successful terminal transition does not itself enqueue the thread.
  */
 bool thread_wait_begin(Thread *thread, ThreadWaitKind kind, void *object);
 bool thread_wait_end(Thread *thread, ThreadWaitKind kind, void *object);
 bool thread_wait_matches(const Thread *thread, ThreadWaitKind kind, const void *object);
+bool thread_wait_matches_id(const Thread *thread, ThreadWaitKind kind, const void *object, u64 wait_id);
+bool thread_wait_try_complete(Thread *thread, ThreadWaitKind kind, const void *object, u64 wait_id, ThreadWaitResult result);
 bool thread_wait_active(const Thread *thread);
 bool thread_wait_cancel(Thread *thread, ThreadWaitKind kind, void *object);
 bool thread_wait_cancelled(const Thread *thread, ThreadWaitKind kind, const void *object);

@@ -15,19 +15,24 @@ typedef struct {
     u64 id;
     VmPageMap page_map;
     bool kernel;
+
+    /* Owned by occupied capability slots; changed only by capability.c. */
+    u64 capability_refs;
 } AddressSpace;
 
 bool address_space_kernel_init(void);
-
 AddressSpace *address_space_kernel(void);
 
-bool address_space_create(
-    AddressSpace *space
-);
+/* Fresh storage may be uninitialized. false has no caller-owned resources;
+ * live storage is rejected unchanged. Failed rollback is module-owned. */
+bool address_space_create(AddressSpace *space);
+bool address_space_reclaim_unpublished(void);
+bool address_space_creation_cleanup_pending(void);
+u32 address_space_object_count(void);
+bool address_space_storage_in_use(const AddressSpace *space);
 
-void address_space_destroy(
-    AddressSpace *space
-);
+/* false retains identity and unreleased paging structures; retry is required. */
+bool address_space_destroy(AddressSpace *space);
 
 bool address_space_map_page(
     AddressSpace *space,

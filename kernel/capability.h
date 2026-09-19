@@ -5,6 +5,8 @@
 
 #define CAPABILITY_TABLE_CAPACITY 64U
 #define CAPABILITY_INVALID_HANDLE 0ULL
+#define CAPABILITY_TABLE_STORAGE_CAPACITY 256U
+#define CAPABILITY_GENERATION_MAX 0xFFFFFFFFULL
 
 typedef u64 CapabilityHandle;
 typedef u64 CapabilityRights;
@@ -52,12 +54,15 @@ typedef enum {
  *
  * Generation zero is never issued.
  *
- * Reusing a revoked slot increments its generation,
- * preventing an old userspace handle from naming the
- * new object occupying the same slot.
+ * Each slot INDEX has one boot-global nonzero generation issuer.
+ * Slot/table/object reuse never repeats an issued handle in this boot.
+ * Each index permits 2^32-1 grants across all tables per boot. Exhausted
+ * indices are skipped; insertion fails when no eligible free index remains.
+ * Issuers NEVER wrap or reset on table initialization/destruction.
  */
 typedef struct {
     void *object;
+    u64 object_id;
 
     CapabilityRights rights;
 
@@ -77,16 +82,21 @@ typedef struct {
 } CapabilityTable;
 
 /*
- * Capability tables do not own their objects.
- *
- * Revoking a capability removes authority to the
- * object; it does not destroy or free the object.
- *
- * This first implementation is not internally
- * synchronized. The caller must serialize access.
+ * Every occupied slot pins canonical object storage. Deleting a slot
+ * releases that pin; it does not close, stop, or destroy the object.
+ * revoke/revoke_all are slot deletion, NOT recursive authority revocation.
+ * Tables must remain at stable addresses until table_destroy succeeds.
+ * Init rejects live tables (even empty); destroy requires an empty table.
+ * Operations use local IRQ exclusion: UP only, not NMI/SMP synchronization.
+ * Lookup returns a BORROW. Callers must keep exclusion/other ownership
+ * through use, or publish a supported wait reservation before blocking.
  */
 bool capability_table_init(CapabilityTable *table);
 u32 capability_table_count(const CapabilityTable *table);
+bool capability_table_empty(const CapabilityTable *table);
+bool capability_table_destroy(CapabilityTable *table);
+bool capability_table_storage_in_use(const CapabilityTable *table);
+u32 capability_table_object_count(void);
 
 bool capability_insert(
     CapabilityTable *table,
@@ -126,5 +136,8 @@ bool capability_revoke(
 );
 
 bool capability_revoke_all(CapabilityTable *table);
+
+/* Kernel lifecycle helper: delete only matching slots in this one table. */
+bool capability_revoke_object(CapabilityTable *table, const void *object, CapabilityType type);
 
 #endif

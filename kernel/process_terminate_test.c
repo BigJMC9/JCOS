@@ -1,4 +1,5 @@
 #include "process_terminate_test.h"
+#include "user_test_fixture.h"
 
 #include "address_space.h"
 #include "capability.h"
@@ -26,18 +27,8 @@
 #define PROCESS_KILL_STARTUP_SIZE (2ULL * sizeof(u64))
 #define PROCESS_KILL_RFLAGS_IF (1ULL << 9)
 
-typedef struct {
-    u64 virtual_address;
-    frame_t frame;
-    bool allocated;
-    bool mapped;
-} ProcessKillStack;
-
 static void print_test(const char *name, bool pass) {
-    terminal_write("  ");
-    terminal_write(name);
-    terminal_write(": ");
-    terminal_writeln(pass ? "PASS" : "FAILED");
+    user_fixture_check(name, pass);
 }
 
 static u64 interrupt_save(void) {
@@ -110,73 +101,8 @@ static bool message_matches(const IpcMessage *message, bool prefill) {
     );
 }
 
-static bool stack_create(AddressSpace *space, ProcessKillStack *stack, u64 virtual_address,
-    CapabilityHandle capability, u64 mode) {
-    if (!space || !stack || !virtual_address) {
-        return false;
-    }
-
-    k_memset(stack, 0, sizeof(*stack));
-
-    stack->virtual_address = virtual_address;
-    stack->frame = frame_alloc();
-
-    if (stack->frame == FRAME_INVALID) {
-        return false;
-    }
-
-    stack->allocated = true;
-    if (!address_space_map_page(space, stack->virtual_address, stack->frame, VM_WRITE)) {
-        return false;
-    }
-
-    stack->mapped = true;
-    u8 *direct = (u8 *)phys_to_virt(frame_to_phys(stack->frame));
-
-    if (!direct) return false;
-
-    k_memset(direct, 0, (usize)VM_PAGE_SIZE);
-
-    u64 initial_rsp = virtual_address + VM_PAGE_SIZE - PROCESS_KILL_STARTUP_SIZE;
-    u64 offset = initial_rsp - virtual_address;
-    u64 *startup = (u64 *)(void *)(direct + offset);
-
-    startup[0] = capability;
-    startup[1] = mode;
-    return true;
-}
-
-static u64 stack_initial_rsp(const ProcessKillStack *stack) {
-    if (!stack || !stack->mapped) {
-        return 0;
-    }
-
-    return (
-        stack->virtual_address +
-        VM_PAGE_SIZE -
-        PROCESS_KILL_STARTUP_SIZE
-    );
-}
-
-static bool stack_release(AddressSpace *space, ProcessKillStack *stack) {
-    if (!stack) return false;
-    if (!stack->allocated) return true;
-    if (stack->mapped) {
-        frame_t old = FRAME_INVALID;
-
-        if (!space || !address_space_unmap_page(space, stack->virtual_address, &old) || old != stack->frame) {
-            return false;
-        }
-        stack->mapped = false;
-    }
-    if (!frame_free(stack->frame)) return false;
-
-    stack->allocated = false;
-    stack->frame = FRAME_INVALID;
-    return true;
-}
-
 void process_terminate_test_run(void) {
+    if (!user_fixture_available()) return;
     terminal_writeln("PROCESS TERMINATION TEST:");
 
     PmmStats before = pmm_stats();
@@ -213,27 +139,9 @@ void process_terminate_test_run(void) {
 
     if (!file_ok) return;
 
-    u32 kernel_caps_before = capability_table_count(kernel_caps);
-    Process process;
-    Endpoint receive_endpoint;
-    Endpoint send_endpoint;
-    UserElfImage image;
-    Thread receive_thread;
-    Thread send_thread;
-    ProcessKillStack receive_stack;
-    ProcessKillStack send_stack;
-
-    k_memset(&process, 0, sizeof(process));
-    k_memset(&receive_endpoint, 0, sizeof(receive_endpoint));
-    k_memset(&send_endpoint, 0, sizeof(send_endpoint));
-    k_memset(&image, 0, sizeof(image));
-    k_memset(&receive_thread, 0, sizeof(receive_thread));
-    k_memset(&send_thread, 0, sizeof(send_thread));
-    k_memset(&receive_stack, 0, sizeof(receive_stack));
-    k_memset(&send_stack, 0, sizeof(send_stack));
-
-    receive_stack.frame = FRAME_INVALID;
-    send_stack.frame = FRAME_INVALID;
+    UserTestFixture *fixture = user_fixture_begin("PROCESS TERMINATION TEST");
+    if (!fixture) return;
+    bool behavior_completed = false;
 
     CapabilityHandle kernel_receive_send = CAPABILITY_INVALID_HANDLE;
     CapabilityHandle kernel_receive_receive = CAPABILITY_INVALID_HANDLE;
@@ -257,86 +165,78 @@ void process_terminate_test_run(void) {
     AddressSpace *space = 0;
     CapabilityTable *user_caps = 0;
 
-    process_created = process_create(&process);
+    process_created = user_fixture_process_create(fixture);
     print_test("PROCESS CREATE", process_created);
 
     if (!process_created) goto cleanup;
 
-    space = process_address_space(&process);
-    user_caps = process_capabilities(&process);
+    space = process_address_space(&fixture->process);
+    user_caps = process_capabilities(&fixture->process);
 
     if (!space || !user_caps) {
         goto cleanup;
     }
 
-    receive_endpoint_created = endpoint_create(&receive_endpoint);
-    send_endpoint_created = receive_endpoint_created && endpoint_create(&send_endpoint);
+    receive_endpoint_created = user_fixture_endpoint_create(fixture, 0U);
+    send_endpoint_created = receive_endpoint_created && user_fixture_endpoint_create(fixture, 1U);
 
     if (!send_endpoint_created) goto cleanup;
 
     kernel_receive_send_cap =
-        capability_insert(kernel_caps, &receive_endpoint, CAPABILITY_TYPE_ENDPOINT, CAPABILITY_RIGHT_SEND,
-            &kernel_receive_send);
-
+        user_fixture_grant(fixture, true, 0U, CAPABILITY_RIGHT_SEND, &kernel_receive_send);
     kernel_receive_receive_cap = kernel_receive_send_cap &&
-        capability_insert(kernel_caps, &receive_endpoint, CAPABILITY_TYPE_ENDPOINT,
-            CAPABILITY_RIGHT_RECEIVE, &kernel_receive_receive);
-
+        user_fixture_grant(fixture, true, 0U, CAPABILITY_RIGHT_RECEIVE, &kernel_receive_receive);
     kernel_send_send_cap = kernel_receive_receive_cap &&
-        capability_insert(kernel_caps, &send_endpoint, CAPABILITY_TYPE_ENDPOINT, CAPABILITY_RIGHT_SEND,
-            &kernel_send_send);
-
+        user_fixture_grant(fixture, true, 1U, CAPABILITY_RIGHT_SEND, &kernel_send_send);
     kernel_send_receive_cap = kernel_send_send_cap &&
-        capability_insert(kernel_caps, &send_endpoint, CAPABILITY_TYPE_ENDPOINT, CAPABILITY_RIGHT_RECEIVE,
-            &kernel_send_receive);
-
+        user_fixture_grant(fixture, true, 1U, CAPABILITY_RIGHT_RECEIVE, &kernel_send_receive);
     user_receive_cap = kernel_send_receive_cap &&
-        capability_insert(user_caps, &receive_endpoint, CAPABILITY_TYPE_ENDPOINT, CAPABILITY_RIGHT_RECEIVE,
-            &user_receive);
-
+        user_fixture_grant(fixture, false, 0U, CAPABILITY_RIGHT_RECEIVE, &user_receive);
     user_send_cap = user_receive_cap &&
-        capability_insert(user_caps, &send_endpoint, CAPABILITY_TYPE_ENDPOINT, CAPABILITY_RIGHT_SEND, &user_send);
+        user_fixture_grant(fixture, false, 1U, CAPABILITY_RIGHT_SEND, &user_send);
 
-    bool caps_ready = kernel_receive_send_cap && kernel_receive_receive_cap && kernel_send_send_cap &&
-        kernel_send_receive_cap && user_receive_cap && user_send_cap;
-
+    bool caps_ready = (
+        kernel_receive_send_cap && kernel_receive_receive_cap && 
+        kernel_send_send_cap && kernel_send_receive_cap && 
+        user_receive_cap && user_send_cap
+    );
     print_test("CAPABILITIES", caps_ready);
 
     if (!caps_ready) goto cleanup;
 
-    image_loaded = user_elf_load(&process, file, &image);
+    image_loaded = user_fixture_load(fixture, file);
     print_test("ELF LOAD", image_loaded);
 
     if (!image_loaded) goto cleanup;
 
-    bool receive_stack_ok = stack_create(space, &receive_stack, PROCESS_KILL_STACK_A, user_receive,
+    bool receive_stack_ok = user_fixture_stack_create(fixture, 0U, PROCESS_KILL_STACK_A, user_receive,
         JCOS_RTC_MODE_RECEIVE);
 
     bool send_stack_ok = receive_stack_ok &&
-        stack_create(space, &send_stack, PROCESS_KILL_STACK_B, user_send, JCOS_RTC_MODE_SEND);
+        user_fixture_stack_create(fixture, 1U, PROCESS_KILL_STACK_B, user_send, JCOS_RTC_MODE_SEND);
 
     print_test("USER STACKS", receive_stack_ok && send_stack_ok);
 
     if (!send_stack_ok) goto cleanup;
 
-    bool receive_created = thread_create(&receive_thread, &process);
-    bool send_created = receive_created && thread_create(&send_thread, &process);
+    bool receive_created = user_fixture_thread_create(fixture, 0U);
+    bool send_created = receive_created && user_fixture_thread_create(fixture, 1U);
 
-    bool ownership_list = send_created && process_thread_count(&process) == 2ULL &&
-        process_thread_contains(&process, &receive_thread) &&
-        process_thread_contains(&process, &send_thread);
+    bool ownership_list = send_created && process_thread_count(&fixture->process) == 2ULL &&
+        process_thread_contains(&fixture->process, &fixture->threads[0]) &&
+        process_thread_contains(&fixture->process, &fixture->threads[1]);
 
     print_test("THREAD OWNERSHIP LIST", ownership_list);
 
     if (!ownership_list) goto cleanup;
 
-    bool receive_prepared = thread_prepare_user(&receive_thread, image.entry, stack_initial_rsp(&receive_stack));
+    bool receive_prepared = thread_prepare_user(&fixture->threads[0], fixture->image.entry, user_fixture_stack_rsp(fixture, 0U));
 
     bool send_prepared = receive_prepared &&
-        thread_prepare_user(&send_thread, image.entry, stack_initial_rsp(&send_stack));
+        thread_prepare_user(&fixture->threads[1], fixture->image.entry, user_fixture_stack_rsp(fixture, 1U));
 
-    bool receive_queued = send_prepared && scheduler_add(&receive_thread);
-    bool send_queued = receive_queued && scheduler_add(&send_thread);
+    bool receive_queued = send_prepared && scheduler_add(&fixture->threads[0]);
+    bool send_queued = receive_queued && scheduler_add(&fixture->threads[1]);
 
     print_test("THREADS QUEUED", send_queued);
 
@@ -361,11 +261,11 @@ void process_terminate_test_run(void) {
     bool scheduled = schedule_once();
 
     bool both_blocked = scheduled && thread_current() == main_thread &&
-        receive_thread.state == THREAD_STATE_BLOCKED && !receive_thread.on_run_queue &&
-        thread_wait_matches(&receive_thread, THREAD_WAIT_IPC_RECEIVE, &receive_endpoint) &&
-        send_thread.state == THREAD_STATE_BLOCKED && !send_thread.on_run_queue &&
-        thread_wait_matches(&send_thread, THREAD_WAIT_IPC_SEND, &send_endpoint) &&
-        send_endpoint. waiting_sender_message_ready && scheduler_thread_count() == 1ULL;
+        fixture->threads[0].state == THREAD_STATE_BLOCKED && !fixture->threads[0].on_run_queue &&
+        thread_wait_matches(&fixture->threads[0], THREAD_WAIT_IPC_RECEIVE, &fixture->endpoints[0]) &&
+        fixture->threads[1].state == THREAD_STATE_BLOCKED && !fixture->threads[1].on_run_queue &&
+        thread_wait_matches(&fixture->threads[1], THREAD_WAIT_IPC_SEND, &fixture->endpoints[1]) &&
+        fixture->endpoints[1]. waiting_sender_message_ready && scheduler_thread_count() == 1ULL;
 
     print_test("BOTH THREADS BLOCKED", both_blocked);
 
@@ -386,11 +286,11 @@ void process_terminate_test_run(void) {
 
     bool receive_woken = ipc_try_send(kernel_process, kernel_receive_send, &wake);
 
-    bool mixed_wait_states = receive_woken && receive_thread.state == THREAD_STATE_READY &&
-        receive_thread.on_run_queue &&
-        thread_wait_matches(&receive_thread, THREAD_WAIT_IPC_RECEIVE, &receive_endpoint) &&
-        send_thread.state == THREAD_STATE_BLOCKED && !send_thread.on_run_queue &&
-        thread_wait_matches(&send_thread, THREAD_WAIT_IPC_SEND, &send_endpoint) &&
+    bool mixed_wait_states = receive_woken && fixture->threads[0].state == THREAD_STATE_READY &&
+        fixture->threads[0].on_run_queue &&
+        thread_wait_matches(&fixture->threads[0], THREAD_WAIT_IPC_RECEIVE, &fixture->endpoints[0]) &&
+        fixture->threads[1].state == THREAD_STATE_BLOCKED && !fixture->threads[1].on_run_queue &&
+        thread_wait_matches(&fixture->threads[1], THREAD_WAIT_IPC_SEND, &fixture->endpoints[1]) &&
         scheduler_thread_count() == 2ULL;
 
     print_test("MIXED WAIT STATES", mixed_wait_states);
@@ -402,10 +302,10 @@ void process_terminate_test_run(void) {
      * cancel its IPC ownership, reap it, and
      * revoke the Process's capabilities.
      */
-    process_quiesced = task_quiesce_process(&process);
+    process_quiesced = user_fixture_quiesce(fixture);
 
-    bool process_empty = process_quiesced && process_thread_count(&process) == 0ULL &&
-        !process_thread_first(&process) && capability_table_count(user_caps) == 0U &&
+    bool process_empty = process_quiesced && process_thread_count(&fixture->process) == 0ULL &&
+        !process_thread_first(&fixture->process) && capability_table_count(user_caps) == 0U &&
         scheduler_thread_count() == 1ULL && thread_current() == main_thread;
 
     print_test("PROCESS QUIESCED", process_empty);
@@ -450,132 +350,22 @@ void process_terminate_test_run(void) {
     bool staged_send_discarded = !ipc_try_receive(kernel_process, kernel_send_receive, &second_send);
 
     bool endpoint_semantics = receive_message_preserved && original_send_preserved &&
-        staged_send_discarded && !endpoint_receiver_waiting(&receive_endpoint) &&
-        !endpoint_sender_waiting(&receive_endpoint) && !endpoint_receiver_waiting(&send_endpoint) &&
-        !endpoint_sender_waiting(&send_endpoint);
+        staged_send_discarded && !endpoint_receiver_waiting(&fixture->endpoints[0]) &&
+        !endpoint_sender_waiting(&fixture->endpoints[0]) && !endpoint_receiver_waiting(&fixture->endpoints[1]) &&
+        !endpoint_sender_waiting(&fixture->endpoints[1]);
 
     print_test("ENDPOINT SEMANTICS", endpoint_semantics);
 
-cleanup: {
-        /*
-         * Cleanup can safely retry Process
-         * quiescing. Empty capability tables are
-         * valid inputs to capability_revoke_all().
-         */
-        bool quiescent = !process_created;
-
-        if (process_created) quiescent = task_quiesce_process(&process);
-
-        bool receive_stack_clean = !receive_stack.allocated;
-
-        if (quiescent && receive_stack.allocated) {
-            receive_stack_clean = stack_release(space, &receive_stack);
-        }
-
-        bool send_stack_clean = !send_stack.allocated;
-
-        if (quiescent && send_stack.allocated) {
-            send_stack_clean = stack_release(space, &send_stack);
-        }
-
-        bool image_clean = !image_loaded;
-
-        if (quiescent && image_loaded) {
-            image_clean = user_elf_unload(&process, &image);
-        }
-
-        bool kernel_receive_send_revoked = !kernel_receive_send_cap;
-        bool kernel_receive_receive_revoked = !kernel_receive_receive_cap;
-        bool kernel_send_send_revoked = !kernel_send_send_cap;
-        bool kernel_send_receive_revoked = !kernel_send_receive_cap;
-
-        if (quiescent) {
-            if (kernel_receive_send_cap) {
-                kernel_receive_send_revoked = capability_revoke(kernel_caps, kernel_receive_send);
-            }
-            if (kernel_receive_receive_cap) {
-                kernel_receive_receive_revoked = capability_revoke(kernel_caps, kernel_receive_receive);
-            }
-            if (kernel_send_send_cap) kernel_send_send_revoked = capability_revoke(kernel_caps, kernel_send_send);
-            if (kernel_send_receive_cap) {
-                kernel_send_receive_revoked = capability_revoke(kernel_caps, kernel_send_receive);
-            }
-        }
-
-        bool kernel_caps_restored = capability_table_count(kernel_caps) == kernel_caps_before;
-
-        /* Normal setup failures may leave an unreserved mailbox message. */
-        if (quiescent && receive_endpoint_created && !endpoint_receiver_waiting(&receive_endpoint) &&
-            !endpoint_sender_waiting(&receive_endpoint) && endpoint_message_ready(&receive_endpoint)) {
-            
-                IpcMessage discard;
-            k_memset(&discard, 0, sizeof(discard));
-            (void)endpoint_try_receive(&receive_endpoint, &discard);
-        }
-        if (quiescent && send_endpoint_created && !endpoint_receiver_waiting(&send_endpoint) &&
-            !endpoint_sender_waiting(&send_endpoint) && endpoint_message_ready(&send_endpoint)) {
-
-            IpcMessage discard;
-            k_memset(&discard, 0, sizeof(discard));
-            (void)endpoint_try_receive(&send_endpoint, &discard);
-        }
-
-        bool receive_endpoint_clean = !receive_endpoint_created;
-
-        if (quiescent && receive_endpoint_created && kernel_receive_send_revoked && kernel_receive_receive_revoked) {
-            receive_endpoint_clean = endpoint_destroy(&receive_endpoint);
-        }
-
-        bool send_endpoint_clean = !send_endpoint_created;
-
-        if (quiescent && send_endpoint_created && kernel_send_send_revoked && kernel_send_receive_revoked) {
-            send_endpoint_clean = endpoint_destroy(&send_endpoint);
-        }
-
-        bool process_clean = !process_created;
-
-        if (quiescent && process_created && receive_stack_clean && send_stack_clean && image_clean &&
-            kernel_caps_restored && receive_endpoint_clean && send_endpoint_clean) {
-            process_clean = process_destroy(&process);
-        }
-
-        u64 after_cookie = supervisor_cookie ^ 0x0101010101010101ULL;
-        u64 after_reply = 0;
-
-        bool supervisor_after = process_clean && supervisor_ping(after_cookie, &after_reply) &&
-            after_reply == after_cookie;
-
-        print_test("SUPERVISOR AFTER", supervisor_after);
-
-        PmmStats after = pmm_stats();
-        bool frames_restored = before.free_pages == after.free_pages;
-        terminal_write("  FREE AFTER: ");
-        terminal_write_u64(after.free_pages);
-        terminal_putchar('\n');
-
-        print_test("PROCESS CLEANUP",
-            quiescent && receive_stack_clean && send_stack_clean && image_clean && kernel_caps_restored && 
-            receive_endpoint_clean && send_endpoint_clean && process_clean);
-
-        print_test("FRAME COUNT RESTORED", frames_restored);
-
-        bool pass = main_ok && supervisor_before && file_ok && process_created && caps_ready &&
+    behavior_completed = main_ok && supervisor_before && file_ok && process_created && caps_ready &&
             image_loaded && receive_stack_ok && send_stack_ok && ownership_list && send_queued &&
             prefilled && both_blocked && mixed_wait_states && process_quiesced && process_empty &&
-            stale_handles && endpoint_semantics && quiescent && receive_stack_clean && send_stack_clean &&
-            image_clean && kernel_caps_restored && receive_endpoint_clean && send_endpoint_clean &&
-            process_clean && supervisor_after && frames_restored;
+            stale_handles && endpoint_semantics;
 
+cleanup: {
+        bool pass = user_fixture_finish(fixture, behavior_completed);
         terminal_set_color(pass ? terminal_accent_color() : terminal_error_color());
         terminal_write("PROCESS TERMINATION TEST: ");
         terminal_writeln(pass ? "PASS" : "FAILED");
         terminal_set_color(terminal_default_color());
-
-        if (!quiescent) {
-            terminal_set_color(terminal_error_color());
-            terminal_writeln("PROCESS STILL OWNS LIVE THREAD STATE.");
-            terminal_writeln("REBOOT BEFORE FURTHER TESTING.");
-            terminal_set_color(terminal_default_color());
-        }
     }
 }

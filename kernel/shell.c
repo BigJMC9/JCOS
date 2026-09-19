@@ -34,6 +34,17 @@
 #include "force_thread_test.h"
 #include "process_terminate_test.h"
 #include "r2_stress_test.h"
+#include "stack_reclaim_test.h"
+#include "elf_reclaim_test.h"
+#include "vmm_reclaim_test.h"
+#include "constructor_test.h"
+#include "user_test_fixture.h"
+#include "user_process_cleanup_test.h"
+#include "capability_test.h"
+#include "ipc_wait_order_test.h"
+#include "peer_death_test.h"
+#include "ipc_timeout_order_test.h"
+#include "r2_acceptance_test.h"
 
 #define INPUT_CAPACITY 128U
 
@@ -182,17 +193,28 @@ static void command_help(void) {
     terminal_writeln("  threadtest  test thread lifecycle and kernel stacks");
     terminal_writeln("  forcethreadtest test forced IPC thread termination");
     terminal_writeln("  captest     test capability handles/rights/revoke");
+    terminal_writeln("  caplifetimetest test capability lifetime and safe reuse");
     terminal_writeln("  endpointtest test endpoint object and capability rights");
     terminal_writeln("  ipctest     test non-blocking capability IPC");
     terminal_writeln("  ipcblocktest test blocking IPC receive/wakeup");
     terminal_writeln("  ipcsendblocktest test blocking IPC send/wakeup");
     terminal_writeln("  r2stresstest stress IPC/process lifetime recovery");
+    terminal_writeln("  r2finaltest run final bounded R2 lifetime acceptance stress");
+    terminal_writeln("  r2finalcleanupretry retry retained final R2 fixture cleanup");
+    terminal_writeln("  waitordertest test bounded IPC completion ordering");
+    terminal_writeln("  waitcleanupretry retry retained wait-test cleanup");
     terminal_writeln("  useripctest test Ring3 capability IPC syscalls");
     terminal_writeln("  useripccanceltest test Ring3 IPC cancellation/close");
     terminal_writeln("  useripcblocktest test Ring3 blocking IPC receive");
     terminal_writeln("  useripcsendblocktest test Ring3 blocking IPC send");
     terminal_writeln("  processtest test process/address-space/capability ownership");
     terminal_writeln("  processkilltest test forced multi-thread process termination");
+    terminal_writeln("  peerdeathtest test owned-endpoint peer-death propagation");
+    terminal_writeln("  peerdeathcleanupretry retry retained peer-death fixture cleanup");
+    terminal_writeln("  userprocesscleanuptest test shared user-process cleanup");
+    terminal_writeln("  usercleanupretry retry retained user-test cleanup");
+    terminal_writeln("  timeouttest test IPC timeout/deadline ordering");
+    terminal_writeln("  timeoutcleanupretry retry retained timeout fixture cleanup");
     terminal_writeln("  schedtest   test round-robin full-frame scheduling");
     terminal_writeln("  blocktest   test thread blocking and wakeup");
     terminal_writeln("  exittest    test permanent current-thread termination");
@@ -202,11 +224,17 @@ static void command_help(void) {
     terminal_writeln("  userelftest test filesystem ELF Ring3 loader");
     terminal_writeln("  userruntimetest test shared Ring3 C runtime");
     terminal_writeln("  userruntimeblocktest test blocking Ring3 C runtime");
+    terminal_writeln("  elfreclaimtest test ELF cleanup failure and retry");
+    terminal_writeln("  vmmreclaimtest test page-table cleanup failure and retry");
+    terminal_writeln("  publishedcleanuptest test retained fixture cleanup and retry");
+    terminal_writeln("  forcecleanupretry retry retained forced-test cleanup");
     terminal_writeln("  timer       show PIT timer state");
     terminal_writeln("  timertest   test periodic IRQ0 ticks");
     terminal_writeln("  preempttest test timer-driven involuntary switching");
     terminal_writeln("  userpreempttest test PIT preemption from Ring3");
     terminal_writeln("  reschedtest test INT 0x81 full-frame scheduling");
+    terminal_writeln("  stackreclaimtest test atomic stack release and retry");
+    terminal_writeln("  constructortest test creation rollback and storage lifetime");
     terminal_writeln("  cpu         show CPUID information");
     terminal_writeln("  interrupts  show APIC/PIC and keyboard counters");
     terminal_writeln("  acpi        show ACPI discovery results");
@@ -638,204 +666,7 @@ static void command_supervisortest(void) {
 }
 
 static void command_captest(void) {
-    terminal_writeln("CAPABILITY TABLE TEST:");
-
-    PmmStats before = pmm_stats();
-    terminal_write("  FREE BEFORE: ");
-    terminal_write_u64(before.free_pages);
-    terminal_putchar('\n');
-
-    CapabilityTable table;
-
-    /*
-     * Opaque test objects.
-     *
-     * CapabilityTable never dereferences these;
-     * their addresses are simply object identities.
-     */
-    u64 objects[CAPABILITY_TABLE_CAPACITY + 2U];
-    CapabilityHandle handles[CAPABILITY_TABLE_CAPACITY];
-
-    k_memset(objects, 0, sizeof(objects));
-    k_memset(handles, 0, sizeof(handles));
-
-    bool initialized = capability_table_init(&table);
-    bool initially_empty = initialized && capability_table_count(&table) == 0U;
-    terminal_write("  INITIALIZE: ");
-    terminal_writeln(initialized ? "PASS" : "FAILED");
-    terminal_write("  INITIAL COUNT 0: ");
-    terminal_writeln(initially_empty ? "PASS" : "FAILED");
-
-    CapabilityHandle first = CAPABILITY_INVALID_HANDLE;
-
-    bool inserted = initialized &&
-        capability_insert(&table, &objects[0], CAPABILITY_TYPE_THREAD,
-            CAPABILITY_RIGHT_READ | CAPABILITY_RIGHT_WRITE, &first);
-
-    bool handle_valid = inserted && first != CAPABILITY_INVALID_HANDLE;
-    terminal_write("  INSERT: ");
-    terminal_writeln(inserted ? "PASS" : "FAILED");
-    terminal_write("  HANDLE: ");
-    terminal_write_hex(first);
-    terminal_putchar('\n');
-    terminal_write("  NONZERO HANDLE: ");
-    terminal_writeln(handle_valid ? "PASS" : "FAILED");
-
-    void *resolved = 0;
-
-    bool lookup_ok = inserted && capability_lookup(&table, first, CAPABILITY_TYPE_THREAD, &resolved) &&
-        resolved == &objects[0];
-
-    terminal_write("  LOOKUP: ");
-    terminal_writeln(lookup_ok ? "PASS" : "FAILED");
-
-    resolved = 0;
-
-    bool wrong_type_rejected = inserted && !capability_lookup(&table, first, CAPABILITY_TYPE_ADDRESS_SPACE, &resolved);
-    terminal_write("  WRONG TYPE REJECTED: ");
-    terminal_writeln(wrong_type_rejected ? "PASS" : "FAILED");
-
-    resolved = 0;
-
-    bool read_right_ok = inserted &&
-        capability_lookup_rights(&table, first, CAPABILITY_TYPE_THREAD, CAPABILITY_RIGHT_READ, &resolved) &&
-        resolved == &objects[0];
-
-    terminal_write("  READ RIGHT: ");
-    terminal_writeln(read_right_ok ? "PASS" : "FAILED");
-
-    resolved = 0;
-
-    bool read_write_ok = inserted &&
-        capability_lookup_rights(&table, first, CAPABILITY_TYPE_THREAD,
-            CAPABILITY_RIGHT_READ | CAPABILITY_RIGHT_WRITE, &resolved) &&
-        resolved == &objects[0];
-
-    terminal_write("  READ/WRITE RIGHTS: ");
-    terminal_writeln(read_write_ok ? "PASS" : "FAILED");
-
-    resolved = 0;
-
-    bool missing_right_rejected = inserted &&
-        !capability_lookup_rights(&table, first, CAPABILITY_TYPE_THREAD, CAPABILITY_RIGHT_MANAGE, &resolved);
-
-    terminal_write("  MISSING RIGHT REJECTED: ");
-    terminal_writeln(missing_right_rejected ? "PASS" : "FAILED");
-
-    bool revoked = inserted && capability_revoke(&table, first);
-    terminal_write("  REVOKE: ");
-    terminal_writeln(revoked ? "PASS" : "FAILED");
-
-    resolved = 0;
-
-    bool stale_lookup_rejected = revoked && !capability_lookup(&table, first, CAPABILITY_TYPE_THREAD, &resolved);
-    bool stale_revoke_rejected = revoked && !capability_revoke(&table, first);
-    terminal_write("  STALE LOOKUP REJECTED: ");
-    terminal_writeln(stale_lookup_rejected ? "PASS" : "FAILED");
-    terminal_write("  STALE REVOKE REJECTED: ");
-    terminal_writeln(stale_revoke_rejected ? "PASS" : "FAILED");
-
-    CapabilityHandle replacement = CAPABILITY_INVALID_HANDLE;
-
-    bool reinserted = revoked &&
-        capability_insert(&table, &objects[1], CAPABILITY_TYPE_THREAD, CAPABILITY_RIGHT_READ, &replacement);
-
-    /*
-     * In this implementation insertion scans from slot zero, so the just-revoked first slot should be reused
-     * immediately.
-     */
-    bool slot_reused = reinserted && (u32)first == (u32)replacement;
-    bool generation_changed = reinserted && (u32)(first >> 32) != (u32)(replacement >> 32);
-    bool handle_changed = reinserted && first != replacement;
-    terminal_write("  REINSERT: ");
-    terminal_writeln(reinserted ? "PASS" : "FAILED");
-    terminal_write("  NEW HANDLE: ");
-    terminal_write_hex(replacement);
-    terminal_putchar('\n');
-    terminal_write("  SLOT REUSED: ");
-    terminal_writeln(slot_reused ? "PASS" : "FAILED");
-    terminal_write("  GENERATION CHANGED: ");
-    terminal_writeln(generation_changed ? "PASS" : "FAILED");
-    terminal_write("  HANDLE CHANGED: ");
-    terminal_writeln(handle_changed ? "PASS" : "FAILED");
-
-    resolved = 0;
-
-    bool replacement_lookup_ok = reinserted &&
-        capability_lookup_rights(&table, replacement, CAPABILITY_TYPE_THREAD, CAPABILITY_RIGHT_READ, &resolved) &&
-        resolved == &objects[1];
-
-    terminal_write("  NEW HANDLE LOOKUP: ");
-    terminal_writeln(replacement_lookup_ok ? "PASS" : "FAILED");
-
-    u32 live_handles = 0;
-
-    if (reinserted) {
-        handles[0] = replacement;
-        live_handles = 1U;
-    }
-
-    bool filled = reinserted;
-
-    for (u32 i = 1U; filled && i < CAPABILITY_TABLE_CAPACITY; ++i) {
-        if (!capability_insert(&table, &objects[i + 1U], CAPABILITY_TYPE_ADDRESS_SPACE,
-                CAPABILITY_RIGHT_READ, &handles[i])) {
-            filled = false;
-            break;
-        }
-
-        ++live_handles;
-    }
-
-    bool full_count = filled && capability_table_count(&table) == CAPABILITY_TABLE_CAPACITY;
-    terminal_write("  FILL TABLE: ");
-    terminal_writeln(filled ? "PASS" : "FAILED");
-    terminal_write("  FULL COUNT 64: ");
-    terminal_writeln(full_count ? "PASS" : "FAILED");
-
-    CapabilityHandle overflow = CAPABILITY_INVALID_HANDLE;
-
-    bool overflow_rejected = full_count &&
-        !capability_insert(&table, &objects[CAPABILITY_TABLE_CAPACITY + 1U], CAPABILITY_TYPE_ENDPOINT,
-            CAPABILITY_RIGHT_READ, &overflow) &&
-        overflow == CAPABILITY_INVALID_HANDLE;
-
-    terminal_write("  OVERFLOW REJECTED: ");
-    terminal_writeln(overflow_rejected ? "PASS" : "FAILED");
-
-    /*
-     * Clean up every live capability, including partial-fill cases, so the test also proves the count returns to zero.
-     */
-    bool revoke_all = true;
-
-    for (u32 i = 0; i < live_handles; ++i) {
-        if (!capability_revoke(&table, handles[i])) revoke_all = false;
-    }
-
-    bool empty_again = capability_table_count(&table) == 0U;
-    terminal_write("  REVOKE ALL: ");
-    terminal_writeln(revoke_all ? "PASS" : "FAILED");
-    terminal_write("  FINAL COUNT 0: ");
-    terminal_writeln(empty_again ? "PASS" : "FAILED");
-
-    PmmStats after = pmm_stats();
-    bool frames_restored = before.free_pages == after.free_pages;
-    terminal_write("  FREE AFTER: ");
-    terminal_write_u64(after.free_pages);
-    terminal_putchar('\n');
-    terminal_write("  FRAME COUNT RESTORED: ");
-    terminal_writeln(frames_restored ? "PASS" : "FAILED");
-
-    bool pass = initialized && initially_empty && inserted && handle_valid && lookup_ok &&
-        wrong_type_rejected && read_right_ok && read_write_ok && missing_right_rejected && revoked &&
-        stale_lookup_rejected && stale_revoke_rejected && reinserted && slot_reused && generation_changed &&
-        handle_changed && replacement_lookup_ok && filled && full_count && overflow_rejected &&
-        revoke_all && empty_again && frames_restored;
-
-    terminal_set_color(pass ? terminal_accent_color() : terminal_error_color());
-    terminal_write("CAPABILITY TABLE TEST: ");
-    terminal_writeln(pass ? "PASS" : "FAILED");
-    terminal_set_color(terminal_default_color());
+    capability_table_test_run();
 }
 
 static void command_ipctest(void) {
@@ -6559,26 +6390,43 @@ static void execute(char *line) {
     else if (k_strieq(command, "forcethreadtest")) force_thread_test_run();
     else if (k_strieq(command, "supervisortest")) command_supervisortest();
     else if (k_strieq(command, "captest")) command_captest();
+    else if (k_strieq(command, "caplifetimetest")) capability_lifetime_test_run();
     else if (k_strieq(command, "endpointtest")) command_endpointtest();
     else if (k_strieq(command, "ipctest")) command_ipctest();
     else if (k_strieq(command, "ipcblocktest")) command_ipcblocktest();
     else if (k_strieq(command, "ipcsendblocktest")) command_ipcsendblocktest();
     else if (k_strieq(command, "r2stresstest")) r2_stress_test_run();
+    else if (k_strieq(command, "r2finaltest")) r2_acceptance_test_run();
+    else if (k_strieq(command, "r2finalcleanupretry")) r2_acceptance_cleanup_run();
+    else if (k_strieq(command, "stackreclaimtest")) stack_reclaim_test_run();
+    else if (k_strieq(command, "waitordertest")) ipc_wait_order_test_run();
+    else if (k_strieq(command, "waitcleanupretry")) ipc_wait_order_cleanup_run();
     else if (k_strieq(command, "useripctest")) command_useripctest();
     else if (k_strieq(command, "useripccanceltest")) user_ipc_cancel_test_run();
     else if (k_strieq(command, "useripcblocktest")) command_useripcblocktest();
     else if (k_strieq(command, "useripcsendblocktest")) command_useripcsendblocktest();
     else if (k_strieq(command, "processtest")) command_processtest();
     else if (k_strieq(command, "processkilltest")) process_terminate_test_run();
+    else if (k_strieq(command, "peerdeathtest")) peer_death_test_run();
+    else if (k_strieq(command, "peerdeathcleanupretry")) peer_death_cleanup_run();
+    else if (k_strieq(command, "userprocesscleanuptest")) user_process_cleanup_test_run();
+    else if (k_strieq(command, "usercleanupretry")) user_fixture_cleanup_retry_run();
     else if (k_strieq(command, "schedtest")) command_schedtest();
     else if (k_strieq(command, "blocktest")) command_blocktest();
     else if (k_strieq(command, "exittest")) command_exittest();
     else if (k_strieq(command, "syscalltest")) command_syscalltest();
+    else if (k_strieq(command, "timeouttest")) ipc_timeout_order_test_run();
+    else if (k_strieq(command, "timeoutcleanupretry")) ipc_timeout_order_cleanup_run();
     else if (k_strieq(command, "userisotest")) command_userisotest();
     else if (k_strieq(command, "userpftest")) command_userpftest();
     else if (k_strieq(command, "userelftest")) command_userelftest();
     else if (k_strieq(command, "userruntimetest")) user_runtime_test_run();
     else if (k_strieq(command, "userruntimeblocktest")) user_runtime_block_test_run();
+    else if (k_strieq(command, "elfreclaimtest")) elf_reclaim_test_run();
+    else if (k_strieq(command, "vmmreclaimtest")) vmm_reclaim_test_run();
+    else if (k_strieq(command, "constructortest")) constructor_test_run();
+    else if (k_strieq(command, "publishedcleanuptest")) published_cleanup_test_run();
+    else if (k_strieq(command, "forcecleanupretry")) force_thread_cleanup_run();
     else if (k_strieq(command, "timer")) command_timer();
     else if (k_strieq(command, "timertest")) command_timertest();
     else if (k_strieq(command, "preempttest")) command_preempttest();

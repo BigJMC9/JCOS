@@ -6,6 +6,7 @@
 #include "capability.h"
 
 struct Thread;
+struct UserElfImage;
 
 typedef struct Process {
     u64 id;
@@ -37,6 +38,9 @@ typedef struct Process {
 
     u64 thread_count;
 
+    /* One retained ELF ledger in the initial static-executable profile. */
+    struct UserElfImage *elf_image;
+
     bool kernel;
     bool owns_address_space;
     bool initialized;
@@ -55,7 +59,10 @@ Process *process_kernel(void);
  *   - a fresh user AddressSpace
  *   - an empty CapabilityTable
  */
+/* false is clean for a fresh output; unpublished paging resources, if any,
+ * are owned by AddressSpace's bounded rollback slot. Live storage is unchanged. */
 bool process_create(Process *process);
+u32 process_object_count(void);
 
 /*
  * Process destruction requires an empty
@@ -71,6 +78,8 @@ CapabilityTable *process_capabilities(Process *process);
 u64 process_thread_count(const Process *process);
 
 bool process_thread_attach(Process *process, struct Thread *thread);
+/* Caller serializes validation and subsequent detach (UP: interrupts off). */
+bool process_thread_can_detach(const Process *process, const struct Thread *thread);
 bool process_thread_detach(Process *process, struct Thread *thread);
 bool process_thread_contains(const Process *process, const struct Thread *thread);
 

@@ -1,4 +1,7 @@
 #include "user_elf.h"
+#include "user_elf_test.h"
+#include "arch.h"
+#include "thread.h"
 
 #include "address_space.h"
 #include "lib.h"
@@ -94,45 +97,131 @@ static frame_t image_find_frame(const UserElfImage *image, u64 virtual_address) 
     return FRAME_INVALID;
 }
 
-static bool image_add_page(UserElfImage *image, u64 virtual_address, frame_t frame) {
-    if (!image) return false;
-    if (image->page_count >= USER_ELF_MAX_LOAD_PAGES) return false;
+/* Callers cannot recycle the owning Process while this ledger is retained. */
+bool user_elf_needs_cleanup(const UserElfImage *image) {
+    return image && (image->owner || image->owner_process_id || image->owner_space_id ||
+        image->page_count || image->loaded || image->cleanup_pending || image->entry);
+}
 
-    UserElfPage *page = &image->pages[image->page_count];
+static u64 elf_irq_save(void) {
+    u64 flags;
+    __asm__ volatile ("pushfq\n\tpopq %0" : "=r"(flags) : : "memory");
+    arch_cli();
+    return flags;
+}
 
-    page->virtual_address = virtual_address;
-    page->frame = frame;
+static void elf_irq_restore(u64 flags) {
+    if (flags & (1ULL << 9)) arch_sti();
+}
 
-    ++image->page_count;
+typedef struct {
+    UserElfImage *image;
+    u64 address;
+    bool armed;
+} ElfTestFault;
+
+static ElfTestFault g_elf_faults[USER_ELF_TEST_FAULT_COUNT];
+
+bool user_elf_test_fail_once(UserElfImage *image, UserElfTestFault fault, u64 address) {
+    if (!image || (u32)fault >= USER_ELF_TEST_FAULT_COUNT ||
+        address < ADDRESS_SPACE_USER_BASE || address >= ADDRESS_SPACE_USER_LIMIT ||
+        (address & (VM_PAGE_SIZE - 1ULL))) return false;
+    u64 flags = elf_irq_save();
+    ElfTestFault *slot = &g_elf_faults[fault];
+    bool ready = !slot->armed;
+    if (ready) {
+        slot->image = image;
+        slot->address = address;
+        slot->armed = true;
+    }
+    elf_irq_restore(flags);
+    return ready;
+}
+
+u32 user_elf_test_faults_armed(void) {
+    u64 flags = elf_irq_save();
+    u32 mask = 0;
+    for (u32 i = 0; i < USER_ELF_TEST_FAULT_COUNT; ++i) {
+        if (g_elf_faults[i].armed) mask |= 1U << i;
+    }
+    elf_irq_restore(flags);
+    return mask;
+}
+
+void user_elf_test_clear_faults(void) {
+    u64 flags = elf_irq_save();
+    k_memset(g_elf_faults, 0, sizeof(g_elf_faults));
+    elf_irq_restore(flags);
+}
+
+static bool fail_operation(UserElfImage *image, UserElfTestFault fault, u64 address) {
+    ElfTestFault *slot = &g_elf_faults[fault];
+    if (!slot->armed || slot->image != image || slot->address != address) return false;
+    k_memset(slot, 0, sizeof(*slot));
     return true;
 }
 
-static bool release_pages(AddressSpace *space, UserElfImage *image) {
-    if (!space || !image) return false;
+static bool process_available(Process *process, AddressSpace **out_space) {
+    if (!process || !process->initialized || !process->id || process->kernel ||
+        !process->owns_address_space || process->address_space != &process->owned_address_space) return false;
+    AddressSpace *space = process_address_space(process);
+    if (!space || space->kernel || !space->id || !address_space_cr3(space)) return false;
+    /* Current VMM unmap has no active-address-space TLB invalidation contract. */
+    if ((arch_read_cr3() & ~(VM_PAGE_SIZE - 1ULL)) == address_space_cr3(space)) return false;
+    *out_space = space;
+    return true;
+}
 
-    bool result = true;
+static bool threads_unpublished(const Process *process) {
+    const Thread *thread = process->thread_head;
+    const Thread *previous = 0;
+    for (u64 i = 0; i < process->thread_count; ++i) {
+        if (!thread || !thread->id || thread->process != process ||
+            thread->process_prev != previous || thread->state != THREAD_STATE_READY ||
+            thread->on_run_queue || thread->run_next || thread->interrupt_context_ready ||
+            thread->interrupt_rsp || thread_wait_active(thread)) return false;
+        previous = thread;
+        thread = thread->process_next;
+    }
+    return !thread && previous == process->thread_tail;
+}
+
+static bool image_owner_matches(Process *process, AddressSpace *space, const UserElfImage *image) {
+    return process->elf_image == image && image->owner == process &&
+        image->owner_process_id == process->id && image->owner_space_id == space->id &&
+        image->page_count <= USER_ELF_MAX_LOAD_PAGES;
+}
+
+static bool release_pages(Process *process, AddressSpace *space, UserElfImage *image) {
+    if (!image_owner_matches(process, space, image)) return false;
+    image->entry = 0;
+    image->loaded = false;
+    image->cleanup_pending = true;
 
     while (image->page_count) {
-        u32 index = image->page_count - 1U;
-        UserElfPage *page = &image->pages[index];
-        frame_t old_frame = FRAME_INVALID;
-        bool unmapped = address_space_unmap_page(space, page->virtual_address, &old_frame);
-
-        if (!unmapped || old_frame != page->frame) {
-            result = false;
-        } else if (!frame_free(old_frame)) {
-            result = false;
+        UserElfPage *page = &image->pages[image->page_count - 1U];
+        if (page->frame == FRAME_INVALID) return false;
+        if (page->mapped) {
+            frame_t current = FRAME_INVALID;
+            if (!address_space_query_page(space, page->virtual_address, &current, 0) ||
+                current != page->frame) return false;
+            if (fail_operation(image, USER_ELF_TEST_UNMAP, page->virtual_address)) return false;
+            frame_t old = FRAME_INVALID;
+            if (!address_space_unmap_page(space, page->virtual_address, &old)) return false;
+            /* Publish unmap progress before attempting the independent free. */
+            page->mapped = false;
+            if (old != page->frame) return false;
         }
+        if (fail_operation(image, USER_ELF_TEST_FREE, page->virtual_address) ||
+            !frame_free(page->frame)) return false;
 
-        page->virtual_address = 0;
-        page->frame = FRAME_INVALID;
-
+        k_memset(page, 0, sizeof(*page));
         --image->page_count;
     }
 
-    image->entry = 0;
-    image->loaded = false;
-    return result;
+    process->elf_image = 0;
+    k_memset(image, 0, sizeof(*image));
+    return true;
 }
 
 static bool elf_header_valid(const VfsNode *file, const Elf64Header *header) {
@@ -172,6 +261,7 @@ static bool validate_segments(const VfsNode *file, const Elf64Header *header, u3
         if (!segment) return false;
         if (segment->type == ELF64_PT_DYNAMIC || segment->type == ELF64_PT_INTERP) return false;
         if (segment->type != ELF64_PT_LOAD) continue;
+        if (segment->file_size > segment->memory_size) return false;
         if (!segment->memory_size) continue;
 
         saw_load = true;
@@ -179,10 +269,11 @@ static bool validate_segments(const VfsNode *file, const Elf64Header *header, u3
         if (segment->file_size > segment->memory_size) return false;
         if (segment->offset > file->size) return false;
         if (segment->file_size > file->size - segment->offset) return false;
-        if (segment->virtual_address < ADDRESS_SPACE_USER_BASE) return false;
+        if (segment->virtual_address < ADDRESS_SPACE_USER_BASE ||
+            segment->virtual_address >= ADDRESS_SPACE_USER_LIMIT) return false;
         if (segment->memory_size > ADDRESS_SPACE_USER_LIMIT - segment->virtual_address) return false;
 
-        /* Keep the first loader simple and enforce W^X at ELF segment level. */
+        /* Reject writable/executable segments; hardware NX is a separate gate. */
         if ((segment->flags & ELF64_PF_W) && (segment->flags & ELF64_PF_X)) return false;
         if (segment->alignment > 1ULL) {
             if (segment->alignment & (segment->alignment - 1ULL)) return false;
@@ -243,32 +334,24 @@ static bool map_segment(AddressSpace *space, const VfsNode *file, const Elf64Pro
             return false;
         }
 
+        if (image->page_count >= USER_ELF_MAX_LOAD_PAGES ||
+            fail_operation(image, USER_ELF_TEST_ALLOC, virtual_address)) return false;
         frame_t frame = frame_alloc();
-
         if (frame == FRAME_INVALID) return false;
 
+        /* Own the allocation before any subsequent operation can fail. */
+        UserElfPage *page = &image->pages[image->page_count++];
+        page->virtual_address = virtual_address;
+        page->frame = frame;
+        page->mapped = false;
+
         void *direct = phys_to_virt(frame_to_phys(frame));
-
-        if (!direct) {
-            (void)frame_free(frame);
-            return false;
-        }
-
+        if (!direct) return false;
         k_memset(direct, 0, (usize)VM_PAGE_SIZE);
 
-        if (!address_space_map_page(space, virtual_address, frame, flags)) {
-            (void)frame_free(frame);
-            return false;
-        }
-
-        if (!image_add_page(image, virtual_address, frame)) {
-            frame_t old_frame = FRAME_INVALID;
-
-            (void)address_space_unmap_page(space, virtual_address, &old_frame);
-
-            (void)frame_free(frame);
-            return false;
-        }
+        if (fail_operation(image, USER_ELF_TEST_MAP, virtual_address) ||
+            !address_space_map_page(space, virtual_address, frame, flags)) return false;
+        page->mapped = true;
     }
 
     /* Copy p_filesz into the newly allocated pages. Remaining p_memsz bytes stay zero. */
@@ -286,62 +369,66 @@ static bool map_segment(AddressSpace *space, const VfsNode *file, const Elf64Pro
         frame_t frame = image_find_frame(image, page_address);
 
         if (frame == FRAME_INVALID) return false;
-
         u8 *direct = (u8 *)phys_to_virt(frame_to_phys(frame));
-
         if (!direct) return false;
 
         k_memcpy(direct + page_offset, file->data + segment->offset + copied, (usize)amount);
-
         copied += amount;
     }
 
     return true;
 }
 
-bool user_elf_load(Process *process, const VfsNode *file, UserElfImage *image) {
-    if (!process || !file || !image) return false;
-    if (!process->initialized || process->kernel) return false;
+static bool load_locked(Process *process, const VfsNode *file, UserElfImage *image) {
+    if (!file || !image || user_elf_needs_cleanup(image)) return false;
+    AddressSpace *space = 0;
+    if (!process_available(process, &space) || process->elf_image ||
+        !threads_unpublished(process)) return false;
     if (file->type != VFS_FILE || !file->data || file->size < sizeof(Elf64Header)) return false;
 
-    AddressSpace *space = process_address_space(process);
-
-    if (!space || space->kernel) return false;
+    const Elf64Header *header = (const Elf64Header *)(const void *)file->data;
+    u32 expected_pages = 0;
+    if (!elf_header_valid(file, header) || !validate_segments(file, header, &expected_pages)) return false;
 
     k_memset(image, 0, sizeof(*image));
+    image->owner = process;
+    image->owner_process_id = process->id;
+    image->owner_space_id = space->id;
+    process->elf_image = image;
 
-    const Elf64Header *header = (const Elf64Header *) (const void *)file->data;
-
-    if (!elf_header_valid(file, header)) return false;
-
-    u32 expected_pages = 0;
-
-    if (!validate_segments(file, header, &expected_pages)) return false;
     for (u16 i = 0; i < header->program_header_count; ++i) {
         const Elf64ProgramHeader *segment = program_header(file, header, i);
-
         if (!segment) goto fail;
         if (segment->type != ELF64_PT_LOAD) continue;
         if (!map_segment(space, file, segment, image)) goto fail;
     }
-
     if (image->page_count != expected_pages) goto fail;
-
     image->entry = header->entry;
     image->loaded = true;
     return true;
 
 fail:
-    (void)release_pages(space, image);
+    /* A false return can leave an explicitly retained cleanup ledger. */
+    (void)release_pages(process, space, image);
     return false;
 }
 
+bool user_elf_load(Process *process, const VfsNode *file, UserElfImage *image) {
+    u64 flags = elf_irq_save();
+    bool result = load_locked(process, file, image);
+    elf_irq_restore(flags);
+    return result;
+}
+
 bool user_elf_unload(Process *process, UserElfImage *image) {
-    if (!process || !image) return false;
-    if (!image->loaded && !image->page_count) return false;
-
-    AddressSpace *space = process_address_space(process);
-
-    if (!space || space->kernel) return false;
-    return release_pages(space, image);
+    u64 flags = elf_irq_save();
+    AddressSpace *space = 0;
+    bool result = false;
+    if (image && process_available(process, &space) &&
+        !process->thread_count && !process->thread_head && !process->thread_tail &&
+        image_owner_matches(process, space, image)) {
+        result = release_pages(process, space, image);
+    }
+    elf_irq_restore(flags);
+    return result;
 }

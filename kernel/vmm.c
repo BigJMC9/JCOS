@@ -1,6 +1,9 @@
 #include "vmm.h"
 #include "lib.h"
 #include "physmap.h"
+#include "arch.h"
+#include "interrupts.h"
+#include "vmm_test.h"
 
 #define PAGE_TABLE_ENTRIES 512U
 
@@ -29,6 +32,91 @@
  * active, this becomes true.
  */
 static bool g_use_phys_map;
+
+/* UP normal context only. No NMI callers, PCID, or remote page-map users. */
+static u64 vmm_irq_save(void) {
+    u64 flags;
+    __asm__ volatile ("pushfq; popq %0" : "=r"(flags) : : "memory");
+    interrupts_disable();
+    return flags;
+}
+
+static void vmm_irq_restore(u64 flags) {
+    if (flags & (1ULL << 9)) interrupts_enable();
+}
+
+static bool map_active(const VmPageMap *map) {
+    return map && map->root_frame != FRAME_INVALID &&
+        (arch_read_cr3() & PTE_ADDRESS_MASK) == frame_to_phys(map->root_frame);
+}
+
+static bool profile_supported(void) {
+    return !(arch_read_cr4() & (1ULL << 17)); /* CR4.PCIDE */
+}
+
+/* No global leaf mappings are created by this VMM. */
+static void flush_active_map(const VmPageMap *map) {
+    if (map_active(map)) arch_write_cr3(arch_read_cr3());
+}
+
+/* A not-yet-linked allocation can survive loss of its constructor's storage. */
+static frame_t g_unlinked_table = FRAME_INVALID;
+
+/* Exact-map, one-shot diagnostics. Never exposed by a userspace syscall. */
+static struct {
+    VmPageMap *map;
+    u32 skip;
+    bool armed;
+} g_faults[VMM_TEST_FAULT_COUNT];
+
+static bool test_fault(VmPageMap *map, VmmTestFault fault) {
+    if (!g_faults[fault].armed || g_faults[fault].map != map) return false;
+    if (g_faults[fault].skip) { --g_faults[fault].skip; return false; }
+    g_faults[fault].armed = false;
+    g_faults[fault].map = 0;
+    return true;
+}
+
+bool vmm_test_fail_once(VmPageMap *map, VmmTestFault fault, u32 skip) {
+    if (!map || (u32)fault >= VMM_TEST_FAULT_COUNT) return false;
+    u64 flags = vmm_irq_save();
+    bool valid = !g_faults[fault].armed;
+    if (valid) {
+        g_faults[fault].map = map;
+        g_faults[fault].skip = skip;
+        g_faults[fault].armed = true;
+    }
+    vmm_irq_restore(flags);
+    return valid;
+}
+
+u32 vmm_test_faults_armed(void) {
+    u64 flags = vmm_irq_save();
+    u32 count = 0;
+    for (u32 i = 0; i < VMM_TEST_FAULT_COUNT; ++i) if (g_faults[i].armed) ++count;
+    vmm_irq_restore(flags);
+    return count;
+}
+
+void vmm_test_clear_faults(void) {
+    u64 flags = vmm_irq_save();
+    k_memset(g_faults, 0, sizeof(g_faults));
+    vmm_irq_restore(flags);
+}
+
+frame_t vmm_test_unlinked_table(void) { return g_unlinked_table; }
+
+bool vmm_reclaim_unlinked_table(void) {
+    u64 flags = vmm_irq_save();
+    bool result = g_unlinked_table == FRAME_INVALID || frame_free(g_unlinked_table);
+    if (result) g_unlinked_table = FRAME_INVALID;
+    vmm_irq_restore(flags);
+    return result;
+}
+
+static bool free_table(VmPageMap *map, frame_t frame) {
+    return !test_fault(map, VMM_TEST_FREE) && frame_free(frame);
+}
 
 static bool page_aligned(u64 address) {
     return
@@ -116,25 +204,21 @@ static bool valid_mapping_frame(frame_t frame) {
     return true;
 }
 
-static bool allocate_table(frame_t *frame_out, u64 **table_out) {
-    if (!frame_out || !table_out) return false;
-
+static bool allocate_table(VmPageMap *map, frame_t *frame_out, u64 **table_out) {
+    if (!map || !frame_out || !table_out) return false;
+    if (g_unlinked_table != FRAME_INVALID || test_fault(map, VMM_TEST_ALLOC)) return false;
     frame_t frame = frame_alloc();
-
     if (frame == FRAME_INVALID) return false;
 
-    u64 *table = table_pointer(frame);
-
+    u64 *table = valid_mapping_frame(frame) && !test_fault(map, VMM_TEST_ACCESS)
+        ? table_pointer(frame) : 0;
     if (!table) {
-        (void)frame_free(frame);
+        if (!free_table(map, frame)) g_unlinked_table = frame;
         return false;
     }
-
     k_memset(table, 0, (usize)VM_PAGE_SIZE);
-
     *frame_out = frame;
     *table_out = table;
-
     return true;
 }
 
@@ -167,7 +251,7 @@ static bool existing_table(u64 *parent, u32 index, frame_t *frame_out, u64 **tab
  * created_frame is FRAME_INVALID when table
  * already existed.
  */
-static bool create_or_get_table(u64 *parent, u32 index, bool user, frame_t *created_frame, u64 **table_out) {
+static bool create_or_get_table(VmPageMap *map, u64 *parent, u32 index, bool user, frame_t *created_frame, u64 **table_out) {
     if (!parent || !created_frame || !table_out) return false;
 
     *created_frame = FRAME_INVALID;
@@ -201,18 +285,13 @@ static bool create_or_get_table(u64 *parent, u32 index, bool user, frame_t *crea
         return true;
     }
 
+    if (entry) return false;
     frame_t frame;
     u64 *table;
 
-    if (!allocate_table(&frame, &table)) return false;
+    if (!allocate_table(map, &frame, &table)) return false;
 
     u64 physical = frame_to_phys(frame);
-
-    if (!physical || (physical & ~PTE_ADDRESS_MASK)) {
-
-        (void)frame_free(frame);
-        return false;
-    }
 
     u64 flags = PTE_PRESENT | PTE_WRITE;
     if (user) flags |= PTE_USER;
@@ -224,36 +303,93 @@ static bool create_or_get_table(u64 *parent, u32 index, bool user, frame_t *crea
     return true;
 }
 
-static void rollback_created_tables(u64 **entries, frame_t *frames, u32 count) {
-    while (count) {
-        --count;
-
-        if (entries[count]) *entries[count] = 0;
-        if (frames[count] != FRAME_INVALID) (void)frame_free(frames[count]);
-    }
-}
-
 static bool table_empty(const u64 *table) {
-    if (!table) return true;
-    for (u32 i = 0; i < PAGE_TABLE_ENTRIES; ++i) {
-        if (table[i] & PTE_PRESENT) return false;
-    }
-
+    if (!table) return false;
+    for (u32 i = 0; i < PAGE_TABLE_ENTRIES; ++i) if (table[i]) return false;
     return true;
 }
 
-bool vmm_page_map_create_owned_range(VmPageMap *map, u16 owned_first, u16 owned_end) {
+/* Inactive, non-exported trees only. The parent link is the ownership ledger. */
+static bool release_empty_child(VmPageMap *map, u64 *entry) {
+    if (!entry || !(*entry & PTE_PRESENT) || (*entry & PTE_HUGE)) return false;
+    frame_t frame = entry_frame(*entry);
+    u64 *table = table_pointer(frame);
+    if (!table_empty(table)) return false;
+    u64 saved = *entry;
+    *entry = 0;
+    if (!free_table(map, frame)) {
+        *entry = saved;
+        return false;
+    }
+    return true;
+}
+
+static void rollback_created_tables(VmPageMap *map, u64 **entries, frame_t *frames, u32 count) {
+    if (map_active(map) || map->shared_source) return;
+    while (count) {
+        --count;
+        if (!entries[count] || entry_frame(*entries[count]) != frames[count] ||
+            !release_empty_child(map, entries[count])) return;
+    }
+}
+
+/* level 1 is a PT: present entries there are caller-owned DATA mappings. */
+static bool tree_has_no_leaves(frame_t frame, u32 level, u32 first, u32 end) {
+    u64 *table = table_pointer(frame);
+    if (!table || !level) return false;
+    for (u32 i = first; i < end; ++i) {
+        u64 entry = table[i];
+        if (!entry) continue;
+        if (level == 1 || !(entry & PTE_PRESENT) || (entry & PTE_HUGE)) return false;
+        frame_t child = entry_frame(entry);
+        if (child == frame || !tree_has_no_leaves(child, level - 1U, 0, PAGE_TABLE_ENTRIES)) return false;
+    }
+    return true;
+}
+
+static bool collect_children(VmPageMap *map, frame_t frame, u32 level, u32 first, u32 end) {
+    u64 *table = table_pointer(frame);
+    if (!table || !level) return false;
+    if (level == 1) return true; /* Never free or remove DATA entries here. */
+    for (u32 i = first; i < end; ++i) {
+        u64 entry = table[i];
+        if (!entry) continue;
+        if (!(entry & PTE_PRESENT) || (entry & PTE_HUGE)) return false;
+        frame_t child = entry_frame(entry);
+        if (child == frame || !collect_children(map, child, level - 1U, 0, PAGE_TABLE_ENTRIES)) return false;
+        if (table_empty(table_pointer(child)) && !release_empty_child(map, &table[i])) return false;
+    }
+    return true;
+}
+
+static bool map_reclaimable(const VmPageMap *map) {
+    return map && map->root_frame != FRAME_INVALID &&
+        map->owned_pml4_first < map->owned_pml4_end && map->owned_pml4_end <= VM_PML4_ENTRY_COUNT &&
+        !map->shared_source && !map_active(map) && profile_supported();
+}
+
+bool vmm_page_map_collect(VmPageMap *map) {
+    u64 flags = vmm_irq_save();
+    bool result = map_reclaimable(map) &&
+        collect_children(map, map->root_frame, 4U, map->owned_pml4_first, map->owned_pml4_end);
+    vmm_irq_restore(flags);
+    return result;
+}
+
+static bool create_owned_locked(VmPageMap *map, u16 owned_first, u16 owned_end) {
     if (!map) return false;
     if (owned_first >= owned_end || owned_end > VM_PML4_ENTRY_COUNT) return false;
 
     map->root_frame = FRAME_INVALID;
     map->owned_pml4_first = 0;
     map->owned_pml4_end = 0;
+    map->destroy_pending = false;
+    map->shared_source = false;
 
     frame_t root;
     u64 *table;
 
-    if (!allocate_table(&root, &table)) return false;
+    if (!allocate_table(map, &root, &table)) return false;
 
     map->root_frame = root;
     map->owned_pml4_first = owned_first;
@@ -262,79 +398,39 @@ bool vmm_page_map_create_owned_range(VmPageMap *map, u16 owned_first, u16 owned_
     return true;
 }
 
+bool vmm_page_map_create_owned_range(VmPageMap *map, u16 first, u16 end) {
+    u64 flags = vmm_irq_save();
+    bool result = profile_supported() && create_owned_locked(map, first, end);
+    vmm_irq_restore(flags);
+    return result;
+}
+
 bool vmm_page_map_create(VmPageMap *map) {
     return vmm_page_map_create_owned_range(map, 0, VM_PML4_ENTRY_COUNT);
 }
 
-void vmm_page_map_destroy(VmPageMap *map) {
-    if (!map || map->root_frame == FRAME_INVALID) return;
+bool vmm_page_map_destroy(VmPageMap *map) {
+    u64 flags = vmm_irq_save();
+    bool result = false;
+    if (!map_reclaimable(map)) goto done;
+    if (!tree_has_no_leaves(map->root_frame, 4U, map->owned_pml4_first, map->owned_pml4_end)) goto done;
 
-    u64 *pml4 = table_pointer(map->root_frame);
-
-    if (!pml4) {
-        map->root_frame = FRAME_INVALID;
-
-        return;
-    }
-
-    /*
-     * Walk all owned paging-structure frames.
-     *
-     * Leaf data frames are deliberately NOT
-     * released here.
-     */
-    for (u32 i = map->owned_pml4_first; i < map->owned_pml4_end; ++i) {
-
-        u64 pml4e = pml4[i];
-        if (!(pml4e & PTE_PRESENT)) continue;
-
-        frame_t pdpt_frame = entry_frame(pml4e);
-        u64 *pdpt = table_pointer(pdpt_frame);
-
-        if (!pdpt) continue;
-        for (u32 j = 0; j < PAGE_TABLE_ENTRIES; ++j) {
-
-            u64 pdpte = pdpt[j];
-
-            if (!(pdpte & PTE_PRESENT)) continue;
-
-            /* A 1 GiB huge page is a leaf mapping, not another owned table. */
-            if (pdpte & PTE_HUGE) continue;
-
-            frame_t pd_frame = entry_frame(pdpte);
-            u64 *pd = table_pointer(pd_frame);
-
-            if (!pd) continue;
-            for (u32 k = 0; k < PAGE_TABLE_ENTRIES; ++k) {
-
-                u64 pde = pd[k];
-
-                if (!(pde & PTE_PRESENT)) continue;
-
-                /* A 2 MiB huge page is also a leaf mapping. */
-                if (pde & PTE_HUGE) continue;
-
-                frame_t pt_frame = entry_frame(pde);
-
-                /* PT entries themselves point to DATA frames, so we free only the PT frame here. */
-                (void)frame_free(pt_frame);
-            }
-
-            (void)frame_free(pd_frame);
-        }
-
-        (void)frame_free(pdpt_frame);
-    }
-
-    (void)frame_free(map->root_frame);
-
+    map->destroy_pending = true;
+    if (!collect_children(map, map->root_frame, 4U, map->owned_pml4_first, map->owned_pml4_end)) goto done;
+    if (!free_table(map, map->root_frame)) goto done;
     map->root_frame = FRAME_INVALID;
     map->owned_pml4_first = 0;
     map->owned_pml4_end = 0;
+    map->destroy_pending = false;
+    result = true;
+done:
+    vmm_irq_restore(flags);
+    return result;
 }
 
-bool vmm_map_page(VmPageMap *map, u64 virtual_address, frame_t frame, vm_flags_t flags) {
-    if (!map || map->root_frame == FRAME_INVALID) return false;
+static bool map_page_locked(VmPageMap *map, u64 virtual_address, frame_t frame, vm_flags_t flags) {
+    if (!map || map->root_frame == FRAME_INVALID || map->destroy_pending) return false;
+    if (map->shared_source && !map_active(map)) return false;
     if (!page_aligned(virtual_address) || !virtual_address_canonical(virtual_address)) return false;
     if (!valid_mapping_frame(frame)) return false;
     /* Refuse flags we do not understand yet. */
@@ -367,7 +463,7 @@ bool vmm_map_page(VmPageMap *map, u64 virtual_address, frame_t frame, vm_flags_t
 
     frame_t created = FRAME_INVALID;
 
-    if (!create_or_get_table(pml4, i4, user, &created, &pdpt)) return false;
+    if (!create_or_get_table(map, pml4, i4, user, &created, &pdpt)) return false;
     if (created != FRAME_INVALID) {
 
         created_entries[
@@ -385,9 +481,9 @@ bool vmm_map_page(VmPageMap *map, u64 virtual_address, frame_t frame, vm_flags_t
 
     created = FRAME_INVALID;
 
-    if (!create_or_get_table(pdpt, i3, user, &created, &pd)) {
+    if (!create_or_get_table(map, pdpt, i3, user, &created, &pd)) {
 
-        rollback_created_tables(created_entries, created_frames, created_count);
+        rollback_created_tables(map, created_entries, created_frames, created_count);
 
         return false;
     }
@@ -409,9 +505,9 @@ bool vmm_map_page(VmPageMap *map, u64 virtual_address, frame_t frame, vm_flags_t
 
     created = FRAME_INVALID;
 
-    if (!create_or_get_table(pd, i2, user, &created, &pt)) {
+    if (!create_or_get_table(map, pd, i2, user, &created, &pt)) {
 
-        rollback_created_tables(created_entries, created_frames, created_count);
+        rollback_created_tables(map, created_entries, created_frames, created_count);
 
         return false;
     }
@@ -432,9 +528,9 @@ bool vmm_map_page(VmPageMap *map, u64 virtual_address, frame_t frame, vm_flags_t
     u32 i1 = pt_index(virtual_address);
 
     /* Don't silently replace an existing mapping. */
-    if (pt[i1] & PTE_PRESENT) {
+    if (pt[i1]) {
 
-        rollback_created_tables(created_entries, created_frames, created_count);
+        rollback_created_tables(map, created_entries, created_frames, created_count);
 
         return false;
     }
@@ -448,6 +544,15 @@ bool vmm_map_page(VmPageMap *map, u64 virtual_address, frame_t frame, vm_flags_t
     pt[i1] = physical | entry_flags;
 
     return true;
+}
+
+bool vmm_map_page(VmPageMap *map, u64 address, frame_t frame, vm_flags_t permissions) {
+    u64 flags = vmm_irq_save();
+    bool result = profile_supported() && map_page_locked(map, address, frame, permissions);
+    /* Also flush when a failed attempt changed intermediate permission bits. */
+    if (profile_supported()) flush_active_map(map);
+    vmm_irq_restore(flags);
+    return result;
 }
 
 bool vmm_query_page(const VmPageMap *map, u64 virtual_address, frame_t *frame, vm_flags_t *flags) {
@@ -505,9 +610,10 @@ bool vmm_query_page(const VmPageMap *map, u64 virtual_address, frame_t *frame, v
     return true;
 }
 
-bool vmm_unmap_page(VmPageMap *map, u64 virtual_address, frame_t *old_frame) {
+static bool unmap_page_locked(VmPageMap *map, u64 virtual_address, frame_t *old_frame) {
     if (old_frame) *old_frame = FRAME_INVALID;
-    if (!map || map->root_frame == FRAME_INVALID) return false;
+    if (!map || map->root_frame == FRAME_INVALID || map->destroy_pending) return false;
+    if (map->shared_source && !map_active(map)) return false;
     if (!page_aligned(virtual_address) || !virtual_address_canonical(virtual_address)) return false;
 
     u32 i4 = pml4_index(virtual_address);
@@ -539,7 +645,7 @@ bool vmm_unmap_page(VmPageMap *map, u64 virtual_address, frame_t *old_frame) {
 
     u64 entry = pt[i1];
 
-    if (!(entry & PTE_PRESENT)) return false;
+    if (!(entry & PTE_PRESENT) || (entry & (1ULL << 8))) return false;
 
     frame_t mapped = entry_frame(entry);
 
@@ -548,34 +654,31 @@ bool vmm_unmap_page(VmPageMap *map, u64 virtual_address, frame_t *old_frame) {
 
     if (old_frame) *old_frame = mapped;
 
-    /*
-     * Prune now-empty page-table levels.
-     *
-     * These are paging-structure frames owned
-     * by VmPageMap, so freeing them is correct.
-     *
-     * Still DO NOT free 'mapped'.
-     */
-    if (table_empty(pt)) {
-        pd[i2] = 0;
-        (void)frame_free(pt_frame);
+    flush_active_map(map);
 
+    /* Leaf removal has committed. Failed optional pruning must not report an
+     * unmap failure to its caller. Retain empty tables via their parent links. */
+    if (!map_active(map) && !map->shared_source && table_empty(pt)) {
+        if (!release_empty_child(map, &pd[i2])) return true;
         if (table_empty(pd)) {
-            pdpt[i3] = 0;
-            (void)frame_free(pd_frame);
-
-            if (table_empty(pdpt)) {
-                pml4[i4] = 0;
-                (void)frame_free(pdpt_frame);
-            }
+            if (!release_empty_child(map, &pdpt[i3])) return true;
+            if (table_empty(pdpt)) (void)release_empty_child(map, &pml4[i4]);
         }
     }
 
     return true;
 }
 
+bool vmm_unmap_page(VmPageMap *map, u64 address, frame_t *old_frame) {
+    if (old_frame) *old_frame = FRAME_INVALID;
+    u64 flags = vmm_irq_save();
+    bool result = profile_supported() && unmap_page_locked(map, address, old_frame);
+    vmm_irq_restore(flags);
+    return result;
+}
+
 bool vmm_map_range(VmPageMap *map, u64 virtual_address, u64 physical_address, u64 size, vm_flags_t flags) {
-    if (!map) return false;
+    if (!map || map->destroy_pending) return false;
     if (!size) return true;
 
     /* Range mappings must start on page boundaries. */
@@ -645,9 +748,10 @@ bool vmm_identity_map_range(VmPageMap *map, u64 physical_address, u64 size, vm_f
         vmm_map_range(map, aligned, aligned, adjusted_size, flags);
 }
 
-bool vmm_page_map_share_pml4_entry(VmPageMap *destination, const VmPageMap *source, u16 index) {
+static bool share_locked(VmPageMap *destination, VmPageMap *source, u16 index) {
     if (!destination || !source || destination->root_frame == FRAME_INVALID || source->root_frame == FRAME_INVALID || index >= VM_PML4_ENTRY_COUNT) return false;
 
+    if (destination == source || destination->destroy_pending || source->destroy_pending || map_active(destination)) return false;
     /* Never install a shared subtree into an entry that this map would later try to destroy. */
     if (map_owns_pml4_index(destination, index)) return false;
 
@@ -660,6 +764,14 @@ bool vmm_page_map_share_pml4_entry(VmPageMap *destination, const VmPageMap *sour
 
     /* Copy the PML4 entry, not the subtree. Both address spaces now reference the same lower-level kernel paging structures. */
     destination_pml4[index] = source_pml4[index];
+    if (source_pml4[index] & PTE_PRESENT) source->shared_source = true;
 
     return true;
+}
+
+bool vmm_page_map_share_pml4_entry(VmPageMap *destination, VmPageMap *source, u16 index) {
+    u64 flags = vmm_irq_save();
+    bool result = profile_supported() && share_locked(destination, source, index);
+    vmm_irq_restore(flags);
+    return result;
 }

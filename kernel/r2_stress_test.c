@@ -1,4 +1,5 @@
 #include "r2_stress_test.h"
+#include "user_test_fixture.h"
 
 #include "address_space.h"
 #include "arch.h"
@@ -41,13 +42,6 @@ typedef enum {
     R2_STRESS_RX_READY_THEN_CLOSE,
     R2_STRESS_TX_COMMITTED_THEN_CLOSE
 } R2StressScenario;
-
-typedef struct {
-    u64 virtual_address;
-    frame_t frame;
-    bool allocated;
-    bool mapped;
-} R2StressStack;
 
 static u64 stress_interrupt_save(void) {
     u64 flags = 0;
@@ -158,78 +152,6 @@ static bool stress_message_matches(const IpcMessage *message, bool prefill) {
     );
 }
 
-static bool stress_stack_create(AddressSpace *space, R2StressStack *stack, u64 virtual_address,
-    CapabilityHandle capability, u64 mode) {
-    if (!space || !stack || !virtual_address) {
-        return false;
-    }
-
-    k_memset(stack, 0, sizeof(*stack));
-
-    stack->frame = FRAME_INVALID;
-    stack->virtual_address = virtual_address;
-    stack->frame = frame_alloc();
-
-    if (stack->frame == FRAME_INVALID) {
-        return false;
-    }
-
-    stack->allocated = true;
-
-    if (!address_space_map_page(space, stack->virtual_address, stack->frame, VM_WRITE)) {
-        return false;
-    }
-
-    stack->mapped = true;
-    u8 *direct = (u8 *)phys_to_virt(frame_to_phys(stack->frame));
-
-    if (!direct) return false;
-
-    k_memset(direct, 0, (usize)VM_PAGE_SIZE);
-
-    u64 initial_rsp = stack->virtual_address + VM_PAGE_SIZE - R2_STRESS_STARTUP_SIZE;
-    u64 offset = initial_rsp - stack->virtual_address;
-    u64 *startup = (u64 *)(void *)(direct + offset);
-
-    startup[0] = capability;
-    startup[1] = mode;
-    return true;
-}
-
-static u64 stress_stack_rsp(const R2StressStack *stack) {
-    if (!stack || !stack->mapped) {
-        return 0;
-    }
-
-    return (
-        stack->virtual_address +
-        VM_PAGE_SIZE -
-        R2_STRESS_STARTUP_SIZE
-    );
-}
-
-static bool stress_stack_release(AddressSpace *space, R2StressStack *stack) {
-    if (!stack) return false;
-    if (!stack->allocated) return true;
-    if (stack->mapped) {
-        frame_t old = FRAME_INVALID;
-
-        if (!space || !address_space_unmap_page(space, stack->virtual_address, &old) || old != stack->frame) {
-            return false;
-        }
-
-        stack->mapped = false;
-    }
-
-    if (!frame_free(stack->frame)) {
-        return false;
-    }
-
-    stack->frame = FRAME_INVALID;
-    stack->allocated = false;
-    return true;
-}
-
 static bool stress_drain_message(Process *kernel_process, CapabilityHandle handle, bool expected_prefill) {
     IpcMessage message;
     k_memset(&message, 0, sizeof(message));
@@ -270,26 +192,10 @@ static bool stress_iteration(const VfsNode *file, u32 iteration, u32 kernel_caps
         return false;
     }
 
-    Process process;
-    Endpoint receive_endpoint;
-    Endpoint send_endpoint;
-    UserElfImage image;
-    Thread receive_thread;
-    Thread send_thread;
-    R2StressStack receive_stack;
-    R2StressStack send_stack;
-
-    k_memset(&process, 0, sizeof(process));
-    k_memset(&receive_endpoint, 0, sizeof(receive_endpoint));
-    k_memset(&send_endpoint, 0, sizeof(send_endpoint));
-    k_memset(&image, 0, sizeof(image));
-    k_memset(&receive_thread, 0, sizeof(receive_thread));
-    k_memset(&send_thread, 0, sizeof(send_thread));
-    k_memset(&receive_stack, 0, sizeof(receive_stack));
-    k_memset(&send_stack, 0, sizeof(send_stack));
-
-    receive_stack.frame = FRAME_INVALID;
-    send_stack.frame = FRAME_INVALID;
+    UserTestFixture *fixture = user_fixture_begin("R2 STRESS ITERATION");
+    if (!fixture) return false;
+    bool behavior_completed = false;
+    user_fixture_set_quiet(fixture, true);
 
     CapabilityHandle kernel_receive_send = CAPABILITY_INVALID_HANDLE;
     CapabilityHandle kernel_receive_receive = CAPABILITY_INVALID_HANDLE;
@@ -314,72 +220,67 @@ static bool stress_iteration(const VfsNode *file, u32 iteration, u32 kernel_caps
     AddressSpace *space = 0;
     CapabilityTable *user_caps = 0;
 
-    process_created = process_create(&process);
+    process_created = user_fixture_process_create(fixture);
 
     if (!process_created) goto cleanup;
 
-    space = process_address_space(&process);
-    user_caps = process_capabilities(&process);
+    space = process_address_space(&fixture->process);
+    user_caps = process_capabilities(&fixture->process);
 
     if (!space || !user_caps) goto cleanup;
 
-    receive_endpoint_created = endpoint_create(&receive_endpoint);
+    receive_endpoint_created = user_fixture_endpoint_create(fixture, 0U);
 
-    send_endpoint_created = receive_endpoint_created && endpoint_create(&send_endpoint);
+    send_endpoint_created = receive_endpoint_created && user_fixture_endpoint_create(fixture, 1U);
 
     if (!send_endpoint_created) goto cleanup;
 
     kernel_receive_send_cap =
-        capability_insert(kernel_caps, &receive_endpoint, CAPABILITY_TYPE_ENDPOINT, CAPABILITY_RIGHT_SEND,
-            &kernel_receive_send);
+        user_fixture_grant(fixture, true, 0U, CAPABILITY_RIGHT_SEND, &kernel_receive_send);
 
     kernel_receive_receive_cap = kernel_receive_send_cap &&
-        capability_insert(kernel_caps, &receive_endpoint, CAPABILITY_TYPE_ENDPOINT,
-            CAPABILITY_RIGHT_RECEIVE, &kernel_receive_receive);
+        user_fixture_grant(fixture, true, 0U, CAPABILITY_RIGHT_RECEIVE, &kernel_receive_receive);
 
     kernel_send_send_cap = kernel_receive_receive_cap &&
-        capability_insert(kernel_caps, &send_endpoint, CAPABILITY_TYPE_ENDPOINT, CAPABILITY_RIGHT_SEND,
-            &kernel_send_send);
+        user_fixture_grant(fixture, true, 1U, CAPABILITY_RIGHT_SEND, &kernel_send_send);
 
     kernel_send_receive_cap = kernel_send_send_cap &&
-        capability_insert(kernel_caps, &send_endpoint, CAPABILITY_TYPE_ENDPOINT, CAPABILITY_RIGHT_RECEIVE,
-            &kernel_send_receive);
+        user_fixture_grant(fixture, true, 1U, CAPABILITY_RIGHT_RECEIVE, &kernel_send_receive);
 
     user_receive_cap = kernel_send_receive_cap &&
-        capability_insert(user_caps, &receive_endpoint, CAPABILITY_TYPE_ENDPOINT, CAPABILITY_RIGHT_RECEIVE,
-            &user_receive);
+        user_fixture_grant(fixture, false, 0U, CAPABILITY_RIGHT_RECEIVE, &user_receive);
 
     user_send_cap = user_receive_cap &&
-        capability_insert(user_caps, &send_endpoint, CAPABILITY_TYPE_ENDPOINT, CAPABILITY_RIGHT_SEND, &user_send);
+        user_fixture_grant(fixture, false, 1U, CAPABILITY_RIGHT_SEND, &user_send);
 
     if (!user_send_cap) goto cleanup;
 
-    image_loaded = user_elf_load(&process, file, &image);
+    image_loaded = user_fixture_load(fixture, file);
 
     if (!image_loaded) goto cleanup;
-    if (!stress_stack_create(space, &receive_stack, R2_STRESS_STACK_RX, user_receive, JCOS_RTC_MODE_RECEIVE)) {
+    if (!user_fixture_stack_create(fixture, 0U, R2_STRESS_STACK_RX, user_receive, JCOS_RTC_MODE_RECEIVE)) {
         goto cleanup;
     }
-    if (!stress_stack_create(space, &send_stack, R2_STRESS_STACK_TX, user_send, JCOS_RTC_MODE_SEND)) {
+    if (!user_fixture_stack_create(fixture, 1U, R2_STRESS_STACK_TX, user_send, JCOS_RTC_MODE_SEND)) {
         goto cleanup;
     }
-    if (!thread_create(&receive_thread, &process)) {
+    if (!user_fixture_thread_create(fixture, 0U)) {
         goto cleanup;
     }
-    if (!thread_create(&send_thread, &process)) {
+    if (!user_fixture_thread_create(fixture, 1U)) {
         goto cleanup;
     }
-    if (process_thread_count(&process) != 2ULL || !process_thread_contains(&process, &receive_thread) ||
-        !process_thread_contains(&process, &send_thread)) {
+    if (process_thread_count(&fixture->process) != 2ULL || !process_thread_contains(&fixture->process, &fixture->threads[0]) ||
+        !process_thread_contains(&fixture->process, &fixture->threads[1])) {
         goto cleanup;
     }
-    if (!thread_prepare_user(&receive_thread, image.entry, stress_stack_rsp(&receive_stack))) {
+    if (!thread_prepare_user(&fixture->threads[0], fixture->image.entry, user_fixture_stack_rsp(fixture, 0U))) {
         goto cleanup;
     }
-    if (!thread_prepare_user(&send_thread, image.entry, stress_stack_rsp(&send_stack))) {
+    if (!thread_prepare_user(&fixture->threads[1], fixture->image.entry, user_fixture_stack_rsp(fixture, 1U))) {
         goto cleanup;
     }
-    if (!scheduler_add(&receive_thread) || !scheduler_add(&send_thread)) {
+    if (!scheduler_add(&fixture->threads[0]) || !scheduler_add(&fixture->threads[1])) {
         goto cleanup;
     }
 
@@ -401,20 +302,17 @@ static bool stress_iteration(const VfsNode *file, u32 iteration, u32 kernel_caps
      * Control returns to the kernel main Thread.
      */
     if (!stress_schedule_once()) goto cleanup;
-    if (thread_current() != main_thread || receive_thread.state != THREAD_STATE_BLOCKED ||
-        receive_thread.on_run_queue ||
-        !thread_wait_matches(&receive_thread, THREAD_WAIT_IPC_RECEIVE, &receive_endpoint) ||
-        send_thread.state != THREAD_STATE_BLOCKED || send_thread.on_run_queue ||
-        !thread_wait_matches(&send_thread, THREAD_WAIT_IPC_SEND, &send_endpoint) ||
-        !send_endpoint. waiting_sender_message_ready || scheduler_thread_count() != 1ULL) {
+    if (thread_current() != main_thread || fixture->threads[0].state != THREAD_STATE_BLOCKED ||
+        fixture->threads[0].on_run_queue ||
+        !thread_wait_matches(&fixture->threads[0], THREAD_WAIT_IPC_RECEIVE, &fixture->endpoints[0]) ||
+        fixture->threads[1].state != THREAD_STATE_BLOCKED || fixture->threads[1].on_run_queue ||
+        !thread_wait_matches(&fixture->threads[1], THREAD_WAIT_IPC_SEND, &fixture->endpoints[1]) ||
+        !fixture->endpoints[1]. waiting_sender_message_ready || scheduler_thread_count() != 1ULL) {
         goto cleanup;
     }
 
-    bool wake_receive = scenario == R2_STRESS_RX_READY || scenario == R2_STRESS_BOTH_READY ||
-        scenario == R2_STRESS_RX_READY_THEN_CLOSE;
-
-    bool commit_send = scenario == R2_STRESS_TX_COMMITTED || scenario == R2_STRESS_BOTH_READY ||
-        scenario == R2_STRESS_TX_COMMITTED_THEN_CLOSE;
+    bool wake_receive = scenario == R2_STRESS_RX_READY || scenario == R2_STRESS_BOTH_READY || scenario == R2_STRESS_RX_READY_THEN_CLOSE;
+    bool commit_send = scenario == R2_STRESS_TX_COMMITTED || scenario == R2_STRESS_BOTH_READY || scenario == R2_STRESS_TX_COMMITTED_THEN_CLOSE;
 
     bool close_receive = scenario == R2_STRESS_RX_CLOSE_BLOCKED || scenario == R2_STRESS_RX_READY_THEN_CLOSE;
     bool close_send = scenario == R2_STRESS_TX_CLOSE_BLOCKED || scenario == R2_STRESS_TX_COMMITTED_THEN_CLOSE;
@@ -426,8 +324,8 @@ static bool stress_iteration(const VfsNode *file, u32 iteration, u32 kernel_caps
         if (!ipc_try_send(kernel_process, kernel_receive_send, &wake)) {
             goto cleanup;
         }
-        if (receive_thread.state != THREAD_STATE_READY || !receive_thread.on_run_queue ||
-            !thread_wait_matches(&receive_thread, THREAD_WAIT_IPC_RECEIVE, &receive_endpoint)) {
+        if (fixture->threads[0].state != THREAD_STATE_READY || !fixture->threads[0].on_run_queue ||
+            !thread_wait_matches(&fixture->threads[0], THREAD_WAIT_IPC_RECEIVE, &fixture->endpoints[0])) {
             goto cleanup;
         }
     }
@@ -439,43 +337,43 @@ static bool stress_iteration(const VfsNode *file, u32 iteration, u32 kernel_caps
         if (!ipc_try_receive(kernel_process, kernel_send_receive, &old) || !stress_message_matches(&old, true)) {
             goto cleanup;
         }
-        if (send_thread.state != THREAD_STATE_READY || !send_thread.on_run_queue ||
-            !thread_wait_matches(&send_thread, THREAD_WAIT_IPC_SEND, &send_endpoint) ||
-            send_endpoint. waiting_sender_message_ready || !endpoint_message_ready(&send_endpoint)) {
+        if (fixture->threads[1].state != THREAD_STATE_READY || !fixture->threads[1].on_run_queue ||
+            !thread_wait_matches(&fixture->threads[1], THREAD_WAIT_IPC_SEND, &fixture->endpoints[1]) ||
+            fixture->endpoints[1]. waiting_sender_message_ready || !endpoint_message_ready(&fixture->endpoints[1])) {
             goto cleanup;
         }
     }
 
     if (close_receive) {
-        if (!ipc_endpoint_close(&receive_endpoint)) {
+        if (!ipc_endpoint_close(&fixture->endpoints[0])) {
             goto cleanup;
         }
-        if (!endpoint_closed(&receive_endpoint) || receive_thread.state != THREAD_STATE_READY ||
-            !receive_thread.on_run_queue ||
-            !thread_wait_cancelled(&receive_thread, THREAD_WAIT_IPC_RECEIVE, &receive_endpoint)) {
+        if (!endpoint_closed(&fixture->endpoints[0]) || fixture->threads[0].state != THREAD_STATE_READY ||
+            !fixture->threads[0].on_run_queue ||
+            !thread_wait_cancelled(&fixture->threads[0], THREAD_WAIT_IPC_RECEIVE, &fixture->endpoints[0])) {
             goto cleanup;
         }
     }
 
     if (close_send) {
-        if (!ipc_endpoint_close(&send_endpoint)) {
+        if (!ipc_endpoint_close(&fixture->endpoints[1])) {
             goto cleanup;
         }
-        if (!endpoint_closed(&send_endpoint) || send_thread.state != THREAD_STATE_READY || !send_thread.on_run_queue) {
+        if (!endpoint_closed(&fixture->endpoints[1]) || fixture->threads[1].state != THREAD_STATE_READY || !fixture->threads[1].on_run_queue) {
             goto cleanup;
         }
 
         bool should_cancel = !commit_send;
 
-        if (thread_wait_cancelled(&send_thread, THREAD_WAIT_IPC_SEND, &send_endpoint) != should_cancel) {
+        if (thread_wait_cancelled(&fixture->threads[1], THREAD_WAIT_IPC_SEND, &fixture->endpoints[1]) != should_cancel) {
             goto cleanup;
         }
     }
 
     /* Simulate service/process death before either continuation gets another timeslice. */
-    process_quiescent = task_quiesce_process(&process);
+    process_quiescent = user_fixture_quiesce(fixture);
 
-    if (!process_quiescent || process_thread_count(&process) != 0ULL || process_thread_first(&process) ||
+    if (!process_quiescent || process_thread_count(&fixture->process) != 0ULL || process_thread_first(&fixture->process) ||
         capability_table_count(user_caps) != 0U || scheduler_thread_count() != 1ULL ||
         thread_current() != main_thread) {
         goto cleanup;
@@ -491,7 +389,7 @@ static bool stress_iteration(const VfsNode *file, u32 iteration, u32 kernel_caps
 
     /* RECEIVE semantics after killing the owning Process. */
     if (close_receive) {
-        if (!endpoint_closed(&receive_endpoint) || endpoint_message_ready(&receive_endpoint)) {
+        if (!endpoint_closed(&fixture->endpoints[0]) || endpoint_message_ready(&fixture->endpoints[0])) {
             goto cleanup;
         }
 
@@ -501,14 +399,14 @@ static bool stress_iteration(const VfsNode *file, u32 iteration, u32 kernel_caps
         }
 
     } else {
-        if (endpoint_message_ready(&receive_endpoint)) {
+        if (endpoint_message_ready(&fixture->endpoints[0])) {
             goto cleanup;
         }
     }
 
     /* SEND semantics after killing the Process. */
     if (close_send) {
-        if (!endpoint_closed(&send_endpoint) || endpoint_message_ready(&send_endpoint)) {
+        if (!endpoint_closed(&fixture->endpoints[1]) || endpoint_message_ready(&fixture->endpoints[1])) {
             goto cleanup;
         }
 
@@ -523,8 +421,8 @@ static bool stress_iteration(const VfsNode *file, u32 iteration, u32 kernel_caps
         }
     }
 
-    if (endpoint_receiver_waiting(&receive_endpoint) || endpoint_sender_waiting(&receive_endpoint) ||
-        endpoint_receiver_waiting(&send_endpoint) || endpoint_sender_waiting(&send_endpoint)) {
+    if (endpoint_receiver_waiting(&fixture->endpoints[0]) || endpoint_sender_waiting(&fixture->endpoints[0]) ||
+        endpoint_receiver_waiting(&fixture->endpoints[1]) || endpoint_sender_waiting(&fixture->endpoints[1])) {
         goto cleanup;
     }
 
@@ -534,110 +432,17 @@ static bool stress_iteration(const VfsNode *file, u32 iteration, u32 kernel_caps
     if (interrupt_last_user_fault(&fault)) goto cleanup;
     iteration_ok = true;
 
+    behavior_completed = iteration_ok;
+
 cleanup: {
-        /*
-         * Always attempt to make the temporary
-         * Process completely quiescent before
-         * allowing these stack-local objects to
-         * disappear.
-         */
-        bool quiescent = !process_created;
-
-        if (process_created) quiescent = task_quiesce_process(&process);
-        if (!quiescent) {
-            terminal_set_color(terminal_error_color());
-            terminal_writeln("  UNSAFE R2 STRESS CLEANUP.");
-            terminal_writeln("  PROCESS RETAINS LIVE THREAD STATE.");
-            terminal_set_color(terminal_default_color());
-
-            cpu_halt_forever();
-        }
-
-        bool receive_stack_clean = stress_stack_release(space, &receive_stack);
-        bool send_stack_clean = stress_stack_release(space, &send_stack);
-        bool image_clean = !image_loaded;
-
-        if (image_loaded) image_clean = user_elf_unload(&process, &image);
-
-        bool kernel_receive_send_revoked = !kernel_receive_send_cap;
-        bool kernel_receive_receive_revoked = !kernel_receive_receive_cap;
-        bool kernel_send_send_revoked = !kernel_send_send_cap;
-        bool kernel_send_receive_revoked = !kernel_send_receive_cap;
-
-        if (kernel_receive_send_cap) kernel_receive_send_revoked = capability_revoke(kernel_caps, kernel_receive_send);
-        if (kernel_receive_receive_cap) {
-            kernel_receive_receive_revoked = capability_revoke(kernel_caps, kernel_receive_receive);
-        }
-
-        if (kernel_send_send_cap) kernel_send_send_revoked = capability_revoke(kernel_caps, kernel_send_send);
-        if (kernel_send_receive_cap) kernel_send_receive_revoked = capability_revoke(kernel_caps, kernel_send_receive);
-
-        bool kernel_caps_restored = kernel_receive_send_revoked && kernel_receive_receive_revoked &&
-            kernel_send_send_revoked && kernel_send_receive_revoked &&
+        bool pass = user_fixture_finish(fixture, behavior_completed);
+        return pass && pmm_stats().free_pages == frame_baseline &&
             capability_table_count(kernel_caps) == kernel_caps_baseline;
-
-        /* If setup failed before the semantic checks drained an open mailbox, discard it now. */
-        if (receive_endpoint_created && !endpoint_closed(&receive_endpoint) &&
-            !endpoint_receiver_waiting(&receive_endpoint) && !endpoint_sender_waiting(&receive_endpoint) &&
-            endpoint_message_ready(&receive_endpoint)) {
-            IpcMessage discard;
-
-            k_memset(&discard, 0, sizeof(discard));
-
-            (void)endpoint_try_receive(&receive_endpoint, &discard);
-        }
-
-        if (send_endpoint_created && !endpoint_closed(&send_endpoint) &&
-            !endpoint_receiver_waiting(&send_endpoint) && !endpoint_sender_waiting(&send_endpoint) &&
-            endpoint_message_ready(&send_endpoint)) {
-            IpcMessage discard;
-
-            k_memset(&discard, 0, sizeof(discard));
-
-            (void)endpoint_try_receive(&send_endpoint, &discard);
-        }
-
-        bool receive_endpoint_clean = !receive_endpoint_created;
-
-        if (receive_endpoint_created && kernel_receive_send_revoked && kernel_receive_receive_revoked) {
-            receive_endpoint_clean = endpoint_destroy(&receive_endpoint);
-        }
-
-        bool send_endpoint_clean = !send_endpoint_created;
-
-        if (send_endpoint_created && kernel_send_send_revoked && kernel_send_receive_revoked) {
-            send_endpoint_clean = endpoint_destroy(&send_endpoint);
-        }
-
-        bool process_clean = !process_created;
-
-        if (process_created && receive_stack_clean && send_stack_clean && image_clean &&
-            kernel_caps_restored && receive_endpoint_clean && send_endpoint_clean) {
-            process_clean = process_destroy(&process);
-        }
-
-        PmmStats after = pmm_stats();
-        bool frames_restored = after.free_pages == frame_baseline;
-        bool scheduler_restored = scheduler_thread_count() == 1ULL && thread_current() == main_thread;
-        bool supervisor_ok = process_clean && stress_supervisor_ping(iteration);
-
-        return (
-            iteration_ok &&
-            receive_stack_clean &&
-            send_stack_clean &&
-            image_clean &&
-            kernel_caps_restored &&
-            receive_endpoint_clean &&
-            send_endpoint_clean &&
-            process_clean &&
-            frames_restored &&
-            scheduler_restored &&
-            supervisor_ok
-        );
     }
 }
 
 void r2_stress_test_run(void) {
+    if (!user_fixture_available()) return;
     terminal_writeln("R2 LIFETIME STRESS TEST:");
 
     Thread *main_thread = thread_current();
@@ -692,7 +497,7 @@ void r2_stress_test_run(void) {
     bool frames_restored = before.free_pages == after.free_pages;
     bool caps_restored = capability_table_count(kernel_caps) == kernel_caps_baseline;
     bool scheduler_restored = scheduler_thread_count() == 1ULL && thread_current() == main_thread;
-    bool supervisor_final = stress_supervisor_ping(R2_STRESS_ITERATIONS + 1U);
+    bool supervisor_final = !user_fixture_busy() && stress_supervisor_ping(R2_STRESS_ITERATIONS + 1U);
     terminal_write("  FREE AFTER: ");
     terminal_write_u64(after.free_pages);
     terminal_putchar('\n');

@@ -1,4 +1,5 @@
 #include "user_ipc_cancel_test.h"
+#include "user_test_fixture.h"
 
 #include "address_space.h"
 #include "capability.h"
@@ -32,10 +33,7 @@ typedef enum {
 } RuntimeCancelCase;
 
 static void print_test(const char *name, bool pass) {
-    terminal_write("  ");
-    terminal_write(name);
-    terminal_write(": ");
-    terminal_writeln(pass ? "PASS" : "FAILED");
+    user_fixture_check(name, pass);
 }
 
 static u64 interrupt_save(void) {
@@ -111,15 +109,6 @@ static bool receive_outputs_zero(const volatile JcosRuntimeCancelTestResult *res
     );
 }
 
-static bool endpoint_references_thread(const Endpoint *endpoint, const Thread *thread) {
-    if (!endpoint || !thread) return false;
-
-    return (
-        endpoint->waiting_receiver == thread ||
-        endpoint->waiting_sender == thread
-    );
-}
-
 static bool run_case(const VfsNode *file, RuntimeCancelCase test_case) {
     const bool receive_case = test_case == RTC_CASE_RECEIVE_CANCEL;
     const bool committed_case = test_case == RTC_CASE_SEND_COMMITTED_CLOSE;
@@ -132,7 +121,6 @@ static bool run_case(const VfsNode *file, RuntimeCancelCase test_case) {
 
     } else terminal_writeln(" UNCOMMITTED SEND CANCELLATION:");
 
-    PmmStats before = pmm_stats();
     Process *kernel_process = process_kernel();
     CapabilityTable *kernel_caps = kernel_process ? process_capabilities(kernel_process) : 0;
 
@@ -141,7 +129,6 @@ static bool run_case(const VfsNode *file, RuntimeCancelCase test_case) {
         return false;
     }
 
-    u32 kernel_caps_before = capability_table_count(kernel_caps);
     Thread *main_thread = thread_current();
 
     bool main_ok = main_thread && main_thread->process == kernel_process &&
@@ -152,22 +139,15 @@ static bool run_case(const VfsNode *file, RuntimeCancelCase test_case) {
 
     if (!main_ok) return false;
 
-    Process process;
-    Endpoint endpoint;
-    UserElfImage image;
-    Thread user;
-
-    k_memset(&process, 0, sizeof(process));
-    k_memset(&endpoint, 0, sizeof(endpoint));
-    k_memset(&image, 0, sizeof(image));
-    k_memset(&user, 0, sizeof(user));
+    UserTestFixture *fixture = user_fixture_begin("USER IPC CANCELLATION CASE");
+    if (!fixture) return false;
+    bool behavior_completed = false;
 
     CapabilityTable *user_caps = 0;
     AddressSpace *space = 0;
     CapabilityHandle user_handle = CAPABILITY_INVALID_HANDLE;
     CapabilityHandle kernel_send_handle = CAPABILITY_INVALID_HANDLE;
     CapabilityHandle kernel_receive_handle = CAPABILITY_INVALID_HANDLE;
-    frame_t stack_frame = FRAME_INVALID;
     bool process_created = false;
     bool endpoint_created = false;
     bool user_cap = false;
@@ -198,12 +178,12 @@ static bool run_case(const VfsNode *file, RuntimeCancelCase test_case) {
 
     volatile JcosRuntimeCancelTestResult *result = 0;
 
-    process_created = process_create(&process);
-    endpoint_created = process_created && endpoint_create(&endpoint);
+    process_created = user_fixture_process_create(fixture);
+    endpoint_created = process_created && user_fixture_endpoint_create(fixture, 0U);
 
     if (process_created) {
-        space = process_address_space(&process);
-        user_caps = process_capabilities(&process);
+        space = process_address_space(&fixture->process);
+        user_caps = process_capabilities(&fixture->process);
     }
 
     bool setup_base = process_created && endpoint_created && space && user_caps;
@@ -213,15 +193,16 @@ static bool run_case(const VfsNode *file, RuntimeCancelCase test_case) {
     if (!setup_base) goto cleanup;
 
     CapabilityRights user_right = receive_case ? CAPABILITY_RIGHT_RECEIVE : CAPABILITY_RIGHT_SEND;
-    user_cap = capability_insert(user_caps, &endpoint, CAPABILITY_TYPE_ENDPOINT, user_right, &user_handle);
+    user_cap = user_fixture_grant(fixture, false, 0U,
+            user_right, &user_handle);
 
     if (!receive_case) {
-        kernel_send_cap = capability_insert(kernel_caps, &endpoint, CAPABILITY_TYPE_ENDPOINT,
+        kernel_send_cap = user_fixture_grant(fixture, true, 0U,
             CAPABILITY_RIGHT_SEND, &kernel_send_handle);
 
         kernel_receive_cap = kernel_send_cap &&
-            capability_insert(kernel_caps, &endpoint, CAPABILITY_TYPE_ENDPOINT, CAPABILITY_RIGHT_RECEIVE,
-                &kernel_receive_handle);
+            user_fixture_grant(fixture, true, 0U,
+            CAPABILITY_RIGHT_RECEIVE, &kernel_receive_handle);
     }
 
     bool caps_ok = user_cap && (receive_case || (kernel_send_cap && kernel_receive_cap));
@@ -230,7 +211,7 @@ static bool run_case(const VfsNode *file, RuntimeCancelCase test_case) {
 
     if (!caps_ok) goto cleanup;
 
-    image_loaded = user_elf_load(&process, file, &image);
+    image_loaded = user_fixture_load(fixture, file);
 
     print_test("ELF LOAD", image_loaded);
 
@@ -249,16 +230,15 @@ static bool run_case(const VfsNode *file, RuntimeCancelCase test_case) {
 
     if (!result_ready) goto cleanup;
 
-    stack_frame = frame_alloc();
-    stack_allocated = stack_frame != FRAME_INVALID;
+    stack_allocated = user_fixture_stack_allocate(fixture, 0U, USER_RTC_STACK);
 
     if (!stack_allocated) goto cleanup;
 
-    stack_mapped = address_space_map_page(space, USER_RTC_STACK, stack_frame, VM_WRITE);
+    stack_mapped = user_fixture_stack_map(fixture, 0U);
 
     if (!stack_mapped) goto cleanup;
 
-    u8 *stack = (u8 *)phys_to_virt(frame_to_phys(stack_frame));
+    u8 *stack = (u8 *)phys_to_virt(frame_to_phys(fixture->stacks[0].frame));
 
     if (!stack) goto cleanup;
 
@@ -271,13 +251,13 @@ static bool run_case(const VfsNode *file, RuntimeCancelCase test_case) {
     startup[0] = user_handle;
     startup[1] = receive_case ? JCOS_RTC_MODE_RECEIVE : JCOS_RTC_MODE_SEND;
 
-    thread_created = thread_create(&user, &process);
+    thread_created = user_fixture_thread_create(fixture, 0U);
 
     if (!thread_created) goto cleanup;
 
-    u64 expected_thread_id = user.id;
-    bool prepared = thread_prepare_user(&user, image.entry, initial_rsp);
-    queued = prepared && scheduler_add(&user);
+    u64 expected_thread_id = fixture->threads[0].id;
+    bool prepared = thread_prepare_user(&fixture->threads[0], fixture->image.entry, initial_rsp);
+    queued = prepared && scheduler_add(&fixture->threads[0]);
     print_test("USER THREAD READY", queued);
 
     if (!queued) goto cleanup;
@@ -297,15 +277,15 @@ static bool run_case(const VfsNode *file, RuntimeCancelCase test_case) {
 
     if (receive_case) {
         blocked = first_schedule && result->phase == JCOS_RTC_PHASE_WAITING &&
-            user.state == THREAD_STATE_BLOCKED && !user.on_run_queue &&
-            endpoint.waiting_receiver == &user &&
-            thread_wait_matches(&user, THREAD_WAIT_IPC_RECEIVE, &endpoint);
+            fixture->threads[0].state == THREAD_STATE_BLOCKED && !fixture->threads[0].on_run_queue &&
+            fixture->endpoints[0].waiting_receiver == &fixture->threads[0] &&
+            thread_wait_matches(&fixture->threads[0], THREAD_WAIT_IPC_RECEIVE, &fixture->endpoints[0]);
 
     } else {
         blocked = first_schedule && result->phase == JCOS_RTC_PHASE_WAITING &&
-            user.state == THREAD_STATE_BLOCKED && !user.on_run_queue && endpoint.waiting_sender == &user &&
-            endpoint. waiting_sender_message_ready &&
-            thread_wait_matches(&user, THREAD_WAIT_IPC_SEND, &endpoint);
+            fixture->threads[0].state == THREAD_STATE_BLOCKED && !fixture->threads[0].on_run_queue && fixture->endpoints[0].waiting_sender == &fixture->threads[0] &&
+            fixture->endpoints[0]. waiting_sender_message_ready &&
+            thread_wait_matches(&fixture->threads[0], THREAD_WAIT_IPC_SEND, &fixture->endpoints[0]);
     }
 
     print_test("USER BLOCKED", blocked);
@@ -324,34 +304,34 @@ static bool run_case(const VfsNode *file, RuntimeCancelCase test_case) {
         k_memset(&received, 0, sizeof(received));
         bool old_received = ipc_try_receive(kernel_process, kernel_receive_handle, &received);
 
-        committed = old_received && prefill_matches(&received) && user.state == THREAD_STATE_READY &&
-            user.on_run_queue && endpoint.waiting_sender == &user &&
-            !endpoint. waiting_sender_message_ready && endpoint_message_ready(&endpoint) &&
-            !thread_wait_cancelled(&user, THREAD_WAIT_IPC_SEND, &endpoint);
+        committed = old_received && prefill_matches(&received) && fixture->threads[0].state == THREAD_STATE_READY &&
+            fixture->threads[0].on_run_queue && fixture->endpoints[0].waiting_sender == &fixture->threads[0] &&
+            !fixture->endpoints[0]. waiting_sender_message_ready && endpoint_message_ready(&fixture->endpoints[0]) &&
+            !thread_wait_cancelled(&fixture->threads[0], THREAD_WAIT_IPC_SEND, &fixture->endpoints[0]);
 
         print_test("SEND COMMITTED", committed);
         if (!committed) goto cleanup;
     }
 
-    close_ok = ipc_endpoint_close(&endpoint);
+    close_ok = ipc_endpoint_close(&fixture->endpoints[0]);
     print_test("ENDPOINT CLOSE", close_ok);
     if (!close_ok) goto cleanup;
 
     bool expected_cancelled = !committed_case;
 
     if (receive_case) {
-        wake_reserved = endpoint_closed(&endpoint) && user.state == THREAD_STATE_READY &&
-            user.on_run_queue && endpoint.waiting_receiver == &user &&
-            thread_wait_matches(&user, THREAD_WAIT_IPC_RECEIVE, &endpoint);
+        wake_reserved = endpoint_closed(&fixture->endpoints[0]) && fixture->threads[0].state == THREAD_STATE_READY &&
+            fixture->threads[0].on_run_queue && fixture->endpoints[0].waiting_receiver == &fixture->threads[0] &&
+            thread_wait_matches(&fixture->threads[0], THREAD_WAIT_IPC_RECEIVE, &fixture->endpoints[0]);
 
-        cancellation_state = thread_wait_cancelled(&user, THREAD_WAIT_IPC_RECEIVE, &endpoint) == expected_cancelled;
+        cancellation_state = thread_wait_cancelled(&fixture->threads[0], THREAD_WAIT_IPC_RECEIVE, &fixture->endpoints[0]) == expected_cancelled;
 
     } else {
-        wake_reserved = endpoint_closed(&endpoint) && user.state == THREAD_STATE_READY &&
-            user.on_run_queue && endpoint.waiting_sender == &user &&
-            thread_wait_matches(&user, THREAD_WAIT_IPC_SEND, &endpoint);
+        wake_reserved = endpoint_closed(&fixture->endpoints[0]) && fixture->threads[0].state == THREAD_STATE_READY &&
+            fixture->threads[0].on_run_queue && fixture->endpoints[0].waiting_sender == &fixture->threads[0] &&
+            thread_wait_matches(&fixture->threads[0], THREAD_WAIT_IPC_SEND, &fixture->endpoints[0]);
 
-        cancellation_state = thread_wait_cancelled(&user, THREAD_WAIT_IPC_SEND, &endpoint) == expected_cancelled;
+        cancellation_state = thread_wait_cancelled(&fixture->threads[0], THREAD_WAIT_IPC_SEND, &fixture->endpoints[0]) == expected_cancelled;
     }
 
     print_test("WAKE RESERVATION KEPT", wake_reserved);
@@ -367,8 +347,8 @@ static bool run_case(const VfsNode *file, RuntimeCancelCase test_case) {
      * The resumed continuation still owns the
      * lifetime reservation.
      */
-    destroy_before_resume_rejected = !endpoint_destroy(&endpoint);
-    thread_destroy_before_resume_rejected = !thread_destroy(&user);
+    destroy_before_resume_rejected = !endpoint_destroy(&fixture->endpoints[0]);
+    thread_destroy_before_resume_rejected = !thread_destroy(&fixture->threads[0]);
 
     print_test("EARLY ENDPOINT DESTROY REJECTED", destroy_before_resume_rejected);
     print_test("EARLY THREAD DESTROY REJECTED", thread_destroy_before_resume_rejected);
@@ -393,14 +373,14 @@ static bool run_case(const VfsNode *file, RuntimeCancelCase test_case) {
 
     if (receive_case) receive_cleared = receive_outputs_zero(result);
 
-    wait_released = !thread_wait_active(&user);
+    wait_released = !thread_wait_active(&fixture->threads[0]);
 
-    user_dead = user.state == THREAD_STATE_DEAD && !user.on_run_queue && !user.interrupt_context_ready &&
-        !user.interrupt_rsp;
+    user_dead = fixture->threads[0].state == THREAD_STATE_DEAD && !fixture->threads[0].on_run_queue && !fixture->threads[0].interrupt_context_ready &&
+        !fixture->threads[0].interrupt_rsp;
 
-    endpoint_idle = endpoint_closed(&endpoint) && !endpoint_message_ready(&endpoint) &&
-        !endpoint_receiver_waiting(&endpoint) && !endpoint_sender_waiting(&endpoint) &&
-        !endpoint. waiting_sender_message_ready;
+    endpoint_idle = endpoint_closed(&fixture->endpoints[0]) && !endpoint_message_ready(&fixture->endpoints[0]) &&
+        !endpoint_receiver_waiting(&fixture->endpoints[0]) && !endpoint_sender_waiting(&fixture->endpoints[0]) &&
+        !fixture->endpoints[0]. waiting_sender_message_ready;
 
     UserFaultInfo fault;
 
@@ -418,119 +398,21 @@ static bool run_case(const VfsNode *file, RuntimeCancelCase test_case) {
     print_test("ENDPOINT QUIESCENT", endpoint_idle);
     print_test("NO USER FAULT", !fault_captured);
 
-cleanup: {
-        bool reserved = thread_created && (endpoint_references_thread(&endpoint, &user) || thread_wait_active(&user));
-        bool thread_reaped = !thread_created;
-
-        if (thread_created && thread_current() != &user && !reserved && user.state != THREAD_STATE_BLOCKED) {
-            if (user.on_run_queue) {
-                u64 flags = interrupt_save();
-                bool removed = scheduler_remove(&user);
-
-                interrupt_restore(flags);
-
-                if (!removed) thread_reaped = false;
-            }
-            if (!user.on_run_queue && user.state != THREAD_STATE_RUNNING && user.state != THREAD_STATE_BLOCKED) {
-                thread_reaped = thread_destroy(&user);
-            }
-        }
-
-        bool safe = !thread_created || thread_reaped;
-        bool stack_clean = !stack_allocated;
-
-        if (safe && stack_mapped) {
-            frame_t old = FRAME_INVALID;
-            bool unmapped = address_space_unmap_page(space, USER_RTC_STACK, &old);
-
-            if (unmapped && old == stack_frame) {
-                stack_mapped = false;
-
-                stack_clean = frame_free(stack_frame);
-            }
-
-        } else if (safe && stack_allocated && !stack_mapped) {
-            stack_clean = frame_free(stack_frame);
-        }
-
-        bool image_clean = !image_loaded;
-
-        if (safe && image_loaded) {
-            image_clean = user_elf_unload(&process, &image);
-        }
-
-        /* For pre-close setup failures, drain a normal open mailbox if no waiter owns it. */
-        if (safe && endpoint_created && !endpoint_closed(&endpoint) &&
-            !endpoint_receiver_waiting(&endpoint) && !endpoint_sender_waiting(&endpoint) &&
-            endpoint_message_ready(&endpoint)) {
-
-            IpcMessage discard;
-            k_memset(&discard, 0, sizeof(discard));
-            (void)endpoint_try_receive(&endpoint, &discard);
-        }
-
-        bool user_cap_revoked = !user_cap;
-
-        if (safe && user_cap && user_caps) {
-            user_cap_revoked = capability_revoke(user_caps, user_handle);
-        }
-
-        bool kernel_send_revoked = !kernel_send_cap;
-
-        if (safe && kernel_send_cap) {
-            kernel_send_revoked = capability_revoke(kernel_caps, kernel_send_handle);
-        }
-
-        bool kernel_receive_revoked = !kernel_receive_cap;
-
-        if (safe && kernel_receive_cap) {
-            kernel_receive_revoked = capability_revoke(kernel_caps, kernel_receive_handle);
-        }
-
-        bool caps_clean = (!user_caps || capability_table_count(user_caps) == 0U) &&
-            capability_table_count(kernel_caps) == kernel_caps_before;
-
-        bool endpoint_clean = !endpoint_created;
-
-        if (safe && endpoint_created && user_cap_revoked && kernel_send_revoked && kernel_receive_revoked &&
-            caps_clean) {
-            endpoint_clean = endpoint_destroy(&endpoint);
-        }
-
-        bool process_clean = !process_created;
-
-        if (safe && process_created && thread_reaped && stack_clean && image_clean && caps_clean && endpoint_clean) {
-            process_clean = process_destroy(&process);
-        }
-
-        PmmStats after = pmm_stats();
-        bool frames_restored = before.free_pages == after.free_pages;
-
-        print_test("CLEANUP", thread_reaped && stack_clean && image_clean && caps_clean && endpoint_clean && process_clean);
-
-        print_test("FRAME COUNT RESTORED", frames_restored);
-
-        bool pass = main_ok && setup_base && caps_ok && image_loaded && result_ready && stack_allocated &&
+    behavior_completed = main_ok && setup_base && caps_ok && image_loaded && result_ready && stack_allocated &&
             thread_created && queued && prefilled && blocked && committed && close_ok && wake_reserved &&
             cancellation_state && destroy_before_resume_rejected && thread_destroy_before_resume_rejected &&
             resumed && completed && blocking_result_ok && retries_rejected && receive_cleared &&
-            wait_released && user_dead && endpoint_idle && !fault_captured && thread_reaped &&
-            stack_clean && image_clean && caps_clean && endpoint_clean && process_clean && frames_restored;
+            wait_released && user_dead && endpoint_idle && !fault_captured;
 
+cleanup: {
+        bool pass = user_fixture_finish(fixture, behavior_completed);
         print_test("CASE RESULT", pass);
-
-        if (!safe) {
-            terminal_set_color(terminal_error_color());
-            terminal_writeln("  LIVE IPC RESERVATION REMAINS.");
-            terminal_writeln("  REBOOT BEFORE MORE TESTING.");
-            terminal_set_color(terminal_default_color());
-        }
-
         return pass;
     }
 }
 
 void user_ipc_cancel_test_run(void) {
+    if (!user_fixture_available()) return;
     terminal_writeln("USER IPC CANCELLATION TEST:");
 
     PmmStats before = pmm_stats();

@@ -40,7 +40,6 @@ typedef struct {
     bool user_receive_cap;
     bool user_send_cap;
     bool thread_created;
-    bool image_loaded;
     bool stack_frame_allocated;
     bool stack_mapped;
     bool active;
@@ -76,87 +75,73 @@ static bool supervisor_schedule_once(void) {
 }
 
 static bool supervisor_release(void) {
-    bool result = true;
     AddressSpace *space = g_supervisor.process_created ? process_address_space(&g_supervisor.process) : 0;
 
-    /* Never destroy a live/queued/waiting supervisor thread through this path. */
     if (g_supervisor.thread_created) {
         if (thread_current() == &g_supervisor.thread || g_supervisor.thread.on_run_queue ||
             g_supervisor.thread.state == THREAD_STATE_RUNNING ||
-            g_supervisor.thread.state == THREAD_STATE_BLOCKED) {
-            return false;
-        }
-
-        if (!thread_destroy(&g_supervisor.thread)) result = false;
-        else g_supervisor.thread_created = false;
+            g_supervisor.thread.state == THREAD_STATE_BLOCKED) return false;
+        if (!thread_destroy(&g_supervisor.thread)) return false;
+        g_supervisor.thread_created = false;
     }
 
-    frame_t ignored = FRAME_INVALID;
-
-    ignored = FRAME_INVALID;
-
-    if (g_supervisor.stack_mapped && space) {
-        if (!address_space_unmap_page(space, SUPERVISOR_USER_STACK, &ignored)) result = false;
-        else g_supervisor.stack_mapped = false;
+    if (g_supervisor.stack_mapped) {
+        frame_t mapped = FRAME_INVALID;
+        frame_t old = FRAME_INVALID;
+        if (!space || !address_space_query_page(space, SUPERVISOR_USER_STACK, &mapped, 0) || mapped != g_supervisor.stack_frame) return false;
+        if (!address_space_unmap_page(space, SUPERVISOR_USER_STACK, &old)) return false;
+        g_supervisor.stack_mapped = false;
+        if (old != g_supervisor.stack_frame) return false;
     }
-
     if (g_supervisor.stack_frame_allocated) {
-        if (!frame_free(g_supervisor.stack_frame)) result = false;
-        else g_supervisor.stack_frame_allocated = false;
+        if (!frame_free(g_supervisor.stack_frame)) return false;
+        g_supervisor.stack_frame_allocated = false;
     }
 
-    if (g_supervisor.image_loaded) {
-        if (!user_elf_unload(&g_supervisor.process, &g_supervisor.image)) result = false;
-        else g_supervisor.image_loaded = false;
-    }
+    /* Failed load rollback can own pages even though load returned false. */
+    if (user_elf_needs_cleanup(&g_supervisor.image) && !user_elf_unload(&g_supervisor.process, &g_supervisor.image)) return false;
 
     Process *kernel_process = process_kernel();
     CapabilityTable *kernel_caps = kernel_process ? process_capabilities(kernel_process) : 0;
     CapabilityTable *user_caps = g_supervisor.process_created ? process_capabilities(&g_supervisor.process) : 0;
 
     if (g_supervisor.kernel_send_cap) {
-        if (!kernel_caps || !capability_revoke(kernel_caps, g_supervisor.kernel_send_handle)) result = false;
-        else g_supervisor.kernel_send_cap = false;
+        if (!kernel_caps || !capability_revoke(kernel_caps, g_supervisor.kernel_send_handle)) return false;
+        g_supervisor.kernel_send_cap = false;
     }
-
     if (g_supervisor.kernel_receive_cap) {
-        if (!kernel_caps || !capability_revoke(kernel_caps, g_supervisor.kernel_receive_handle)) result = false;
-        else g_supervisor.kernel_receive_cap = false;
+        if (!kernel_caps || !capability_revoke(kernel_caps, g_supervisor.kernel_receive_handle)) return false;
+        g_supervisor.kernel_receive_cap = false;
     }
-
     if (g_supervisor.user_receive_cap) {
-        if (!user_caps || !capability_revoke(user_caps, g_supervisor.user_receive_handle)) result = false;
-        else g_supervisor.user_receive_cap = false;
+        if (!user_caps || !capability_revoke(user_caps, g_supervisor.user_receive_handle)) return false;
+        g_supervisor.user_receive_cap = false;
     }
-
     if (g_supervisor.user_send_cap) {
-        if (!user_caps || !capability_revoke(user_caps, g_supervisor.user_send_handle)) result = false;
-        else g_supervisor.user_send_cap = false;
+        if (!user_caps || !capability_revoke(user_caps, g_supervisor.user_send_handle)) return false;
+        g_supervisor.user_send_cap = false;
     }
-
     if (g_supervisor.command_created) {
-        if (!endpoint_destroy(&g_supervisor.command_endpoint)) result = false;
-        else g_supervisor.command_created = false;
+        if (!endpoint_destroy(&g_supervisor.command_endpoint)) return false;
+        g_supervisor.command_created = false;
     }
-
     if (g_supervisor.reply_created) {
-        if (!endpoint_destroy(&g_supervisor.reply_endpoint)) result = false;
-        else g_supervisor.reply_created = false;
+        if (!endpoint_destroy(&g_supervisor.reply_endpoint)) return false;
+        g_supervisor.reply_created = false;
     }
-
     if (g_supervisor.process_created) {
-        if (!process_destroy(&g_supervisor.process)) result = false;
-        else g_supervisor.process_created = false;
+        if (!process_destroy(&g_supervisor.process)) return false;
+        g_supervisor.process_created = false;
     }
-
-    if (result) k_memset(&g_supervisor, 0, sizeof(g_supervisor));
-    return result;
+    k_memset(&g_supervisor, 0, sizeof(g_supervisor));
+    return true;
 }
 
 bool supervisor_start(void) {
     if (g_supervisor.active) return false;
 
-    k_memset(&g_supervisor, 0, sizeof(g_supervisor));
+    /* Retry retained cleanup instead of erasing a failed prior startup. */
+    if (!supervisor_release()) return false;
 
     Process *kernel_process = process_kernel();
     Thread *current = thread_current();
@@ -222,7 +207,6 @@ bool supervisor_start(void) {
     if (!file || file->type != VFS_FILE || !file->data || !file->size) goto fail;
     if (!user_elf_load(&g_supervisor.process, file, &g_supervisor.image)) goto fail;
 
-    g_supervisor.image_loaded = true;
     g_supervisor.stack_frame = frame_alloc();
 
     if (g_supervisor.stack_frame == FRAME_INVALID) goto fail;
@@ -306,14 +290,15 @@ bool supervisor_ping(u64 cookie, u64 *out_cookie) {
 }
 
 bool supervisor_stop(void) {
-    if (!g_supervisor.active) return false;
+    if (!g_supervisor.active) {
+        return g_supervisor.process_created && supervisor_release();
+    }
 
     Process *kernel_process = process_kernel();
 
     if (!kernel_process) return false;
 
     IpcMessage request;
-
     k_memset(&request, 0, sizeof(request));
 
     request.word_count = 1U;

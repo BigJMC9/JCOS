@@ -27,11 +27,21 @@ typedef struct {
      */
     u16 owned_pml4_first;
     u16 owned_pml4_end;
+    bool destroy_pending;
+    /* Exported kernel subtrees are pinned for boot lifetime in this profile. */
+    bool shared_source;
 } VmPageMap;
 
 bool vmm_page_map_create(VmPageMap *map);
 
-void vmm_page_map_destroy(VmPageMap *map);
+/* Retryable, empty-owned-tree destruction. Never frees leaf DATA frames.
+ * false retains root and all unreleased tables. Do not reuse live map storage.
+ * Only inactive, non-exported maps on the UP/no-PCID profile are reclaimable. */
+bool vmm_page_map_destroy(VmPageMap *map);
+/* Retry optional empty-table pruning; live DATA mappings remain untouched. */
+bool vmm_page_map_collect(VmPageMap *map);
+/* One bounded VMM-owned quarantine slot for a never-linked allocation. */
+bool vmm_reclaim_unlinked_table(void);
 
 bool vmm_map_page(
     VmPageMap *map, 
@@ -40,6 +50,9 @@ bool vmm_map_page(
     vm_flags_t flags
 );
 
+/* true means leaf removal committed, even if optional table pruning was
+ * deferred. The returned DATA frame belongs to the caller. A collector or
+ * retryable destroy later reclaims empty tables retained in the tree. */
 bool vmm_unmap_page(
     VmPageMap *map, 
     u64 virtual_address, 
@@ -76,7 +89,7 @@ bool vmm_page_map_create_owned_range(
 
 bool vmm_page_map_share_pml4_entry(
     VmPageMap *destination,
-    const VmPageMap *source,
+    VmPageMap *source,
     u16 index
 );
 

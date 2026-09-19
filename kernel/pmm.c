@@ -1,6 +1,8 @@
 #include "pmm.h"
 #include "lib.h"
 #include "physmap.h"
+#include "interrupts.h"
+#include "pmm_test.h"
 
 #define EFI_CONVENTIONAL_MEMORY 7U
 
@@ -37,6 +39,23 @@ static u64 g_bitmap_page_count;
 static u64 g_next_hint;
 static bool g_initialized;
 static bool g_use_phys_map;
+
+/* UP-only serialization; PMM is not callable from NMI/emergency context. */
+static u64 pmm_irq_save(void) {
+    u64 flags;
+    __asm__ volatile ("pushfq; popq %0" : "=r"(flags) : : "memory");
+    interrupts_disable();
+    return flags;
+}
+
+static void pmm_irq_restore(u64 flags) {
+    if (flags & (1ULL << 9)) interrupts_enable();
+}
+
+/* Exact-range, one-shot test fault. Never armed by a userspace ABI. */
+static bool g_free_fault_armed;
+static frame_t g_free_fault_first;
+static u64 g_free_fault_count;
 
 /* Alignment helpers. */
 static bool align_up_page(u64 value, u64 *result) {
@@ -115,6 +134,7 @@ frame_t phys_to_frame(u64 physical) {
 bool pmm_init(const BootInfo *boot) {
     g_initialized = false;
     g_use_phys_map = false;
+    g_free_fault_armed = false;
 
     g_bitmap = 0;
     g_base_frame = FRAME_INVALID;
@@ -320,7 +340,7 @@ bool pmm_phys_map_access_enabled(void) {
         g_use_phys_map;
 }
 
-frame_t frame_alloc(void) {
+static frame_t frame_alloc_locked(void) {
     if (!g_initialized || !g_bitmap || !g_bitmap_bits || !g_stats.free_pages) return FRAME_INVALID;
 
     u64 index = g_next_hint;
@@ -344,31 +364,92 @@ frame_t frame_alloc(void) {
     return FRAME_INVALID;
 }
 
-bool frame_free(frame_t frame) {
-    if (!g_initialized || frame == FRAME_INVALID) return false;
+frame_t frame_alloc(void) {
+    u64 flags = pmm_irq_save();
+    frame_t frame = frame_alloc_locked();
+    pmm_irq_restore(flags);
+    return frame;
+}
 
-    /* Reject frames outside memory PMM owns. */
-    if (!frame_managed(frame)) return false;
+/* Validate the whole span before any bitmap, count, or hint mutation. */
+static bool free_range_valid(frame_t first, u64 count) {
+    if (!g_initialized || !g_bitmap || !count || first == FRAME_INVALID) return false;
+    if (first < g_base_frame || first > ~0ULL / FRAME_SIZE) return false;
+    if (count - 1ULL > (~0ULL / FRAME_SIZE) - first) return false;
 
-    /* PMM metadata can never be freed. */
-    if (frame_is_bitmap(frame)) return false;
+    u64 index = frame_bitmap_index(first);
+    if (index >= g_bitmap_bits || count > g_bitmap_bits - index) return false;
+    if (g_stats.free_pages > g_stats.total_pages) return false;
+    if (count > g_stats.total_pages - g_stats.free_pages) return false;
 
-    u64 index = frame_bitmap_index(frame);
-    if (index >= g_bitmap_bits) return false;
-
-    /* Already clear means this is a double free. */
-    if (!bitmap_used(index)) return false;
-
-    bitmap_clear(index);
-    ++g_stats.free_pages;
-
-    /* Prefer the newly freed frame on the next allocation. Makes reuse behavior deterministic for our PMM self-test. */
-    g_next_hint = index;
+    for (u64 i = 0; i < count; ++i) {
+        frame_t frame = first + i;
+        if (!frame_managed(frame) || frame_is_bitmap(frame)) return false;
+        if (!bitmap_used(index + i)) return false;
+    }
     return true;
 }
 
+bool frame_free_range(frame_t first, u64 count) {
+    u64 flags = pmm_irq_save();
+    if (!free_range_valid(first, count)) {
+        pmm_irq_restore(flags);
+        return false;
+    }
+
+    if (g_free_fault_armed && first == g_free_fault_first && count == g_free_fault_count) {
+        g_free_fault_armed = false;
+        pmm_irq_restore(flags);
+        return false;
+    }
+
+    /* Commit: no allocation, callback, yielding, or fallible operation. */
+    u64 index = frame_bitmap_index(first);
+    for (u64 i = 0; i < count; ++i) bitmap_clear(index + i);
+    g_stats.free_pages += count;
+    g_next_hint = index;
+    pmm_irq_restore(flags);
+    return true;
+}
+
+bool frame_free(frame_t frame) {
+    return frame_free_range(frame, 1ULL);
+}
+
+bool pmm_test_fail_free_range_once(frame_t first, u64 count) {
+    u64 flags = pmm_irq_save();
+    bool valid = !g_free_fault_armed && free_range_valid(first, count);
+    if (valid) {
+        g_free_fault_first = first;
+        g_free_fault_count = count;
+        g_free_fault_armed = true;
+    }
+    pmm_irq_restore(flags);
+    return valid;
+}
+
+bool pmm_test_free_failure_armed(void) {
+    u64 flags = pmm_irq_save();
+    bool armed = g_free_fault_armed;
+    pmm_irq_restore(flags);
+    return armed;
+}
+
+void pmm_test_clear_free_failure(void) {
+    u64 flags = pmm_irq_save();
+    g_free_fault_armed = false;
+    pmm_irq_restore(flags);
+}
+
+bool pmm_test_frame_releasable(frame_t frame) {
+    u64 flags = pmm_irq_save();
+    bool valid = free_range_valid(frame, 1ULL);
+    pmm_irq_restore(flags);
+    return valid;
+}
+
 /* Compatibility API: allocate a contiguous physical run. */
-u64 pmm_alloc_pages(u64 count) {
+static u64 pmm_alloc_pages_locked(u64 count) {
     if (!g_initialized || !count || count > g_stats.free_pages || count > g_bitmap_bits) return 0;
 
     u64 run_start = 0;
@@ -399,6 +480,13 @@ u64 pmm_alloc_pages(u64 count) {
     return 0;
 }
 
+u64 pmm_alloc_pages(u64 count) {
+    u64 flags = pmm_irq_save();
+    u64 physical = pmm_alloc_pages_locked(count);
+    pmm_irq_restore(flags);
+    return physical;
+}
+
 u64 pmm_alloc_page(void) {
     frame_t frame = frame_alloc();
 
@@ -407,5 +495,8 @@ u64 pmm_alloc_page(void) {
 }
 
 PmmStats pmm_stats(void) {
-    return g_stats;
+    u64 flags = pmm_irq_save();
+    PmmStats stats = g_stats;
+    pmm_irq_restore(flags);
+    return stats;
 }

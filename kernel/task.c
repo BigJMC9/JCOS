@@ -61,74 +61,51 @@ bool task_terminate_thread(Thread *thread) {
 }
 
 bool task_quiesce_process(Process *process) {
-    if (!process || !process->initialized || !process->id || process->kernel || process == process_kernel()) {
-        return false;
-    }
-
+    if (!process || process == process_kernel() || !process_capabilities(process) || process->kernel) return false;
     Thread *current = thread_current();
+    if (!current || current->process == process) return false;
+    u64 flags = task_interrupt_save();
+    bool result = false;
 
-    if (!current || current->process == process) {
-        return false;
+    /* Peer death is published before this process loses thread/capability state.
+     * Closing is idempotent across cleanup retries: already-closed endpoints are
+     * skipped, while any failed close leaves the Process available for retry. */
+    if (!ipc_close_owned_endpoints(process->id)) goto done;
+
+    u64 count = process_thread_count(process);
+    Thread *first = process_thread_first(process);
+    if ((count && !process_thread_can_detach(process, first)) ||
+        (!count && (process->thread_head || process->thread_tail))) goto done;
+
+    /* Stop everyone before dropping any self-thread authority. No reaping yet. */
+    bool stopped = true;
+    Thread *thread = first;
+    for (u64 i = 0; i < count; ++i) {
+        if (!thread) { stopped = false; break; }
+        if (thread->state != THREAD_STATE_DEAD && !task_terminate_thread(thread)) stopped = false;
+        if (thread->state != THREAD_STATE_DEAD || thread->on_run_queue || thread_wait_active(thread)) stopped = false;
+        thread = thread->process_next;
+    }
+    if (!stopped || thread) goto done;
+
+    CapabilityTable *caps = process_capabilities(process);
+    /* A process may hold caps to its own threads. Delete those pins before reap.
+     * Other process-owned caps remain until every reap succeeds, as before. */
+    for (thread = first; thread; thread = thread->process_next) {
+        if (!capability_revoke_object(caps, thread, CAPABILITY_TYPE_THREAD)) goto done;
     }
 
-    u64 flags = task_interrupt_save();
-    bool result = true;
-    u64 initial_count = process_thread_count(process);
-    Thread *thread = process_thread_first(process);
-
-    /*
-     * Each Thread remains represented in the
-     * Process list until thread_destroy()
-     * succeeds.
-     *
-     * A failure therefore never silently loses
-     * ownership records.
-     */
-    for (u64 i = 0; i < initial_count; ++i) {
-        if (!thread) {
-            result = false;
-            break;
-        }
-
+    bool reaped = true;
+    thread = first;
+    for (u64 i = 0; i < count; ++i) {
+        if (!thread) { reaped = false; break; }
         Thread *next = thread->process_next;
-
-        if (thread->process != process || !process_thread_contains(process, thread)) {
-            result = false;
-            thread = next;
-            continue;
-        }
-
-        if (thread->state != THREAD_STATE_DEAD) {
-            if (!task_terminate_thread(thread)) {
-                result = false;
-                thread = next;
-                continue;
-            }
-        } else {
-            if (thread == current || thread->on_run_queue || thread_wait_active(thread)) {
-                result = false;
-                thread = next;
-                continue;
-            }
-        }
-        if (!thread_destroy(thread)) result = false;
-
+        if (!thread_destroy(thread)) reaped = false;
         thread = next;
     }
-
-    /* Do not revoke authority while any Thread remains live or unreaped. */
-    if (process_thread_count(process) || process_thread_first(process)) {
-        result = false;
-    }
-
-    if (result) {
-        CapabilityTable *caps = process_capabilities(process);
-
-        if (!caps || !capability_revoke_all(caps)) {
-            result = false;
-        }
-    }
-
+    if (!reaped || process_thread_count(process) || process->thread_head || process->thread_tail) goto done;
+    result = capability_revoke_all(caps);
+done:
     task_interrupt_restore(flags);
     return result;
 }

@@ -5,12 +5,43 @@
 #include "arch.h"
 #include "gdt.h"
 #include "interrupts.h"
+#include "object_storage.h"
+#include "construction_test.h"
+#include "pmm_test.h"
 
 static Thread g_bootstrap_thread;
 static Thread *g_current_thread;
 
 static u64 g_next_thread_id;
+/* Never reissue an operation identity, including after Thread storage reuse. */
+static u64 g_next_wait_id = 1ULL;
 static bool g_initialized;
+
+static void *g_thread_storage[THREAD_STORAGE_CAPACITY];
+/* No Thread/Process pointer escapes a failed constructor. */
+static u64 g_unpublished_stack;
+static struct {
+    Thread *target;
+    ThreadCreateTestFault fault;
+    bool fail_rollback;
+    bool armed;
+} g_create_fault;
+
+static bool thread_storage_live(const Thread *thread) {
+    return object_storage_find(g_thread_storage, THREAD_STORAGE_CAPACITY, thread) < THREAD_STORAGE_CAPACITY;
+}
+
+static u64 thread_reclaim_irq_save(void) {
+    u64 flags;
+    __asm__ volatile ("pushfq; popq %0" : "=r"(flags) : : "memory");
+    interrupts_disable();
+    return flags;
+}
+
+static void thread_reclaim_irq_restore(u64 flags) {
+    if (flags & (1ULL << 9)) interrupts_enable();
+}
+
 
 static NORETURN void thread_kernel_trampoline(void) {
     Thread *thread = thread_current();
@@ -71,18 +102,77 @@ static bool release_kernel_stack(u64 physical, u64 size) {
 
     if (first == FRAME_INVALID) return false;
 
-    u64 pages = size / FRAME_SIZE;
-    bool result = true;
+    return frame_free_range(first, size / FRAME_SIZE);
+}
 
-    for (u64 i = 0; i < pages; ++i) {
-        if (!frame_free(first + i)) result = false;
-    }
-
+bool thread_reclaim_unpublished_stack(void) {
+    u64 flags = thread_reclaim_irq_save();
+    bool result = !g_unpublished_stack || release_kernel_stack(g_unpublished_stack, THREAD_KERNEL_STACK_SIZE);
+    if (result) g_unpublished_stack = 0;
+    thread_reclaim_irq_restore(flags);
     return result;
 }
 
+bool thread_creation_cleanup_pending(void) {
+    u64 flags = thread_reclaim_irq_save();
+    bool pending = g_unpublished_stack != 0;
+    thread_reclaim_irq_restore(flags);
+    return pending;
+}
+
+bool thread_storage_in_use(const Thread *thread) {
+    u64 flags = thread_reclaim_irq_save();
+    bool result = thread_storage_live(thread);
+    thread_reclaim_irq_restore(flags);
+    return result;
+}
+
+u32 thread_object_count(void) {
+    u64 flags = thread_reclaim_irq_save();
+    u32 count = object_storage_count(g_thread_storage, THREAD_STORAGE_CAPACITY);
+    thread_reclaim_irq_restore(flags);
+    return count;
+}
+
+bool thread_test_fail_create_once(Thread *target, ThreadCreateTestFault fault, bool fail_rollback) {
+    if (!target || (u32)fault > THREAD_CREATE_TEST_ATTACH ||
+        (fault == THREAD_CREATE_TEST_ALLOCATE && fail_rollback)) return false;
+    u64 flags = thread_reclaim_irq_save();
+    bool valid = !g_create_fault.armed && !thread_storage_live(target) && !g_unpublished_stack &&
+        !pmm_test_free_failure_armed();
+    if (valid) {
+        g_create_fault.target = target;
+        g_create_fault.fault = fault;
+        g_create_fault.fail_rollback = fail_rollback;
+        g_create_fault.armed = true;
+    }
+    thread_reclaim_irq_restore(flags);
+    return valid;
+}
+
+bool thread_test_create_fault_armed(void) { return g_create_fault.armed; }
+void thread_test_clear_create_fault(void) {
+    u64 flags = thread_reclaim_irq_save();
+    k_memset(&g_create_fault, 0, sizeof(g_create_fault));
+    thread_reclaim_irq_restore(flags);
+}
+frame_t thread_test_unpublished_stack(void) {
+    return g_unpublished_stack ? phys_to_frame(g_unpublished_stack) : FRAME_INVALID;
+}
+
+static bool thread_create_fault(Thread *target, ThreadCreateTestFault fault, u64 physical) {
+    if (!g_create_fault.armed || g_create_fault.target != target || g_create_fault.fault != fault) return false;
+    bool fail_rollback = g_create_fault.fail_rollback;
+    k_memset(&g_create_fault, 0, sizeof(g_create_fault));
+    if (fail_rollback) {
+        /* The diagnostic checks that this exact PMM fault was consumed. */
+        (void)pmm_test_fail_free_range_once(phys_to_frame(physical), THREAD_KERNEL_STACK_PAGES);
+    }
+    return true;
+}
+
 bool thread_prepare_kernel(Thread *thread, ThreadEntry entry, void *argument) {
-    if (!g_initialized || !thread || thread == g_current_thread || !thread->id || !entry ||
+    if (!g_initialized || !thread_storage_live(thread) || thread == g_current_thread || !thread->id || !entry ||
         thread->state != THREAD_STATE_READY || !thread->owns_kernel_stack) {
         return false;
     }
@@ -110,7 +200,7 @@ bool thread_prepare_kernel(Thread *thread, ThreadEntry entry, void *argument) {
 }
 
 bool thread_prepare_user(Thread *thread, u64 user_rip, u64 user_rsp) {
-    if (!g_initialized || !thread || thread == g_current_thread || !thread->id || !thread->process ||
+    if (!g_initialized || !thread_storage_live(thread) || thread == g_current_thread || !thread->id || !thread->process ||
         thread->state != THREAD_STATE_READY || !thread->owns_kernel_stack) {
         return false;
     }
@@ -182,6 +272,7 @@ bool thread_system_init(Process *kernel_process, u64 bootstrap_stack_base, u64 b
         return false;
     }
 
+    g_thread_storage[0] = &g_bootstrap_thread;
     g_current_thread = &g_bootstrap_thread;
     g_next_thread_id = 2;
     g_initialized = true;
@@ -194,7 +285,7 @@ Thread *thread_current(void) {
 }
 
 bool thread_activate(Thread *thread) {
-    if (!g_initialized || !g_current_thread || !thread || !thread->id || !thread->process ||
+    if (!g_initialized || !g_current_thread || !thread_storage_live(thread) || !thread->id || !thread->process ||
         !thread->kernel_stack_top) {
         return false;
     }
@@ -230,45 +321,34 @@ bool thread_activate(Thread *thread) {
     return true;
 }
 
-bool thread_create(Thread *thread, Process *process) {
-    if (!g_initialized || !thread || thread == g_current_thread || !process || !process->initialized ||
-        !g_next_thread_id) {
-        return false;
-    }
+static bool thread_create_locked(Thread *thread, Process *process) {
+    if (!thread || thread_storage_live(thread)) return false;
+
+    /* Existing callers may pass fresh uninitialized storage. Do not read it. */
+    k_memset(thread, 0, sizeof(*thread));
+    if (!g_initialized || !process || !g_next_thread_id || g_unpublished_stack) return false;
+    u32 slot = object_storage_empty(g_thread_storage, THREAD_STORAGE_CAPACITY);
+    if (slot == THREAD_STORAGE_CAPACITY) return false;
 
     AddressSpace *space = process_address_space(process);
-
     if (!space || !address_space_cr3(space)) return false;
     if (!pmm_phys_map_access_enabled() || !vmm_phys_map_access_enabled()) return false;
-
-    k_memset(thread, 0, sizeof(*thread));
+    if (thread_create_fault(thread, THREAD_CREATE_TEST_ALLOCATE, 0)) return false;
 
     u64 physical = pmm_alloc_pages(THREAD_KERNEL_STACK_PAGES);
     if (!physical) return false;
+    /* Own the unpublished allocation before the next fallible operation. */
+    g_unpublished_stack = physical;
+    if (thread_create_fault(thread, THREAD_CREATE_TEST_ACCESS, physical)) goto fail;
     void *direct = phys_to_virt(physical);
-
-    if (!direct) {
-        (void)release_kernel_stack(physical, THREAD_KERNEL_STACK_SIZE);
-        return false;
-    }
-
+    if (!direct) goto fail;
     u64 virtual_base = (u64)(void *)direct;
-
-    if (virtual_base > ~0ULL - THREAD_KERNEL_STACK_SIZE) {
-        (void)release_kernel_stack(physical, THREAD_KERNEL_STACK_SIZE);
-        return false;
-    }
-
+    if (virtual_base > ~0ULL - THREAD_KERNEL_STACK_SIZE) goto fail;
     u64 virtual_top = virtual_base + THREAD_KERNEL_STACK_SIZE;
-
-    if (virtual_top & 0xFULL) {
-        (void)release_kernel_stack(physical, THREAD_KERNEL_STACK_SIZE);
-        return false;
-    }
-
+    if (virtual_top & 0xFULL) goto fail;
     k_memset(direct, 0, (usize)THREAD_KERNEL_STACK_SIZE);
 
-    thread->id = g_next_thread_id++;
+    thread->id = g_next_thread_id;
     thread->process = process;
     thread->state = THREAD_STATE_READY;
     thread->kernel_stack_physical = physical;
@@ -276,120 +356,139 @@ bool thread_create(Thread *thread, Process *process) {
     thread->kernel_stack_top = virtual_top;
     thread->kernel_stack_size = THREAD_KERNEL_STACK_SIZE;
     thread->owns_kernel_stack = true;
-    if (!process_thread_attach(process, thread)) {
-        (void)release_kernel_stack(physical, THREAD_KERNEL_STACK_SIZE);
-        k_memset(thread, 0, sizeof(*thread));
-        return false;
-    }
+    if (thread_create_fault(thread, THREAD_CREATE_TEST_ATTACH, physical)) goto fail;
+    if (!process_thread_attach(process, thread)) goto fail;
+
+    /* Publication commit: no fallible operation after ownership attachment. */
+    g_thread_storage[slot] = thread;
+    g_unpublished_stack = 0;
     ++g_next_thread_id;
     return true;
+
+fail:
+    /* If this fails, the module-owned slot retains the allocation, not 'thread'. */
+    (void)thread_reclaim_unpublished_stack();
+    k_memset(thread, 0, sizeof(*thread));
+    return false;
+}
+
+bool thread_create(Thread *thread, Process *process) {
+    u64 flags = thread_reclaim_irq_save();
+    bool created = thread_create_locked(thread, process);
+    thread_reclaim_irq_restore(flags);
+    return created;
+}
+
+static bool wait_kind_valid(ThreadWaitKind kind) {
+    return kind == THREAD_WAIT_IPC_RECEIVE || kind == THREAD_WAIT_IPC_SEND;
+}
+
+static bool wait_terminal(ThreadWaitResult result) {
+    return result == THREAD_WAIT_RESULT_COMPLETED || result == THREAD_WAIT_RESULT_CANCELLED ||
+        result == THREAD_WAIT_RESULT_PEER_CLOSED || result == THREAD_WAIT_RESULT_TIMED_OUT;
+}
+
+static void wait_clear(Thread *thread) {
+    thread->wait_kind = THREAD_WAIT_NONE;
+    thread->wait_result = THREAD_WAIT_RESULT_NONE;
+    thread->wait_object = 0;
+    thread->wait_id = 0;
 }
 
 bool thread_wait_begin(Thread *thread, ThreadWaitKind kind, void *object) {
-    if (!g_initialized || !thread || thread != g_current_thread || !thread->id || !object || kind == THREAD_WAIT_NONE) {
-        return false;
-    }
-
+    /* Caller holds local IRQ exclusion through reverse-link publication/park. */
+    if (!g_initialized || !thread_storage_live(thread) || thread != g_current_thread ||
+        !thread->id || !object || !wait_kind_valid(kind) || !g_next_wait_id) return false;
     if (thread->state != THREAD_STATE_RUNNING || !thread->on_run_queue) return false;
-    if (thread->wait_kind != THREAD_WAIT_NONE || thread->wait_object) return false;
+    if (thread_wait_active(thread)) return false;
 
     thread->wait_kind = kind;
     thread->wait_result = THREAD_WAIT_RESULT_PENDING;
     thread->wait_object = object;
+    thread->wait_id = g_next_wait_id++;
+    /* Unsigned wrap leaves zero: subsequent registrations fail closed. */
     return true;
 }
 
 bool thread_wait_matches(const Thread *thread, ThreadWaitKind kind, const void *object) {
-    if (!g_initialized || !thread || !thread->id || !object || kind == THREAD_WAIT_NONE) return false;
-    return (thread->wait_kind == kind && thread->wait_object == object);
+    if (!g_initialized || !thread_storage_live(thread) || !thread->id || !object ||
+        !wait_kind_valid(kind) || !thread->wait_id) return false;
+    return thread->wait_kind == kind && thread->wait_object == object;
+}
+
+bool thread_wait_matches_id(const Thread *thread, ThreadWaitKind kind, const void *object, u64 wait_id) {
+    return wait_id && thread_wait_matches(thread, kind, object) && thread->wait_id == wait_id;
+}
+
+bool thread_wait_try_complete(Thread *thread, ThreadWaitKind kind, const void *object,
+    u64 wait_id, ThreadWaitResult result) {
+    u64 flags = thread_reclaim_irq_save();
+    bool changed = false;
+    if (!wait_terminal(result) || !thread_wait_matches_id(thread, kind, object, wait_id) ||
+        thread->wait_result != THREAD_WAIT_RESULT_PENDING) goto done;
+    if (thread->state != THREAD_STATE_BLOCKED && thread->state != THREAD_STATE_READY &&
+        !(thread == g_current_thread && thread->state == THREAD_STATE_RUNNING)) goto done;
+    thread->wait_result = result;
+    changed = true;
+done:
+    thread_reclaim_irq_restore(flags);
+    return changed;
 }
 
 bool thread_wait_cancel(Thread *thread, ThreadWaitKind kind, void *object) {
-    if (!g_initialized || !thread || !thread->id || !object || kind == THREAD_WAIT_NONE) {
-        return false;
-    }
-
-    if (!thread_wait_matches(thread, kind, object)) {
-        return false;
-    }
-
-    if (thread->wait_result != THREAD_WAIT_RESULT_PENDING) {
-        return false;
-    }
-
-    /*
-     * Cancellation may be initiated by another
-     * Thread which owns/manages the waited object.
-     *
-     * The owning subsystem must serialize this
-     * transition.
-     */
-    thread->wait_result = THREAD_WAIT_RESULT_CANCELLED;
-    return true;
+    /* Synchronous compatibility helper; delayed owners must supply their token. */
+    if (!thread_wait_matches(thread, kind, object)) return false;
+    return thread_wait_try_complete(thread, kind, object, thread->wait_id, THREAD_WAIT_RESULT_CANCELLED);
 }
 
 bool thread_wait_cancelled(const Thread *thread, ThreadWaitKind kind, const void *object) {
-    if (!thread_wait_matches(thread, kind, object)) {
-        return false;
-    }
-
-    return thread->wait_result == THREAD_WAIT_RESULT_CANCELLED;
+    if (!thread_wait_matches(thread, kind, object)) return false;
+    return thread->wait_result == THREAD_WAIT_RESULT_CANCELLED ||
+        thread->wait_result == THREAD_WAIT_RESULT_PEER_CLOSED;
 }
 
 bool thread_wait_end(Thread *thread, ThreadWaitKind kind, void *object) {
-    if (!g_initialized || !thread || thread != g_current_thread || !thread->id || !object || kind == THREAD_WAIT_NONE) {
-        return false;
-    }
-    if (!thread_wait_matches(thread, kind, object)) return false;
-
-    thread->wait_kind = THREAD_WAIT_NONE;
-    thread->wait_result = THREAD_WAIT_RESULT_NONE;
-    thread->wait_object = 0;
+    if (thread != g_current_thread || !thread_wait_matches(thread, kind, object) ||
+        thread->state != THREAD_STATE_RUNNING || !wait_terminal(thread->wait_result)) return false;
+    wait_clear(thread);
     return true;
 }
 
 bool thread_wait_abort(Thread *thread, ThreadWaitKind kind, void *object) {
-    if (!g_initialized || !thread || thread == g_current_thread || !thread->id || !object || kind == THREAD_WAIT_NONE) {
-        return false;
-    }
-    if (thread->state != THREAD_STATE_BLOCKED && thread->state != THREAD_STATE_READY) {
-        return false;
-    }
-    if (!thread_wait_matches(thread, kind, object)) {
-        return false;
-    }
-
-    thread->wait_kind = THREAD_WAIT_NONE;
-    thread->wait_result = THREAD_WAIT_RESULT_NONE;
-    thread->wait_object = 0;
+    if (thread == g_current_thread || !thread_wait_matches(thread, kind, object)) return false;
+    if (thread->state != THREAD_STATE_BLOCKED && thread->state != THREAD_STATE_READY) return false;
+    /* This call chain will never resume. Do not change an already committed result. */
+    if (thread->wait_result == THREAD_WAIT_RESULT_PENDING) thread->wait_result = THREAD_WAIT_RESULT_CANCELLED;
+    if (!wait_terminal(thread->wait_result)) return false;
+    wait_clear(thread);
     return true;
 }
 
 bool thread_wait_active(const Thread *thread) {
-    if (!g_initialized || !thread || !thread->id) return false;
-    return (thread->wait_kind != THREAD_WAIT_NONE || thread->wait_result != THREAD_WAIT_RESULT_NONE || thread->wait_object != 0);
+    if (!g_initialized || !thread_storage_live(thread) || !thread->id) return false;
+    return thread->wait_kind != THREAD_WAIT_NONE || thread->wait_result != THREAD_WAIT_RESULT_NONE ||
+        thread->wait_object != 0 || thread->wait_id != 0;
 }
 
-bool thread_destroy(Thread *thread) {
+static bool thread_destroy_locked(Thread *thread) {
+    u32 storage_slot = object_storage_find(g_thread_storage, THREAD_STORAGE_CAPACITY, thread);
+    if (storage_slot == THREAD_STORAGE_CAPACITY) return false;
     if (!g_initialized || !thread || thread == g_current_thread || !thread->id || !thread->process ||
         thread->state == THREAD_STATE_INVALID || thread->state == THREAD_STATE_RUNNING ||
-        thread->state == THREAD_STATE_BLOCKED || thread->on_run_queue) {
+        thread->state == THREAD_STATE_BLOCKED || thread->on_run_queue || thread->run_next) {
         return false;
     }
 
     /* Another kernel object still owns a reference to this Thread. */
-    if (thread_wait_active(thread)) return false;
+    if (thread_wait_active(thread) || thread->capability_refs) return false;
 
     Process *process = thread->process;
 
     /* Refuse to start destruction if the process ownership accounting is already invalid. */
-    if (!process_thread_count(process) || !process_thread_contains(process, thread)) return false;
+    if (!process_thread_can_detach(process, thread)) return false;
 
-    bool result = true;
-
-    if (thread->owns_kernel_stack) {
-        if (!release_kernel_stack(thread->kernel_stack_physical, thread->kernel_stack_size)) result = false;
-    }
+    if (thread->owns_kernel_stack &&
+        !release_kernel_stack(thread->kernel_stack_physical, thread->kernel_stack_size)) return false;
 
     /*
     * Resource release succeeded.
@@ -400,6 +499,7 @@ bool thread_destroy(Thread *thread) {
     */
     if (!process_thread_detach(process, thread)) cpu_halt_forever();    
 
+    g_thread_storage[storage_slot] = 0;
     thread->process = 0;
     thread->process_prev = 0;
     thread->process_next = 0;
@@ -419,5 +519,13 @@ bool thread_destroy(Thread *thread) {
     thread->wait_kind = THREAD_WAIT_NONE;
     thread->wait_result = THREAD_WAIT_RESULT_NONE;
     thread->wait_object = 0;
-    return result;
+    thread->wait_id = 0;
+    return true;
+}
+
+bool thread_destroy(Thread *thread) {
+    u64 flags = thread_reclaim_irq_save();
+    bool destroyed = thread_destroy_locked(thread);
+    thread_reclaim_irq_restore(flags);
+    return destroyed;
 }

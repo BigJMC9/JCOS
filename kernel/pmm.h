@@ -40,6 +40,13 @@ bool frame_free(
     frame_t frame
 );
 
+/*
+ * Free an allocated contiguous span, or change no allocation state.
+ * Does not unmap memory or establish caller ownership. Callers must first
+ * remove live users/references. Single-CPU normal context only; not NMI-safe.
+ */
+bool frame_free_range(frame_t first, u64 count);
+
 u64 frame_to_phys(
     frame_t frame
 );

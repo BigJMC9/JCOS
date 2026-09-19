@@ -3,3 +3,4 @@ build/**
 assets/**
 rootfs/bin/**
 docs/non-public/**
+non-public/**

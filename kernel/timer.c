@@ -1,6 +1,7 @@
 #include "timer.h"
 #include "arch.h"
 #include "interrupt_controller.h"
+#include "ipc.h"
 
 #define PIT_CHANNEL0_DATA 0x40U
 #define PIT_COMMAND       0x43U
@@ -78,8 +79,9 @@ bool timer_init(u32 frequency_hz) {
 }
 
 void timer_handle_irq(void) {
-    if (g_initialized)
-        ++g_ticks;
+    if (!g_initialized) return;
+    ++g_ticks;
+    ipc_timeout_poll(g_ticks);
 }
 
 bool timer_initialized(void) {
