@@ -6544,6 +6544,8 @@ static void shell_print_help(const char *topic) {
 
     terminal_writeln("\nUSE help COMMAND FOR DETAILS.");
     terminal_writeln("USE test list FOR AVAILABLE DIAGNOSTICS.");
+    terminal_writeln("KEYS: UP/DOWN HISTORY, LEFT/RIGHT EDIT, HOME/END, PGUP/PGDN SCROLL.");
+    terminal_writeln("CLIPBOARD: SHIFT+ARROWS SELECT, CTRL+SHIFT+C/X/V COPY/CUT/PASTE.");
 }
 
 static const ShellLocalTest *shell_find_local_test(const char *name) {
@@ -6683,21 +6685,48 @@ NORETURN void shell_run(const BootInfo *boot) {
     g_boot = boot;
     g_cwd = vfs_root();
     shell_editor_init(&g_editor);
+
     prompt();
+    terminal_cursor_enable(true);
+    terminal_cursor_set_visible(true);
+
+    u64 blink_started = timer_ticks();
 
     for (;;) {
         KeyEvent event;
 
         if (!input_poll(&event)) {
+            if (timer_initialized()) {
+                u32 frequency = timer_frequency();
+                u64 interval = frequency >= 2U ? (u64)(frequency / 2U) : 1ULL;
+                u64 now = timer_ticks();
+
+                if ((u64)(now - blink_started) >= interval) {
+                    terminal_cursor_toggle();
+                    blink_started = now;
+                }
+            }
+
             arch_pause();
             continue;
         }
 
-        if (shell_editor_handle(&g_editor, &event) != SHELL_EDITOR_SUBMIT) continue;
+        terminal_cursor_set_visible(true);
+        blink_started = timer_ticks();
 
+        if (shell_editor_handle(&g_editor, &event) != SHELL_EDITOR_SUBMIT)
+            continue;
+
+        terminal_cursor_enable(false);
         terminal_putchar('\n');
+
         execute((char *)shell_editor_line(&g_editor));
+
         shell_editor_reset_line(&g_editor);
         prompt();
+
+        terminal_cursor_enable(true);
+        terminal_cursor_set_visible(true);
+        blink_started = timer_ticks();
     }
 }

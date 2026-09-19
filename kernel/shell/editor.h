@@ -27,6 +27,12 @@ typedef struct {
     char draft[SHELL_EDITOR_CAPACITY];
     u32 draft_length;
     bool draft_saved;
+
+    bool selection_active;
+    u32 selection_anchor;
+
+    char clipboard[SHELL_EDITOR_CAPACITY];
+    u32 clipboard_length;
 } ShellEditor;
 
 void shell_editor_init(ShellEditor *editor);
