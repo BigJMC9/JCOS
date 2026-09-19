@@ -2,6 +2,7 @@
 
 #include "capability_test.h"
 #include "constructor_test.h"
+#include "elf_malformed_test.h"
 #include "elf_reclaim_test.h"
 #include "force_thread_test.h"
 #include "ipc_timeout_order_test.h"
@@ -48,6 +49,7 @@ static void kernel_test_registry_init(void) {
     kernel_test_add("stack-reclaim", "atomic kernel-stack release and retry", KERNEL_TEST_MEMORY, stack_reclaim_test_run, 0);
     kernel_test_add("permission-audit", "effective page-table W/U/X permission audit", KERNEL_TEST_MEMORY, permission_audit_test_run, user_fixture_cleanup_retry_run);
     kernel_test_add("elf-reclaim", "ELF cleanup failure and retry", KERNEL_TEST_MEMORY, elf_reclaim_test_run, 0);
+    kernel_test_add("elf-malformed", "malformed ELF rejection and rollback acceptance", KERNEL_TEST_USERSPACE, elf_malformed_test_run, user_fixture_cleanup_retry_run);
     kernel_test_add("vmm-reclaim", "page-table cleanup failure and retry", KERNEL_TEST_MEMORY, vmm_reclaim_test_run, 0);
     kernel_test_add("force-thread", "forced IPC thread termination", KERNEL_TEST_TASK, force_thread_test_run, force_thread_cleanup_run);
     kernel_test_add("published-cleanup", "published fixture cleanup and retry", KERNEL_TEST_LIFETIME, published_cleanup_test_run, force_thread_cleanup_run);
