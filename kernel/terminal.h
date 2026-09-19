@@ -14,5 +14,7 @@ void terminal_write(const char *s);
 void terminal_writeln(const char *s);
 void terminal_write_u64(u64 value);
 void terminal_write_hex(u64 value);
+bool terminal_cursor_left(void);
+bool terminal_cursor_right(void);
 
 #endif

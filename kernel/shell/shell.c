@@ -46,14 +46,14 @@
 #include "ipc_timeout_order_test.h"
 #include "lifetime_ipc_acceptance_test.h"
 #include "test_registry.h"
+#include "editor.h"
+#include "input.h"
 
-#define INPUT_CAPACITY 128U
 
 static VfsNode *g_cwd;
 
 static const BootInfo *g_boot;
-static char g_input[INPUT_CAPACITY];
-static u32 g_length;
+static ShellEditor g_editor;
 
 static volatile u64 g_schedtest_a_count;
 static volatile u64 g_schedtest_b_count;
@@ -6679,44 +6679,25 @@ static void execute(char *line) {
     else if (entry->no_args) entry->no_args();
 }
 
-static int next_input(void) {
-    int c;
-    interrupts_disable();
-    ps2_poll();
-    c = ps2_getchar();
-    interrupts_enable();
-    if (c >= 0) return c;
-    return serial_read_nonblocking();
-}
-
 NORETURN void shell_run(const BootInfo *boot) {
     g_boot = boot;
-    g_length = 0;
     g_cwd = vfs_root();
+    shell_editor_init(&g_editor);
     prompt();
+
     for (;;) {
-        int input = next_input();
-        if (input < 0) {
+        KeyEvent event;
+
+        if (!input_poll(&event)) {
             arch_pause();
             continue;
         }
-        char c = (char)input;
-        if (c == '\r') c = '\n';
-        if ((u8)c == 0x7F) c = '\b';
-        if (c == '\n') {
-            terminal_putchar('\n');
-            g_input[g_length] = 0;
-            execute(g_input);
-            g_length = 0;
-            prompt();
-        } else if (c == '\b') {
-            if (g_length) {
-                --g_length;
-                terminal_putchar('\b');
-            }
-        } else if ((u8)c >= 32 && (u8)c <= 126 && g_length + 1 < INPUT_CAPACITY) {
-            g_input[g_length++] = c;
-            terminal_putchar(c);
-        }
+
+        if (shell_editor_handle(&g_editor, &event) != SHELL_EDITOR_SUBMIT) continue;
+
+        terminal_putchar('\n');
+        execute((char *)shell_editor_line(&g_editor));
+        shell_editor_reset_line(&g_editor);
+        prompt();
     }
 }

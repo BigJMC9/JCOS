@@ -168,3 +168,54 @@ void terminal_write_hex(u64 value) {
         }
     }
 }
+
+static u32 terminal_last_column_x(void) {
+    if (!g_ready || framebuffer_width() <= g_margin + g_cell_width) return g_margin;
+
+    u32 x = g_margin;
+    while (x + g_cell_width + g_margin <= framebuffer_width()) {
+        u32 next = x + g_cell_width;
+        if (next + g_cell_width + g_margin > framebuffer_width()) break;
+        x = next;
+    }
+    return x;
+}
+
+bool terminal_cursor_left(void) {
+    serial_write("\b");
+
+    if (!g_ready) return true;
+
+    if (g_x > g_margin) {
+        g_x -= g_cell_width;
+        return true;
+    }
+
+    if (g_y >= g_margin + g_cell_height) {
+        g_y -= g_cell_height;
+        g_x = terminal_last_column_x();
+        return true;
+    }
+
+    return false;
+}
+
+bool terminal_cursor_right(void) {
+    serial_write("\x1B[C");
+
+    if (!g_ready) return true;
+
+    if (g_x + g_cell_width + g_margin <= framebuffer_width()) {
+        g_x += g_cell_width;
+        if (g_x + g_cell_width + g_margin <= framebuffer_width()) return true;
+        g_x = g_margin;
+        g_y += g_cell_height;
+        ensure_room();
+        return true;
+    }
+
+    g_x = g_margin;
+    g_y += g_cell_height;
+    ensure_room();
+    return true;
+}
