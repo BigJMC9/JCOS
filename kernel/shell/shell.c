@@ -45,6 +45,7 @@
 #include "peer_death_test.h"
 #include "ipc_timeout_order_test.h"
 #include "r2_acceptance_test.h"
+#include "test_registry.h"
 
 #define INPUT_CAPACITY 128U
 
@@ -84,6 +85,9 @@ static volatile bool g_ipcsend_completed;
 static volatile bool g_ipcsend_failed;
 
 static CapabilityHandle g_ipcsend_handle;
+
+static void shell_print_help(const char *topic);
+static void command_test(const char *args);
 
 static char *trim(char *s) {
     while (*s && k_ascii_space(*s)) ++s;
@@ -175,80 +179,8 @@ static void print_mib(u64 pages) {
     terminal_write(" MiB");
 }
 
-static void command_help(void) {
-    terminal_writeln("COMMANDS:");
-    terminal_writeln("  help        show this list");
-    terminal_writeln("  about       describe this kernel");
-    terminal_writeln("  clear       clear framebuffer and serial terminal");
-    terminal_writeln("  ls          list files in current directory");
-    terminal_writeln("  cd PATH     change current directory");
-    terminal_writeln("  pwd         print current directory");
-    terminal_writeln("  cat FILE    print a file");
-    terminal_writeln("  memory      show UEFI memory-map and allocator state");
-    terminal_writeln("  alloc       allocate one physical 4 KiB frame");
-    terminal_writeln("  frametest   test PMM allocation/free/reuse");
-    terminal_writeln("  vmmtest     test x86-64 page-table operations");
-    terminal_writeln("  astest      test address-space ownership/sharing");
-    terminal_writeln("  supervisortest test long-lived Ring3 supervisor");
-    terminal_writeln("  threadtest  test thread lifecycle and kernel stacks");
-    terminal_writeln("  forcethreadtest test forced IPC thread termination");
-    terminal_writeln("  captest     test capability handles/rights/revoke");
-    terminal_writeln("  caplifetimetest test capability lifetime and safe reuse");
-    terminal_writeln("  endpointtest test endpoint object and capability rights");
-    terminal_writeln("  ipctest     test non-blocking capability IPC");
-    terminal_writeln("  ipcblocktest test blocking IPC receive/wakeup");
-    terminal_writeln("  ipcsendblocktest test blocking IPC send/wakeup");
-    terminal_writeln("  r2stresstest stress IPC/process lifetime recovery");
-    terminal_writeln("  r2finaltest run final bounded R2 lifetime acceptance stress");
-    terminal_writeln("  r2finalcleanupretry retry retained final R2 fixture cleanup");
-    terminal_writeln("  waitordertest test bounded IPC completion ordering");
-    terminal_writeln("  waitcleanupretry retry retained wait-test cleanup");
-    terminal_writeln("  useripctest test Ring3 capability IPC syscalls");
-    terminal_writeln("  useripccanceltest test Ring3 IPC cancellation/close");
-    terminal_writeln("  useripcblocktest test Ring3 blocking IPC receive");
-    terminal_writeln("  useripcsendblocktest test Ring3 blocking IPC send");
-    terminal_writeln("  processtest test process/address-space/capability ownership");
-    terminal_writeln("  processkilltest test forced multi-thread process termination");
-    terminal_writeln("  peerdeathtest test owned-endpoint peer-death propagation");
-    terminal_writeln("  peerdeathcleanupretry retry retained peer-death fixture cleanup");
-    terminal_writeln("  userprocesscleanuptest test shared user-process cleanup");
-    terminal_writeln("  usercleanupretry retry retained user-test cleanup");
-    terminal_writeln("  timeouttest test IPC timeout/deadline ordering");
-    terminal_writeln("  timeoutcleanupretry retry retained timeout fixture cleanup");
-    terminal_writeln("  schedtest   test round-robin full-frame scheduling");
-    terminal_writeln("  blocktest   test thread blocking and wakeup");
-    terminal_writeln("  exittest    test permanent current-thread termination");
-    terminal_writeln("  syscalltest test Ring3 syscall round-trip");
-    terminal_writeln("  userisotest test recoverable Ring3 fault isolation");
-    terminal_writeln("  userpftest  test recoverable Ring3 page fault");
-    terminal_writeln("  userelftest test filesystem ELF Ring3 loader");
-    terminal_writeln("  userruntimetest test shared Ring3 C runtime");
-    terminal_writeln("  userruntimeblocktest test blocking Ring3 C runtime");
-    terminal_writeln("  elfreclaimtest test ELF cleanup failure and retry");
-    terminal_writeln("  vmmreclaimtest test page-table cleanup failure and retry");
-    terminal_writeln("  publishedcleanuptest test retained fixture cleanup and retry");
-    terminal_writeln("  forcecleanupretry retry retained forced-test cleanup");
-    terminal_writeln("  timer       show PIT timer state");
-    terminal_writeln("  timertest   test periodic IRQ0 ticks");
-    terminal_writeln("  preempttest test timer-driven involuntary switching");
-    terminal_writeln("  userpreempttest test PIT preemption from Ring3");
-    terminal_writeln("  reschedtest test INT 0x81 full-frame scheduling");
-    terminal_writeln("  stackreclaimtest test atomic stack release and retry");
-    terminal_writeln("  constructortest test creation rollback and storage lifetime");
-    terminal_writeln("  cpu         show CPUID information");
-    terminal_writeln("  interrupts  show APIC/PIC and keyboard counters");
-    terminal_writeln("  acpi        show ACPI discovery results");
-    terminal_writeln("  pci         list discovered PCI devices");
-    terminal_writeln("  ahci        show AHCI controller and SATA ports");
-    terminal_writeln("  sector LBA  dump a raw disk sector");
-    terminal_writeln("  partitions  list GPT partitions");
-    terminal_writeln("  fatls       list FAT32 root directory");
-    terminal_writeln("  fat32       show FAT32 filesystem information");
-    terminal_writeln("  fatread FILE [OFFSET] [COUNT]  read/test a FAT32 root file");
-    terminal_writeln("  fault       deliberately execute UD2 to test the IDT");
-    terminal_writeln("  userfault   enter Ring3 and deliberately execute UD2");
-    terminal_writeln("  reboot      reset via ACPI, keyboard controller, or triple fault");
-    terminal_writeln("  disks       list block devices");
+static void command_help(const char *args) {
+    shell_print_help(args);
 }
 
 static void command_about(void) {
@@ -6365,98 +6297,359 @@ static void command_cat(const char *path) {
     if (node->size && node->data[node->size - 1] != '\n') terminal_putchar('\n');
 }
 
+
+typedef enum {
+    SHELL_GROUP_GENERAL = 0,
+    SHELL_GROUP_FILESYSTEM,
+    SHELL_GROUP_SYSTEM,
+    SHELL_GROUP_HARDWARE,
+    SHELL_GROUP_STORAGE,
+    SHELL_GROUP_DEVELOPMENT,
+    SHELL_GROUP_COUNT
+} ShellCommandGroup;
+
+typedef void (*ShellCommandNoArgs)(void);
+typedef void (*ShellCommandArgs)(const char *args);
+
+typedef struct {
+    const char *name;
+    const char *usage;
+    const char *description;
+    ShellCommandGroup group;
+    ShellCommandNoArgs no_args;
+    ShellCommandArgs with_args;
+    bool visible;
+} ShellCommand;
+
+typedef struct {
+    const char *name;
+    const char *description;
+    KernelTestGroup group;
+    void (*run)(void);
+} ShellLocalTest;
+
+static void command_clear(void) { terminal_clear(); }
+static void command_fault(void) { __asm__ volatile ("ud2"); }
+
+static const ShellLocalTest g_shell_tests[] = {
+    { "frame", "PMM allocation/free/reuse", KERNEL_TEST_MEMORY, command_frametest },
+    { "vmm-basic", "x86-64 page-table operations", KERNEL_TEST_MEMORY, command_vmmtest },
+    { "address-space", "address-space ownership and sharing", KERNEL_TEST_MEMORY, command_astest },
+    { "supervisor", "long-lived Ring3 supervisor", KERNEL_TEST_USERSPACE, command_supervisortest },
+    { "endpoint", "endpoint objects and capability rights", KERNEL_TEST_IPC, command_endpointtest },
+    { "ipc", "non-blocking capability IPC", KERNEL_TEST_IPC, command_ipctest },
+    { "ipc-receive-block", "blocking IPC receive/wakeup", KERNEL_TEST_IPC, command_ipcblocktest },
+    { "ipc-send-block", "blocking IPC send/wakeup", KERNEL_TEST_IPC, command_ipcsendblocktest },
+    { "user-ipc", "Ring3 capability IPC syscalls", KERNEL_TEST_USERSPACE, command_useripctest },
+    { "user-ipc-receive-block", "Ring3 blocking IPC receive", KERNEL_TEST_USERSPACE, command_useripcblocktest },
+    { "user-ipc-send-block", "Ring3 blocking IPC send", KERNEL_TEST_USERSPACE, command_useripcsendblocktest },
+    { "process", "process/address-space/capability ownership", KERNEL_TEST_TASK, command_processtest },
+    { "thread", "thread lifecycle and kernel stacks", KERNEL_TEST_TASK, command_threadtest },
+    { "scheduler", "round-robin full-frame scheduling", KERNEL_TEST_SCHEDULING, command_schedtest },
+    { "block", "thread blocking and wakeup", KERNEL_TEST_SCHEDULING, command_blocktest },
+    { "exit", "permanent current-thread termination", KERNEL_TEST_TASK, command_exittest },
+    { "syscall", "Ring3 syscall round-trip", KERNEL_TEST_USERSPACE, command_syscalltest },
+    { "user-isolation", "recoverable Ring3 fault isolation", KERNEL_TEST_USERSPACE, command_userisotest },
+    { "user-page-fault", "recoverable Ring3 page fault", KERNEL_TEST_USERSPACE, command_userpftest },
+    { "timer-irq", "periodic IRQ0 ticks", KERNEL_TEST_SCHEDULING, command_timertest },
+    { "preemption", "timer-driven involuntary switching", KERNEL_TEST_SCHEDULING, command_preempttest },
+    { "user-preemption", "PIT preemption from Ring3", KERNEL_TEST_SCHEDULING, command_userpreempttest },
+    { "user-elf", "filesystem ELF Ring3 loader", KERNEL_TEST_USERSPACE, command_userelftest },
+    { "reschedule", "INT 0x81 full-frame scheduling", KERNEL_TEST_SCHEDULING, command_reschedtest }
+};
+
+static const ShellCommand g_commands[] = {
+    { "help", "help [COMMAND]", "show command help", SHELL_GROUP_GENERAL, 0, command_help, true },
+    { "about", "about", "describe this kernel", SHELL_GROUP_GENERAL, command_about, 0, true },
+    { "clear", "clear", "clear the terminal", SHELL_GROUP_GENERAL, command_clear, 0, true },
+    { "reboot", "reboot", "reset the system", SHELL_GROUP_GENERAL, command_reboot, 0, true },
+
+    { "pwd", "pwd", "print the current directory", SHELL_GROUP_FILESYSTEM, command_pwd, 0, true },
+    { "ls", "ls", "list files in the current directory", SHELL_GROUP_FILESYSTEM, command_ls, 0, true },
+    { "cd", "cd PATH", "change the current directory", SHELL_GROUP_FILESYSTEM, 0, command_cd, true },
+    { "cat", "cat FILE", "print a file", SHELL_GROUP_FILESYSTEM, 0, command_cat, true },
+
+    { "memory", "memory", "show memory-map and allocator state", SHELL_GROUP_SYSTEM, command_memory, 0, true },
+    { "cpu", "cpu", "show CPUID information", SHELL_GROUP_SYSTEM, command_cpu, 0, true },
+    { "interrupts", "interrupts", "show interrupt-controller and keyboard state", SHELL_GROUP_SYSTEM, command_interrupts, 0, true },
+    { "timer", "timer", "show PIT timer state", SHELL_GROUP_SYSTEM, command_timer, 0, true },
+
+    { "acpi", "acpi", "show ACPI discovery results", SHELL_GROUP_HARDWARE, command_acpi, 0, true },
+    { "pci", "pci", "list discovered PCI devices", SHELL_GROUP_HARDWARE, command_pci, 0, true },
+    { "ahci", "ahci", "show AHCI controller and SATA ports", SHELL_GROUP_HARDWARE, command_ahci, 0, true },
+
+    { "disks", "disks", "list block devices", SHELL_GROUP_STORAGE, command_disks, 0, true },
+    { "sector", "sector LBA", "dump a raw disk sector", SHELL_GROUP_STORAGE, 0, command_sector, true },
+    { "partitions", "partitions", "list GPT partitions", SHELL_GROUP_STORAGE, command_partitions, 0, true },
+    { "fat32", "fat32", "show FAT32 filesystem information", SHELL_GROUP_STORAGE, command_fat32, 0, true },
+    { "fatls", "fatls", "list the FAT32 root directory", SHELL_GROUP_STORAGE, command_fatls, 0, true },
+    { "fatread", "fatread FILE [OFFSET] [COUNT]", "read/test a FAT32 root file", SHELL_GROUP_STORAGE, 0, command_fatread, true },
+
+    { "test", "test list [GROUP] | test NAME [cleanup]", "list or run kernel diagnostics", SHELL_GROUP_DEVELOPMENT, 0, command_test, true },
+    { "alloc", "alloc", "allocate one physical 4 KiB frame", SHELL_GROUP_DEVELOPMENT, command_alloc, 0, true },
+    { "fault", "fault", "deliberately execute UD2 in the kernel", SHELL_GROUP_DEVELOPMENT, command_fault, 0, true },
+    { "userfault", "userfault", "enter Ring3 and deliberately execute UD2", SHELL_GROUP_DEVELOPMENT, command_userfault, 0, true },
+
+    /* Compatibility aliases: accepted but intentionally omitted from normal help. */
+    { "frametest", "frametest", "legacy alias for test frame", SHELL_GROUP_DEVELOPMENT, command_frametest, 0, false },
+    { "vmmtest", "vmmtest", "legacy alias for test vmm-basic", SHELL_GROUP_DEVELOPMENT, command_vmmtest, 0, false },
+    { "astest", "astest", "legacy alias for test address-space", SHELL_GROUP_DEVELOPMENT, command_astest, 0, false },
+    { "threadtest", "threadtest", "legacy alias for test thread", SHELL_GROUP_DEVELOPMENT, command_threadtest, 0, false },
+    { "forcethreadtest", "forcethreadtest", "legacy test alias", SHELL_GROUP_DEVELOPMENT, force_thread_test_run, 0, false },
+    { "supervisortest", "supervisortest", "legacy alias for test supervisor", SHELL_GROUP_DEVELOPMENT, command_supervisortest, 0, false },
+    { "captest", "captest", "legacy test alias", SHELL_GROUP_DEVELOPMENT, command_captest, 0, false },
+    { "caplifetimetest", "caplifetimetest", "legacy test alias", SHELL_GROUP_DEVELOPMENT, capability_lifetime_test_run, 0, false },
+    { "endpointtest", "endpointtest", "legacy alias for test endpoint", SHELL_GROUP_DEVELOPMENT, command_endpointtest, 0, false },
+    { "ipctest", "ipctest", "legacy alias for test ipc", SHELL_GROUP_DEVELOPMENT, command_ipctest, 0, false },
+    { "ipcblocktest", "ipcblocktest", "legacy receive-block test alias", SHELL_GROUP_DEVELOPMENT, command_ipcblocktest, 0, false },
+    { "ipcsendblocktest", "ipcsendblocktest", "legacy send-block test alias", SHELL_GROUP_DEVELOPMENT, command_ipcsendblocktest, 0, false },
+    { "r2stresstest", "r2stresstest", "legacy test alias", SHELL_GROUP_DEVELOPMENT, r2_stress_test_run, 0, false },
+    { "r2finaltest", "r2finaltest", "legacy test alias", SHELL_GROUP_DEVELOPMENT, r2_acceptance_test_run, 0, false },
+    { "r2finalcleanupretry", "r2finalcleanupretry", "legacy cleanup alias", SHELL_GROUP_DEVELOPMENT, r2_acceptance_cleanup_run, 0, false },
+    { "stackreclaimtest", "stackreclaimtest", "legacy test alias", SHELL_GROUP_DEVELOPMENT, stack_reclaim_test_run, 0, false },
+    { "waitordertest", "waitordertest", "legacy test alias", SHELL_GROUP_DEVELOPMENT, ipc_wait_order_test_run, 0, false },
+    { "waitcleanupretry", "waitcleanupretry", "legacy cleanup alias", SHELL_GROUP_DEVELOPMENT, ipc_wait_order_cleanup_run, 0, false },
+    { "useripctest", "useripctest", "legacy alias for test user-ipc", SHELL_GROUP_DEVELOPMENT, command_useripctest, 0, false },
+    { "useripccanceltest", "useripccanceltest", "legacy test alias", SHELL_GROUP_DEVELOPMENT, user_ipc_cancel_test_run, 0, false },
+    { "useripcblocktest", "useripcblocktest", "legacy user receive-block alias", SHELL_GROUP_DEVELOPMENT, command_useripcblocktest, 0, false },
+    { "useripcsendblocktest", "useripcsendblocktest", "legacy user send-block alias", SHELL_GROUP_DEVELOPMENT, command_useripcsendblocktest, 0, false },
+    { "processtest", "processtest", "legacy alias for test process", SHELL_GROUP_DEVELOPMENT, command_processtest, 0, false },
+    { "processkilltest", "processkilltest", "legacy test alias", SHELL_GROUP_DEVELOPMENT, process_terminate_test_run, 0, false },
+    { "peerdeathtest", "peerdeathtest", "legacy test alias", SHELL_GROUP_DEVELOPMENT, peer_death_test_run, 0, false },
+    { "peerdeathcleanupretry", "peerdeathcleanupretry", "legacy cleanup alias", SHELL_GROUP_DEVELOPMENT, peer_death_cleanup_run, 0, false },
+    { "userprocesscleanuptest", "userprocesscleanuptest", "legacy test alias", SHELL_GROUP_DEVELOPMENT, user_process_cleanup_test_run, 0, false },
+    { "usercleanupretry", "usercleanupretry", "legacy cleanup alias", SHELL_GROUP_DEVELOPMENT, user_fixture_cleanup_retry_run, 0, false },
+    { "schedtest", "schedtest", "legacy alias for test scheduler", SHELL_GROUP_DEVELOPMENT, command_schedtest, 0, false },
+    { "blocktest", "blocktest", "legacy alias for test block", SHELL_GROUP_DEVELOPMENT, command_blocktest, 0, false },
+    { "exittest", "exittest", "legacy alias for test exit", SHELL_GROUP_DEVELOPMENT, command_exittest, 0, false },
+    { "syscalltest", "syscalltest", "legacy alias for test syscall", SHELL_GROUP_DEVELOPMENT, command_syscalltest, 0, false },
+    { "timeouttest", "timeouttest", "legacy test alias", SHELL_GROUP_DEVELOPMENT, ipc_timeout_order_test_run, 0, false },
+    { "timeoutcleanupretry", "timeoutcleanupretry", "legacy cleanup alias", SHELL_GROUP_DEVELOPMENT, ipc_timeout_order_cleanup_run, 0, false },
+    { "userisotest", "userisotest", "legacy alias for test user-isolation", SHELL_GROUP_DEVELOPMENT, command_userisotest, 0, false },
+    { "userpftest", "userpftest", "legacy alias for test user-page-fault", SHELL_GROUP_DEVELOPMENT, command_userpftest, 0, false },
+    { "userelftest", "userelftest", "legacy alias for test user-elf", SHELL_GROUP_DEVELOPMENT, command_userelftest, 0, false },
+    { "userruntimetest", "userruntimetest", "legacy test alias", SHELL_GROUP_DEVELOPMENT, user_runtime_test_run, 0, false },
+    { "userruntimeblocktest", "userruntimeblocktest", "legacy test alias", SHELL_GROUP_DEVELOPMENT, user_runtime_block_test_run, 0, false },
+    { "elfreclaimtest", "elfreclaimtest", "legacy test alias", SHELL_GROUP_DEVELOPMENT, elf_reclaim_test_run, 0, false },
+    { "vmmreclaimtest", "vmmreclaimtest", "legacy test alias", SHELL_GROUP_DEVELOPMENT, vmm_reclaim_test_run, 0, false },
+    { "constructortest", "constructortest", "legacy test alias", SHELL_GROUP_DEVELOPMENT, constructor_test_run, 0, false },
+    { "publishedcleanuptest", "publishedcleanuptest", "legacy test alias", SHELL_GROUP_DEVELOPMENT, published_cleanup_test_run, 0, false },
+    { "forcecleanupretry", "forcecleanupretry", "legacy cleanup alias", SHELL_GROUP_DEVELOPMENT, force_thread_cleanup_run, 0, false },
+    { "timertest", "timertest", "legacy alias for test timer-irq", SHELL_GROUP_DEVELOPMENT, command_timertest, 0, false },
+    { "preempttest", "preempttest", "legacy alias for test preemption", SHELL_GROUP_DEVELOPMENT, command_preempttest, 0, false },
+    { "userpreempttest", "userpreempttest", "legacy alias for test user-preemption", SHELL_GROUP_DEVELOPMENT, command_userpreempttest, 0, false },
+    { "reschedtest", "reschedtest", "legacy alias for test reschedule", SHELL_GROUP_DEVELOPMENT, command_reschedtest, 0, false }
+};
+
+static const char *shell_group_name(ShellCommandGroup group) {
+    switch (group) {
+        case SHELL_GROUP_GENERAL: return "GENERAL";
+        case SHELL_GROUP_FILESYSTEM: return "FILESYSTEM";
+        case SHELL_GROUP_SYSTEM: return "SYSTEM";
+        case SHELL_GROUP_HARDWARE: return "HARDWARE";
+        case SHELL_GROUP_STORAGE: return "STORAGE";
+        case SHELL_GROUP_DEVELOPMENT: return "DEVELOPMENT";
+        default: return "OTHER";
+    }
+}
+
+static const ShellCommand *shell_find_command(const char *name) {
+    if (!name || !*name) return 0;
+    for (u32 i = 0; i < (u32)(sizeof(g_commands) / sizeof(g_commands[0])); ++i) {
+        if (k_strieq(name, g_commands[i].name)) return &g_commands[i];
+    }
+    return 0;
+}
+
+static void shell_print_padded(const char *usage, const char *description) {
+    const u32 width = 30U;
+    terminal_write("  ");
+    terminal_write(usage);
+    u32 length = (u32)k_strlen(usage);
+    do {
+        terminal_putchar(' ');
+        ++length;
+    } while (length < width);
+    terminal_writeln(description);
+}
+
+static void shell_print_help(const char *topic) {
+    char name[64];
+    char extra[64];
+    const char *cursor = topic ? topic : "";
+    bool has_name = next_argument(&cursor, name, sizeof(name));
+
+    if (has_name) {
+        if (next_argument(&cursor, extra, sizeof(extra))) {
+            terminal_writeln("USAGE: help [COMMAND]");
+            return;
+        }
+
+        const ShellCommand *command = shell_find_command(name);
+        if (!command) {
+            terminal_set_color(terminal_error_color());
+            terminal_write("UNKNOWN COMMAND: ");
+            terminal_writeln(name);
+            terminal_set_color(terminal_default_color());
+            return;
+        }
+
+        terminal_write("USAGE: ");
+        terminal_writeln(command->usage);
+        terminal_writeln(command->description);
+
+        if (k_strieq(command->name, "test")) {
+            terminal_writeln("  test list [GROUP]       list available diagnostics");
+            terminal_writeln("  test NAME               run one diagnostic");
+            terminal_writeln("  test NAME cleanup       retry that diagnostic's retained cleanup");
+        }
+        return;
+    }
+
+    terminal_writeln("COMMANDS:");
+    for (u32 group = 0; group < SHELL_GROUP_COUNT; ++group) {
+        terminal_putchar('\n');
+        terminal_writeln(shell_group_name((ShellCommandGroup)group));
+        for (u32 i = 0; i < (u32)(sizeof(g_commands) / sizeof(g_commands[0])); ++i) {
+            const ShellCommand *command = &g_commands[i];
+            if (command->visible && command->group == (ShellCommandGroup)group)
+                shell_print_padded(command->usage, command->description);
+        }
+    }
+
+    terminal_writeln("\nUSE help COMMAND FOR DETAILS.");
+    terminal_writeln("USE test list FOR AVAILABLE DIAGNOSTICS.");
+}
+
+static const ShellLocalTest *shell_find_local_test(const char *name) {
+    if (!name || !*name) return 0;
+    for (u32 i = 0; i < (u32)(sizeof(g_shell_tests) / sizeof(g_shell_tests[0])); ++i) {
+        if (k_strieq(name, g_shell_tests[i].name)) return &g_shell_tests[i];
+    }
+    return 0;
+}
+
+static void shell_list_tests(const char *filter) {
+    bool matched_group = !filter || !*filter;
+
+    for (u32 group = 0; group < KERNEL_TEST_GROUP_COUNT; ++group) {
+        KernelTestGroup current = (KernelTestGroup)group;
+        if (filter && *filter && !k_strieq(filter, kernel_test_group_slug(current))) continue;
+
+        matched_group = true;
+        terminal_putchar('\n');
+        terminal_writeln(kernel_test_group_title(current));
+
+        for (u32 i = 0; i < (u32)(sizeof(g_shell_tests) / sizeof(g_shell_tests[0])); ++i) {
+            if (g_shell_tests[i].group == current)
+                shell_print_padded(g_shell_tests[i].name, g_shell_tests[i].description);
+        }
+
+        for (u32 i = 0; i < kernel_test_registry_count(); ++i) {
+            const KernelTest *test = kernel_test_registry_at(i);
+            if (test && test->group == current)
+                shell_print_padded(test->name, test->description);
+        }
+    }
+
+    if (!matched_group) {
+        terminal_set_color(terminal_error_color());
+        terminal_write("UNKNOWN TEST GROUP: ");
+        terminal_writeln(filter);
+        terminal_set_color(terminal_default_color());
+        terminal_writeln("GROUPS: memory task ipc lifetime userspace scheduling acceptance");
+    }
+}
+
+static void command_test(const char *args) {
+    char first[64];
+    char second[64];
+    char extra[64];
+    const char *cursor = args ? args : "";
+
+    if (!next_argument(&cursor, first, sizeof(first))) {
+        terminal_writeln("USAGE: test list [GROUP] | test NAME [cleanup]");
+        return;
+    }
+
+    bool has_second = next_argument(&cursor, second, sizeof(second));
+    if (next_argument(&cursor, extra, sizeof(extra))) {
+        terminal_writeln("USAGE: test list [GROUP] | test NAME [cleanup]");
+        return;
+    }
+
+    if (k_strieq(first, "list")) {
+        shell_list_tests(has_second ? second : "");
+        return;
+    }
+
+    const ShellLocalTest *local = shell_find_local_test(first);
+    if (local) {
+        if (has_second) {
+            terminal_set_color(terminal_error_color());
+            terminal_writeln("THIS TEST HAS NO RETAINED CLEANUP ACTION.");
+            terminal_set_color(terminal_default_color());
+            return;
+        }
+        local->run();
+        return;
+    }
+
+    const KernelTest *test = kernel_test_registry_find(first);
+    if (!test) {
+        terminal_set_color(terminal_error_color());
+        terminal_write("UNKNOWN TEST: ");
+        terminal_writeln(first);
+        terminal_set_color(terminal_default_color());
+        terminal_writeln("USE test list FOR AVAILABLE DIAGNOSTICS.");
+        return;
+    }
+
+    if (!has_second) {
+        test->run();
+        return;
+    }
+
+    if (!k_strieq(second, "cleanup")) {
+        terminal_writeln("USAGE: test NAME [cleanup]");
+        return;
+    }
+
+    if (!test->cleanup) {
+        terminal_set_color(terminal_error_color());
+        terminal_writeln("THIS TEST HAS NO RETAINED CLEANUP ACTION.");
+        terminal_set_color(terminal_default_color());
+        return;
+    }
+
+    test->cleanup();
+}
+
 static void execute(char *line) {
     char *command = trim(line);
     if (!*command) return;
     char *args = command;
 
-    while (*args && !k_ascii_space(*args)) {
-        ++args;
-    }
+    while (*args && !k_ascii_space(*args)) ++args;
     if (*args) {
         *args++ = 0;
         args = trim(args);
-    } else args = "";
+    } else {
+        args = "";
+    }
 
-    if (k_strieq(command, "help")) command_help();
-    else if (k_strieq(command, "about")) command_about();
-    else if (k_strieq(command, "clear")) terminal_clear();
-    else if (k_strieq(command, "memory")) command_memory();
-    else if (k_strieq(command, "alloc")) command_alloc();
-    else if (k_strieq(command, "frametest")) command_frametest();
-    else if (k_strieq(command, "vmmtest")) command_vmmtest();
-    else if (k_strieq(command, "astest")) command_astest();
-    else if (k_strieq(command, "threadtest")) command_threadtest();
-    else if (k_strieq(command, "forcethreadtest")) force_thread_test_run();
-    else if (k_strieq(command, "supervisortest")) command_supervisortest();
-    else if (k_strieq(command, "captest")) command_captest();
-    else if (k_strieq(command, "caplifetimetest")) capability_lifetime_test_run();
-    else if (k_strieq(command, "endpointtest")) command_endpointtest();
-    else if (k_strieq(command, "ipctest")) command_ipctest();
-    else if (k_strieq(command, "ipcblocktest")) command_ipcblocktest();
-    else if (k_strieq(command, "ipcsendblocktest")) command_ipcsendblocktest();
-    else if (k_strieq(command, "r2stresstest")) r2_stress_test_run();
-    else if (k_strieq(command, "r2finaltest")) r2_acceptance_test_run();
-    else if (k_strieq(command, "r2finalcleanupretry")) r2_acceptance_cleanup_run();
-    else if (k_strieq(command, "stackreclaimtest")) stack_reclaim_test_run();
-    else if (k_strieq(command, "waitordertest")) ipc_wait_order_test_run();
-    else if (k_strieq(command, "waitcleanupretry")) ipc_wait_order_cleanup_run();
-    else if (k_strieq(command, "useripctest")) command_useripctest();
-    else if (k_strieq(command, "useripccanceltest")) user_ipc_cancel_test_run();
-    else if (k_strieq(command, "useripcblocktest")) command_useripcblocktest();
-    else if (k_strieq(command, "useripcsendblocktest")) command_useripcsendblocktest();
-    else if (k_strieq(command, "processtest")) command_processtest();
-    else if (k_strieq(command, "processkilltest")) process_terminate_test_run();
-    else if (k_strieq(command, "peerdeathtest")) peer_death_test_run();
-    else if (k_strieq(command, "peerdeathcleanupretry")) peer_death_cleanup_run();
-    else if (k_strieq(command, "userprocesscleanuptest")) user_process_cleanup_test_run();
-    else if (k_strieq(command, "usercleanupretry")) user_fixture_cleanup_retry_run();
-    else if (k_strieq(command, "schedtest")) command_schedtest();
-    else if (k_strieq(command, "blocktest")) command_blocktest();
-    else if (k_strieq(command, "exittest")) command_exittest();
-    else if (k_strieq(command, "syscalltest")) command_syscalltest();
-    else if (k_strieq(command, "timeouttest")) ipc_timeout_order_test_run();
-    else if (k_strieq(command, "timeoutcleanupretry")) ipc_timeout_order_cleanup_run();
-    else if (k_strieq(command, "userisotest")) command_userisotest();
-    else if (k_strieq(command, "userpftest")) command_userpftest();
-    else if (k_strieq(command, "userelftest")) command_userelftest();
-    else if (k_strieq(command, "userruntimetest")) user_runtime_test_run();
-    else if (k_strieq(command, "userruntimeblocktest")) user_runtime_block_test_run();
-    else if (k_strieq(command, "elfreclaimtest")) elf_reclaim_test_run();
-    else if (k_strieq(command, "vmmreclaimtest")) vmm_reclaim_test_run();
-    else if (k_strieq(command, "constructortest")) constructor_test_run();
-    else if (k_strieq(command, "publishedcleanuptest")) published_cleanup_test_run();
-    else if (k_strieq(command, "forcecleanupretry")) force_thread_cleanup_run();
-    else if (k_strieq(command, "timer")) command_timer();
-    else if (k_strieq(command, "timertest")) command_timertest();
-    else if (k_strieq(command, "preempttest")) command_preempttest();
-    else if (k_strieq(command, "userpreempttest")) command_userpreempttest();
-    else if (k_strieq(command, "reschedtest")) command_reschedtest();
-    else if (k_strieq(command, "cpu")) command_cpu();
-    else if (k_strieq(command, "interrupts")) command_interrupts();
-    else if (k_strieq(command, "acpi")) command_acpi();
-    else if (k_strieq(command, "pci")) command_pci();
-    else if (k_strieq(command, "ahci")) command_ahci();
-    else if (k_strieq(command, "disks")) command_disks();
-    else if (k_strieq(command, "sector")) command_sector(args);
-    else if (k_strieq(command, "partitions")) command_partitions();
-    else if (k_strieq(command, "fault")) __asm__ volatile ("ud2");
-    else if (k_strieq(command, "userfault")) command_userfault();
-    else if (k_strieq(command, "reboot")) command_reboot();
-    else if (k_strieq(command, "pwd")) command_pwd();
-    else if (k_strieq(command, "fat32")) command_fat32();
-    else if (k_strieq(command, "fatls")) command_fatls();
-    else if (k_strieq(command, "fatread")) command_fatread(args);
-    else if (k_strieq(command, "ls")) command_ls();
-    else if (k_strieq(command, "cd")) command_cd(args);
-    else if (k_strieq(command, "cat")) command_cat(args);
-    else {
+    const ShellCommand *entry = shell_find_command(command);
+    if (!entry) {
         terminal_set_color(terminal_error_color());
         terminal_write("UNKNOWN COMMAND: ");
         terminal_writeln(command);
         terminal_set_color(terminal_default_color());
         terminal_writeln("TYPE help FOR AVAILABLE COMMANDS.");
+        return;
     }
+
+    if (entry->with_args) entry->with_args(args);
+    else if (entry->no_args) entry->no_args();
 }
 
 static int next_input(void) {
