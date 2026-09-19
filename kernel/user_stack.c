@@ -12,6 +12,15 @@ static bool page_absent(const AddressSpace *space, u64 address) {
     return space && !address_space_query_page(space, address, 0, 0);
 }
 
+bool user_stack_initial_reservation_conflicts(u64 page_first, u64 page_end) {
+    if ((page_first & (VM_PAGE_SIZE - 1ULL)) || (page_end & (VM_PAGE_SIZE - 1ULL)) ||
+        page_first >= page_end) return true;
+
+    const u64 reserved_first = USER_STACK_INITIAL_BASE - VM_PAGE_SIZE;
+    const u64 reserved_end = USER_STACK_INITIAL_BASE + 2ULL * VM_PAGE_SIZE;
+    return page_first < reserved_end && reserved_first < page_end;
+}
+
 bool user_stack_slot_available(const AddressSpace *space, u64 stack_base) {
     if (!space || space->kernel || !stack_base_valid(stack_base)) return false;
     return page_absent(space, stack_base - VM_PAGE_SIZE) &&

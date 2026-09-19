@@ -6,6 +6,7 @@
 #include "address_space.h"
 #include "lib.h"
 #include "physmap.h"
+#include "user_stack.h"
 #include "vmm.h"
 
 #define ELF64_CLASS_64       2U
@@ -18,6 +19,7 @@
 #define ELF64_PT_LOAD        1U
 #define ELF64_PT_DYNAMIC     2U
 #define ELF64_PT_INTERP      3U
+#define ELF64_PT_TLS         7U
 
 #define ELF64_PF_X           1U
 #define ELF64_PF_W           2U
@@ -236,6 +238,7 @@ static bool elf_header_valid(const VfsNode *file, const Elf64Header *header) {
     if (header->type != ELF64_TYPE_EXEC) return false;
     if (header->machine != ELF64_MACHINE_X86_64) return false;
     if (header->version != ELF64_VERSION) return false;
+    if (header->flags != 0U) return false;
     if (header->header_size != sizeof(Elf64Header)) return false;
     if (header->program_header_size != sizeof(Elf64ProgramHeader)) return false;
     if (!header->program_header_count || header->program_header_count > ELF64_MAX_PHDRS) return false;
@@ -248,63 +251,92 @@ static bool elf_header_valid(const VfsNode *file, const Elf64Header *header) {
     return true;
 }
 
-static bool validate_segments(const VfsNode *file, const Elf64Header *header, u32 *page_count_out) {
-    if (!file || !header || !page_count_out) return false;
+static bool load_segment_page_range(const Elf64ProgramHeader *segment, u64 *page_first_out, u64 *page_end_out) {
+    if (!segment || !page_first_out || !page_end_out || !segment->memory_size) return false;
+    if (segment->virtual_address < ADDRESS_SPACE_USER_BASE ||
+        segment->virtual_address >= ADDRESS_SPACE_USER_LIMIT) return false;
+    if (segment->memory_size > ADDRESS_SPACE_USER_LIMIT - segment->virtual_address) return false;
 
+    u64 segment_end = segment->virtual_address + segment->memory_size;
+    u64 page_first = page_down(segment->virtual_address);
+    u64 page_end = 0;
+
+    if (!page_up(segment_end, &page_end)) return false;
+    if (page_first < ADDRESS_SPACE_USER_BASE || page_end > ADDRESS_SPACE_USER_LIMIT || page_end <= page_first) {
+        return false;
+    }
+
+    *page_first_out = page_first;
+    *page_end_out = page_end;
+    return true;
+}
+
+static bool validate_segments(AddressSpace *space, const VfsNode *file, const Elf64Header *header,
+    u32 *page_count_out) {
+    if (!space || !file || !header || !page_count_out) return false;
+
+    u64 load_first[ELF64_MAX_PHDRS];
+    u64 load_end[ELF64_MAX_PHDRS];
+    u32 load_count = 0;
     u32 total_pages = 0;
-    bool saw_load = false;
-    bool entry_executable = false;
+    bool entry_file_backed_executable = false;
 
     for (u16 i = 0; i < header->program_header_count; ++i) {
         const Elf64ProgramHeader *segment = program_header(file, header, i);
 
         if (!segment) return false;
-        if (segment->type == ELF64_PT_DYNAMIC || segment->type == ELF64_PT_INTERP) return false;
+        if (segment->type == ELF64_PT_DYNAMIC || segment->type == ELF64_PT_INTERP ||
+            segment->type == ELF64_PT_TLS) return false;
         if (segment->type != ELF64_PT_LOAD) continue;
         if (segment->file_size > segment->memory_size) return false;
         if (!segment->memory_size) continue;
-
-        saw_load = true;
-
-        if (segment->file_size > segment->memory_size) return false;
         if (segment->offset > file->size) return false;
         if (segment->file_size > file->size - segment->offset) return false;
-        if (segment->virtual_address < ADDRESS_SPACE_USER_BASE ||
-            segment->virtual_address >= ADDRESS_SPACE_USER_LIMIT) return false;
-        if (segment->memory_size > ADDRESS_SPACE_USER_LIMIT - segment->virtual_address) return false;
+        if (segment->flags & ~(ELF64_PF_R | ELF64_PF_W | ELF64_PF_X)) return false;
 
-        /* Reject writable/executable segments; hardware NX is a separate gate. */
+        /* User PT_LOAD mappings are strictly W^X in this executable profile. */
         if ((segment->flags & ELF64_PF_W) && (segment->flags & ELF64_PF_X)) return false;
         if (segment->alignment > 1ULL) {
             if (segment->alignment & (segment->alignment - 1ULL)) return false;
             if ((segment->virtual_address % segment->alignment) != (segment->offset % segment->alignment)) return false;
         }
 
-        u64 segment_end = segment->virtual_address + segment->memory_size;
-        u64 page_first = page_down(segment->virtual_address);
+        u64 page_first = 0;
         u64 page_end = 0;
+        if (!load_segment_page_range(segment, &page_first, &page_end)) return false;
+        if (user_stack_initial_reservation_conflicts(page_first, page_end)) return false;
 
-        if (!page_up(segment_end, &page_end)) return false;
-        if (page_first < ADDRESS_SPACE_USER_BASE || page_end > ADDRESS_SPACE_USER_LIMIT || page_end <= page_first) {
-            return false;
+        /* This loader cannot merge permissions or ownership for shared PT_LOAD pages. */
+        for (u32 j = 0; j < load_count; ++j) {
+            if (page_first < load_end[j] && load_first[j] < page_end) return false;
+        }
+        if (load_count >= ELF64_MAX_PHDRS) return false;
+        load_first[load_count] = page_first;
+        load_end[load_count] = page_end;
+        ++load_count;
+
+        /* Reject collisions before publishing an image ledger or allocating frames. */
+        for (u64 address = page_first; address < page_end; address += VM_PAGE_SIZE) {
+            if (address_space_query_page(space, address, 0, 0)) return false;
         }
 
         u64 pages = (page_end - page_first) / VM_PAGE_SIZE;
-
         if (pages > USER_ELF_MAX_LOAD_PAGES) return false;
         if (total_pages > USER_ELF_MAX_LOAD_PAGES - (u32)pages) return false;
-
         total_pages += (u32)pages;
 
-        if ((segment->flags & ELF64_PF_X) && header->entry >= segment->virtual_address && header->entry < segment_end) {
-            entry_executable = true;
+        /* Entry must be real executable file bytes, never zero-fill/BSS. */
+        if ((segment->flags & ELF64_PF_X) && segment->file_size) {
+            u64 file_backed_end = segment->virtual_address + segment->file_size;
+            if (header->entry >= segment->virtual_address && header->entry < file_backed_end) {
+                entry_file_backed_executable = true;
+            }
         }
     }
 
-    if (!saw_load || !total_pages || !entry_executable) return false;
+    if (!load_count || !total_pages || !entry_file_backed_executable) return false;
 
     *page_count_out = total_pages;
-
     return true;
 }
 
@@ -313,11 +345,9 @@ static bool map_segment(AddressSpace *space, const VfsNode *file, const Elf64Pro
     if (!space || !file || !segment || !image) return false;
     if (!segment->memory_size) return true;
 
-    u64 segment_end = segment->virtual_address + segment->memory_size;
-    u64 page_first = page_down(segment->virtual_address);
+    u64 page_first = 0;
     u64 page_end = 0;
-
-    if (!page_up(segment_end, &page_end)) return false;
+    if (!load_segment_page_range(segment, &page_first, &page_end)) return false;
 
     vm_flags_t flags = 0;
 
@@ -389,7 +419,7 @@ static bool load_locked(Process *process, const VfsNode *file, UserElfImage *ima
 
     const Elf64Header *header = (const Elf64Header *)(const void *)file->data;
     u32 expected_pages = 0;
-    if (!elf_header_valid(file, header) || !validate_segments(file, header, &expected_pages)) return false;
+    if (!elf_header_valid(file, header) || !validate_segments(space, file, header, &expected_pages)) return false;
 
     k_memset(image, 0, sizeof(*image));
     image->owner = process;

@@ -29,6 +29,9 @@ typedef struct UserElfImage {
  * Zero-initialize before first use. Keep Process and image storage alive and
  * stationary until needs_cleanup() is false. Never copy a live ledger.
  * One ELF per Process; load before publishing any thread execution context.
+ * The entry point must lie in file-backed bytes of an executable PT_LOAD.
+ * The standard guarded initial-stack slot is reserved and may not be covered
+ * by any PT_LOAD page.
  *
  * false from load does NOT promise rollback completed: inspect needs_cleanup.
  * Unload is retryable, but may make partial progress; loaded/entry are revoked
