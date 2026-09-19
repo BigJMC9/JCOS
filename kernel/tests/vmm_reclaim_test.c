@@ -8,6 +8,7 @@
 #include "terminal.h"
 #include "physmap.h"
 #include "lib.h"
+#include "test_output.h"
 
 #define TEST_VA ADDRESS_SPACE_USER_BASE
 #define OTHER_VA (TEST_VA + 0x200000ULL)
@@ -223,11 +224,11 @@ void vmm_reclaim_test_run(void) {
     terminal_write("  FREE AFTER: "); terminal_write_u64(pmm_stats().free_pages); terminal_putchar('\n');
     if (!check("FRAME COUNT RESTORED", pmm_stats().free_pages == baseline)) goto failed;
     g_retained = false;
-    terminal_writeln("VMM TABLE RECLAIM FAILURE TEST: PASS");
+    test_output_final("VMM TABLE RECLAIM FAILURE TEST", true);
     return;
 failed:
     vmm_test_clear_faults();
     pmm_test_clear_free_failure();
-    terminal_writeln("VMM TABLE RECLAIM FAILURE TEST: FAILED");
+    test_output_final("VMM TABLE RECLAIM FAILURE TEST", false);
     terminal_writeln("TEST FIXTURES RETAINED. REBOOT BEFORE FURTHER TESTS.");
 }

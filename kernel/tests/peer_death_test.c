@@ -1,4 +1,5 @@
 #include "peer_death_test.h"
+#include "test_output.h"
 
 #include "address_space.h"
 #include "arch.h"
@@ -400,8 +401,7 @@ void peer_death_test_run(void) {
     bool baseline = !g_peer.active && persistent_baseline();
     check("PERSISTENT BASELINES", baseline);
     terminal_write("  FREE AFTER: "); terminal_write_u64(pmm_stats().free_pages); terminal_putchar('\n');
-    terminal_write("PEER DEATH PROPAGATION TEST: ");
-    terminal_writeln(passed && baseline ? "PASS" : "FAILED");
+    test_output_final("PEER DEATH PROPAGATION TEST", passed && baseline);
 
     if (g_peer.active) {
         terminal_writeln("PEER FIXTURE RETAINED. RUN peerdeathcleanupretry; REBOOT IF RETRY FAILS.");

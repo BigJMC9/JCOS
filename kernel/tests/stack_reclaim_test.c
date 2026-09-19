@@ -8,6 +8,7 @@
 #include "task.h"
 #include "terminal.h"
 #include "thread.h"
+#include "test_output.h"
 
 /* Never publish references to stack-local fixtures; retain failures for diagnosis. */
 static Process g_process;
@@ -181,12 +182,12 @@ void stack_reclaim_test_run(void) {
     terminal_putchar('\n');
     if (!check("FRAME COUNT RESTORED", pmm_stats().free_pages == before.free_pages)) goto failed;
     g_retained = false;
-    terminal_writeln("STACK RECLAIM FAILURE TEST: PASS");
+    test_output_final("STACK RECLAIM FAILURE TEST", true);
     return;
 
 failed:
     pmm_test_clear_free_failure();
     /* Fixtures were never scheduled. Keep all remaining records in static storage. */
-    terminal_writeln("STACK RECLAIM FAILURE TEST: FAILED");
+    test_output_final("STACK RECLAIM FAILURE TEST", false);
     terminal_writeln("TEST FIXTURES RETAINED. REBOOT BEFORE FURTHER TESTS.");
 }

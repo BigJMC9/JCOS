@@ -8,6 +8,7 @@
 #include "supervisor.h"
 #include "terminal.h"
 #include "thread.h"
+#include "test_output.h"
 
 #define ELF_TEST_BASE ADDRESS_SPACE_USER_BASE
 #define ELF_TEST_DATA (ELF_TEST_BASE + 2ULL * VM_PAGE_SIZE)
@@ -248,12 +249,12 @@ void elf_reclaim_test_run(void) {
     terminal_write("  FREE AFTER: "); terminal_write_u64(pmm_stats().free_pages); terminal_putchar('\n');
     if (!check("FRAME COUNT RESTORED", pmm_stats().free_pages == free_before)) goto failed;
     g_retained = false;
-    terminal_writeln("ELF RECLAIM FAILURE TEST: PASS");
+    test_output_final("ELF RECLAIM FAILURE TEST", true);
     return;
 
 failed:
     user_elf_test_clear_faults();
     pmm_test_clear_free_failure();
-    terminal_writeln("ELF RECLAIM FAILURE TEST: FAILED");
+    test_output_final("ELF RECLAIM FAILURE TEST", false);
     terminal_writeln("TEST FIXTURES RETAINED. REBOOT BEFORE FURTHER TESTS.");
 }

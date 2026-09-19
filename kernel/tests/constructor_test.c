@@ -6,6 +6,7 @@
 #include "scheduler.h"
 #include "supervisor.h"
 #include "terminal.h"
+#include "test_output.h"
 
 /* A failed diagnostic keeps all live fixture storage until reboot. */
 static bool g_retained;
@@ -202,12 +203,12 @@ void constructor_test_run(void) {
     terminal_write("  FREE AFTER: "); terminal_write_u64(pmm_stats().free_pages); terminal_putchar('\n');
     if (!check("FRAME COUNT RESTORED", pmm_stats().free_pages == free_before)) goto failed;
     g_retained = false;
-    terminal_writeln("CONSTRUCTOR ROLLBACK TEST: PASS");
+    test_output_final("CONSTRUCTOR ROLLBACK TEST", true);
     return;
 failed:
     thread_test_clear_create_fault();
     address_space_test_clear_create_fault();
     pmm_test_clear_free_failure();
-    terminal_writeln("CONSTRUCTOR ROLLBACK TEST: FAILED");
+    test_output_final("CONSTRUCTOR ROLLBACK TEST", false);
     terminal_writeln("TEST FIXTURES RETAINED. REBOOT BEFORE FURTHER TESTS.");
 }
