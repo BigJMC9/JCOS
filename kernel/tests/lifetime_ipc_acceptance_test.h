@@ -1,0 +1,7 @@
+#ifndef JA_OS_LIFETIME_IPC_ACCEPTANCE_TEST_H
+#define JA_OS_LIFETIME_IPC_ACCEPTANCE_TEST_H
+
+void lifetime_ipc_acceptance_test_run(void);
+void lifetime_ipc_acceptance_cleanup_run(void);
+
+#endif

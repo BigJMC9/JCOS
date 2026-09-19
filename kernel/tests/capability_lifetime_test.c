@@ -10,6 +10,7 @@
 #include "supervisor.h"
 #include "terminal.h"
 #include "lib.h"
+#include "test_output.h"
 
 /* Static records survive an assertion or a rejected destruction. No live copies
  * are ever treated as owners. These commands require the quiet UP test profile. */
@@ -106,7 +107,7 @@ static void end_test(const char *name, bool passed) {
     check("CLEANUP / OBJECT BASELINES", clean);
     terminal_write("  FREE AFTER: "); terminal_write_u64(pmm_stats().free_pages); terminal_putchar('\n');
     check("FRAME COUNT RESTORED", pmm_stats().free_pages == g_test.frames);
-    terminal_write(name); terminal_writeln(passed && clean ? ": PASS" : ": FAILED");
+    test_output_final(name, passed && clean);
     if (clean) g_test.active = false;
     else terminal_writeln("CAPABILITY FIXTURE RETAINED. REBOOT BEFORE FURTHER TESTS.");
 }

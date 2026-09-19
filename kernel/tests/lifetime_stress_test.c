@@ -1,4 +1,4 @@
-#include "r2_stress_test.h"
+#include "lifetime_stress_test.h"
 #include "user_test_fixture.h"
 
 #include "address_space.h"
@@ -22,26 +22,26 @@
 
 #include "../include/runtime_cancel_test_abi.h"
 
-#define R2_STRESS_PATH "/bin/runtimecanceltest.elf"
-#define R2_STRESS_ITERATIONS 64U
-#define R2_STRESS_STACK_RX (ADDRESS_SPACE_USER_BASE + 0x100000ULL)
-#define R2_STRESS_STACK_TX (ADDRESS_SPACE_USER_BASE + 0x102000ULL)
-#define R2_STRESS_STARTUP_SIZE (2ULL * sizeof(u64))
-#define R2_STRESS_RFLAGS_IF (1ULL << 9)
+#define LIFETIME_STRESS_PATH "/bin/runtimecanceltest.elf"
+#define LIFETIME_STRESS_ITERATIONS 64U
+#define LIFETIME_STRESS_STACK_RX (ADDRESS_SPACE_USER_BASE + 0x100000ULL)
+#define LIFETIME_STRESS_STACK_TX (ADDRESS_SPACE_USER_BASE + 0x102000ULL)
+#define LIFETIME_STRESS_STARTUP_SIZE (2ULL * sizeof(u64))
+#define LIFETIME_STRESS_RFLAGS_IF (1ULL << 9)
 
 typedef enum {
-    R2_STRESS_BOTH_BLOCKED = 0,
+    LIFETIME_STRESS_BOTH_BLOCKED = 0,
 
-    R2_STRESS_RX_READY,
-    R2_STRESS_TX_COMMITTED,
-    R2_STRESS_BOTH_READY,
+    LIFETIME_STRESS_RX_READY,
+    LIFETIME_STRESS_TX_COMMITTED,
+    LIFETIME_STRESS_BOTH_READY,
 
-    R2_STRESS_RX_CLOSE_BLOCKED,
-    R2_STRESS_TX_CLOSE_BLOCKED,
+    LIFETIME_STRESS_RX_CLOSE_BLOCKED,
+    LIFETIME_STRESS_TX_CLOSE_BLOCKED,
 
-    R2_STRESS_RX_READY_THEN_CLOSE,
-    R2_STRESS_TX_COMMITTED_THEN_CLOSE
-} R2StressScenario;
+    LIFETIME_STRESS_RX_READY_THEN_CLOSE,
+    LIFETIME_STRESS_TX_COMMITTED_THEN_CLOSE
+} LifetimeStressScenario;
 
 static u64 stress_interrupt_save(void) {
     u64 flags = 0;
@@ -59,7 +59,7 @@ static u64 stress_interrupt_save(void) {
 }
 
 static void stress_interrupt_restore(u64 flags) {
-    if (flags & R2_STRESS_RFLAGS_IF) interrupts_enable();
+    if (flags & LIFETIME_STRESS_RFLAGS_IF) interrupts_enable();
 }
 
 static bool stress_schedule_once(void) {
@@ -70,30 +70,30 @@ static bool stress_schedule_once(void) {
     return result;
 }
 
-static const char *stress_scenario_name(R2StressScenario scenario) {
+static const char *stress_scenario_name(LifetimeStressScenario scenario) {
     switch (scenario) {
-        case R2_STRESS_BOTH_BLOCKED:
+        case LIFETIME_STRESS_BOTH_BLOCKED:
             return "BOTH BLOCKED";
 
-        case R2_STRESS_RX_READY:
+        case LIFETIME_STRESS_RX_READY:
             return "RX READY";
 
-        case R2_STRESS_TX_COMMITTED:
+        case LIFETIME_STRESS_TX_COMMITTED:
             return "TX COMMITTED";
 
-        case R2_STRESS_BOTH_READY:
+        case LIFETIME_STRESS_BOTH_READY:
             return "BOTH READY";
 
-        case R2_STRESS_RX_CLOSE_BLOCKED:
+        case LIFETIME_STRESS_RX_CLOSE_BLOCKED:
             return "RX CLOSE/BLOCKED";
 
-        case R2_STRESS_TX_CLOSE_BLOCKED:
+        case LIFETIME_STRESS_TX_CLOSE_BLOCKED:
             return "TX CLOSE/BLOCKED";
 
-        case R2_STRESS_RX_READY_THEN_CLOSE:
+        case LIFETIME_STRESS_RX_READY_THEN_CLOSE:
             return "RX READY/CLOSE";
 
-        case R2_STRESS_TX_COMMITTED_THEN_CLOSE:
+        case LIFETIME_STRESS_TX_COMMITTED_THEN_CLOSE:
             return "TX COMMIT/CLOSE";
 
         default:
@@ -101,7 +101,7 @@ static const char *stress_scenario_name(R2StressScenario scenario) {
     }
 }
 
-static void stress_print_cycle(u32 iteration, R2StressScenario scenario, bool pass) {
+static void stress_print_cycle(u32 iteration, LifetimeStressScenario scenario, bool pass) {
     terminal_write("  CYCLE ");
     terminal_write_u64((u64)iteration + 1ULL);
     terminal_write(" [");
@@ -181,7 +181,7 @@ static bool stress_supervisor_ping(u32 iteration) {
 }
 
 static bool stress_iteration(const VfsNode *file, u32 iteration, u32 kernel_caps_baseline, u64 frame_baseline) {
-    R2StressScenario scenario = (R2StressScenario)(iteration % 8U);
+    LifetimeStressScenario scenario = (LifetimeStressScenario)(iteration % 8U);
     Process *kernel_process = process_kernel();
     CapabilityTable *kernel_caps = kernel_process ? process_capabilities(kernel_process) : 0;
     Thread *main_thread = thread_current();
@@ -192,7 +192,7 @@ static bool stress_iteration(const VfsNode *file, u32 iteration, u32 kernel_caps
         return false;
     }
 
-    UserTestFixture *fixture = user_fixture_begin("R2 STRESS ITERATION");
+    UserTestFixture *fixture = user_fixture_begin("LIFETIME STRESS ITERATION");
     if (!fixture) return false;
     bool behavior_completed = false;
     user_fixture_set_quiet(fixture, true);
@@ -258,10 +258,10 @@ static bool stress_iteration(const VfsNode *file, u32 iteration, u32 kernel_caps
     image_loaded = user_fixture_load(fixture, file);
 
     if (!image_loaded) goto cleanup;
-    if (!user_fixture_stack_create(fixture, 0U, R2_STRESS_STACK_RX, user_receive, JCOS_RTC_MODE_RECEIVE)) {
+    if (!user_fixture_stack_create(fixture, 0U, LIFETIME_STRESS_STACK_RX, user_receive, JCOS_RTC_MODE_RECEIVE)) {
         goto cleanup;
     }
-    if (!user_fixture_stack_create(fixture, 1U, R2_STRESS_STACK_TX, user_send, JCOS_RTC_MODE_SEND)) {
+    if (!user_fixture_stack_create(fixture, 1U, LIFETIME_STRESS_STACK_TX, user_send, JCOS_RTC_MODE_SEND)) {
         goto cleanup;
     }
     if (!user_fixture_thread_create(fixture, 0U)) {
@@ -311,11 +311,11 @@ static bool stress_iteration(const VfsNode *file, u32 iteration, u32 kernel_caps
         goto cleanup;
     }
 
-    bool wake_receive = scenario == R2_STRESS_RX_READY || scenario == R2_STRESS_BOTH_READY || scenario == R2_STRESS_RX_READY_THEN_CLOSE;
-    bool commit_send = scenario == R2_STRESS_TX_COMMITTED || scenario == R2_STRESS_BOTH_READY || scenario == R2_STRESS_TX_COMMITTED_THEN_CLOSE;
+    bool wake_receive = scenario == LIFETIME_STRESS_RX_READY || scenario == LIFETIME_STRESS_BOTH_READY || scenario == LIFETIME_STRESS_RX_READY_THEN_CLOSE;
+    bool commit_send = scenario == LIFETIME_STRESS_TX_COMMITTED || scenario == LIFETIME_STRESS_BOTH_READY || scenario == LIFETIME_STRESS_TX_COMMITTED_THEN_CLOSE;
 
-    bool close_receive = scenario == R2_STRESS_RX_CLOSE_BLOCKED || scenario == R2_STRESS_RX_READY_THEN_CLOSE;
-    bool close_send = scenario == R2_STRESS_TX_CLOSE_BLOCKED || scenario == R2_STRESS_TX_COMMITTED_THEN_CLOSE;
+    bool close_receive = scenario == LIFETIME_STRESS_RX_CLOSE_BLOCKED || scenario == LIFETIME_STRESS_RX_READY_THEN_CLOSE;
+    bool close_send = scenario == LIFETIME_STRESS_TX_CLOSE_BLOCKED || scenario == LIFETIME_STRESS_TX_COMMITTED_THEN_CLOSE;
 
     if (wake_receive) {
         IpcMessage wake;
@@ -441,9 +441,9 @@ cleanup: {
     }
 }
 
-void r2_stress_test_run(void) {
+void lifetime_stress_test_run(void) {
     if (!user_fixture_available()) return;
-    terminal_writeln("R2 LIFETIME STRESS TEST:");
+    terminal_writeln("LIFETIME / IPC STRESS TEST:");
 
     Thread *main_thread = thread_current();
     Process *kernel_process = process_kernel();
@@ -458,7 +458,7 @@ void r2_stress_test_run(void) {
         return;
     }
 
-    VfsNode *file = vfs_resolve(vfs_root(), R2_STRESS_PATH);
+    VfsNode *file = vfs_resolve(vfs_root(), LIFETIME_STRESS_PATH);
     bool file_ok = file && file->type == VFS_FILE && file->data && file->size;
 
     if (!file_ok) {
@@ -470,7 +470,7 @@ void r2_stress_test_run(void) {
     u64 frame_baseline = before.free_pages;
     u32 kernel_caps_baseline = capability_table_count(kernel_caps);
     terminal_write("  ITERATIONS: ");
-    terminal_write_u64(R2_STRESS_ITERATIONS);
+    terminal_write_u64(LIFETIME_STRESS_ITERATIONS);
     terminal_putchar('\n');
     terminal_write("  FREE BASELINE: ");
     terminal_write_u64(frame_baseline);
@@ -481,8 +481,8 @@ void r2_stress_test_run(void) {
 
     bool pass = true;
 
-    for (u32 i = 0; i < R2_STRESS_ITERATIONS; ++i) {
-        R2StressScenario scenario = (R2StressScenario)(i % 8U);
+    for (u32 i = 0; i < LIFETIME_STRESS_ITERATIONS; ++i) {
+        LifetimeStressScenario scenario = (LifetimeStressScenario)(i % 8U);
         bool cycle = stress_iteration(file, i, kernel_caps_baseline, frame_baseline);
 
         stress_print_cycle(i, scenario, cycle);
@@ -497,7 +497,7 @@ void r2_stress_test_run(void) {
     bool frames_restored = before.free_pages == after.free_pages;
     bool caps_restored = capability_table_count(kernel_caps) == kernel_caps_baseline;
     bool scheduler_restored = scheduler_thread_count() == 1ULL && thread_current() == main_thread;
-    bool supervisor_final = !user_fixture_busy() && stress_supervisor_ping(R2_STRESS_ITERATIONS + 1U);
+    bool supervisor_final = !user_fixture_busy() && stress_supervisor_ping(LIFETIME_STRESS_ITERATIONS + 1U);
     terminal_write("  FREE AFTER: ");
     terminal_write_u64(after.free_pages);
     terminal_putchar('\n');
@@ -512,7 +512,7 @@ void r2_stress_test_run(void) {
 
     pass = pass && frames_restored && caps_restored && scheduler_restored && supervisor_final;
     terminal_set_color(pass ? terminal_accent_color() : terminal_error_color());
-    terminal_write("R2 LIFETIME STRESS TEST: ");
+    terminal_write("LIFETIME / IPC STRESS TEST: ");
     terminal_writeln(pass ? "PASS" : "FAILED");
     terminal_set_color(terminal_default_color());
 }

@@ -6,6 +6,7 @@
 void splash_show(void);
 void splash_progress(u32 percent);
 void splash_status(const char *text);
+void splash_update(u32 completed, u32 total, const char *status);
 void splash_finish(void);
 
 #endif

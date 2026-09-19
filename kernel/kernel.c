@@ -31,12 +31,7 @@
 
 #define CR4_LA57 (1ULL << 12)
 #define DIRECT_MAP_MIN_PHYSICAL 0x100000ULL
-
-static void boot_delay(void) {
-    for (volatile u64 i = 0; i < 50000000ULL; ++i) {
-        arch_pause();
-    }
-}
+#define BOOT_STAGE_COUNT 22U
 
 static bool map_physical_direct_map(VmPageMap *map, const BootInfo *boot) {
     if (!map ||
@@ -246,11 +241,14 @@ void kernel_main(BootInfo *boot) {
     }
 
     splash_show();
-    splash_progress(5);
+    u32 boot_stage = 0U;
+
+    splash_update(boot_stage, BOOT_STAGE_COUNT, "Preparing interrupt descriptor table");
     /* Firmware GDT/TSS still active. Do NOT use the IST yet. */
     idt_init(false);
-    splash_progress(10);
+    ++boot_stage;
 
+    splash_update(boot_stage, BOOT_STAGE_COUNT, "Initializing GDT and TSS");
     bool gdt_ok = gdt_init(boot->kernel_stack_top);
 
     if (!gdt_ok) {
@@ -272,47 +270,73 @@ void kernel_main(BootInfo *boot) {
     * and enable IST1 for #DF.
     */
     idt_init(true);
-    splash_progress(20);
+    ++boot_stage;
+
+    splash_update(boot_stage, BOOT_STAGE_COUNT, "Initializing physical memory manager");
     bool pmm_ok = pmm_init(boot);
-    splash_progress(35);
+    ++boot_stage;
+
+    splash_update(boot_stage, BOOT_STAGE_COUNT, "Initializing virtual filesystem");
     vfs_init();
+    ++boot_stage;
+
+    splash_update(boot_stage, BOOT_STAGE_COUNT, "Mounting root filesystem");
     bool rootfs_ok = false;
 
     if (boot->initrd_base && boot->initrd_size) {
         rootfs_ok = tar_mount((const void *)(u64)boot->initrd_base, boot->initrd_size);
     }
+    ++boot_stage;
 
-    splash_progress(50);
+    splash_update(boot_stage, BOOT_STAGE_COUNT, "Discovering ACPI platform tables");
     bool acpi_ok = acpi_init(boot->acpi_rsdp);
-    splash_progress(65);
+    ++boot_stage;
+
+    splash_update(boot_stage, BOOT_STAGE_COUNT, "Enumerating PCI devices");
     pci_init();
-    splash_progress(70);
+    ++boot_stage;
+
+    splash_update(boot_stage, BOOT_STAGE_COUNT, "Initializing block device registry");
     block_init();
-    splash_progress(73);
+    ++boot_stage;
+
+    splash_update(boot_stage, BOOT_STAGE_COUNT, "Initializing partition subsystem");
     partition_init();
-    splash_progress(75);
+    ++boot_stage;
+
+    splash_update(boot_stage, BOOT_STAGE_COUNT, "Initializing AHCI storage");
     bool ahci_ok = ahci_init();
-    splash_progress(78);
+    ++boot_stage;
+
+    splash_update(boot_stage, BOOT_STAGE_COUNT, "Initializing interrupt controller");
     const AcpiInfo *acpi = acpi_get();
     bool controller_ok = interrupt_controller_init(acpi);
-    splash_progress(80);
+    ++boot_stage;
+
     bool gpt_ok = false;
     bool partitions_ok = false;
     bool fat32_ok = false;
     BlockDevice *boot_disk = block_find("sda");
+
+    splash_update(boot_stage, BOOT_STAGE_COUNT, "Discovering GPT partitions");
     if (boot_disk) {
         gpt_ok = gpt_probe(boot_disk);
         if (gpt_ok) {
             partitions_ok = gpt_register_partitions();
         }
     }
+    ++boot_stage;
+
+    splash_update(boot_stage, BOOT_STAGE_COUNT, "Probing FAT32 boot filesystem");
     if (partitions_ok) {
         BlockDevice *esp = block_find("sda1");
         if (esp) {
             fat32_ok = fat32_probe(esp);
         }
     }
+    ++boot_stage;
 
+    splash_update(boot_stage, BOOT_STAGE_COUNT, "Building kernel page tables and physical map");
     u64 old_cr3 = arch_read_cr3() & ~0xFFFULL;
     u64 new_cr3 = 0;
     bool paging_ok = false;
@@ -452,7 +476,9 @@ void kernel_main(BootInfo *boot) {
 
     /* If this serial message appears, we have successfully executed code after MOV CR3. */
     serial_write("JA OS: JCOS PAGE TABLES ACTIVE.\n");
+    ++boot_stage;
 
+    splash_update(boot_stage, BOOT_STAGE_COUNT, "Initializing process system");
     bool process_ok = process_system_init(kernel_space);
     if (!process_ok) {
         serial_write("JA OS: process initialization failed.\n");
@@ -462,6 +488,8 @@ void kernel_main(BootInfo *boot) {
         cpu_halt_forever();
     }
 
+    ++boot_stage;
+    splash_update(boot_stage, BOOT_STAGE_COUNT, "Initializing endpoint system");
     bool endpoint_ok = endpoint_system_init();
     if (!endpoint_ok) {
         serial_write("JA OS: endpoint initialization failed.\n");
@@ -473,6 +501,8 @@ void kernel_main(BootInfo *boot) {
         cpu_halt_forever();
     }
 
+    ++boot_stage;
+    splash_update(boot_stage, BOOT_STAGE_COUNT, "Initializing thread system");
     Process *kernel_process = process_kernel();
 
     bool thread_ok =
@@ -487,6 +517,8 @@ void kernel_main(BootInfo *boot) {
         cpu_halt_forever();
     }
 
+    ++boot_stage;
+    splash_update(boot_stage, BOOT_STAGE_COUNT, "Initializing scheduler");
     bool scheduler_ok = scheduler_init();
     if (!scheduler_ok) {
         serial_write("JA OS: scheduler initialization failed.\n");
@@ -496,6 +528,8 @@ void kernel_main(BootInfo *boot) {
         cpu_halt_forever();
     }
 
+    ++boot_stage;
+    splash_update(boot_stage, BOOT_STAGE_COUNT, "Starting userspace supervisor");
     bool supervisor_ok = supervisor_start();
 
     if (!supervisor_ok) {
@@ -507,15 +541,20 @@ void kernel_main(BootInfo *boot) {
         cpu_halt_forever();
     }
 
+    ++boot_stage;
+    splash_update(boot_stage, BOOT_STAGE_COUNT, "Initializing PIT timer");
     bool timer_ok = timer_init(100U);
 
-    splash_progress(85);
+    ++boot_stage;
+    splash_update(boot_stage, BOOT_STAGE_COUNT, "Initializing keyboard input");
     bool keyboard_ok = (!acpi->i8042_known || acpi->i8042_present) ? ps2_init() : false;
-    splash_progress(95);
-    interrupts_enable();
-    splash_progress(100);
 
-    boot_delay();
+    ++boot_stage;
+    splash_update(boot_stage, BOOT_STAGE_COUNT, "Enabling hardware interrupts");
+    interrupts_enable();
+
+    ++boot_stage;
+    splash_update(boot_stage, BOOT_STAGE_COUNT, "Boot complete");
 
     ArchDescriptorTablePointer gdtr;
 
