@@ -88,8 +88,13 @@ typedef struct {
     void *RuntimeServices;
     struct EFI_BOOT_SERVICES *BootServices;
     UINTN NumberOfTableEntries;
-    void *ConfigurationTable;
+    EFI_CONFIGURATION_TABLE *ConfigurationTable;
 } EFI_SYSTEM_TABLE;
+
+_Static_assert(sizeof(EFI_GUID) == 16, "EFI_GUID layout");
+_Static_assert(sizeof(EFI_CONFIGURATION_TABLE) == 24, "EFI configuration-table layout");
+_Static_assert(__builtin_offsetof(EFI_SYSTEM_TABLE, NumberOfTableEntries) == 104, "EFI system-table entry-count offset");
+_Static_assert(__builtin_offsetof(EFI_SYSTEM_TABLE, ConfigurationTable) == 112, "EFI system-table configuration-table offset");
 
 typedef EFI_STATUS (EFIAPI *EFI_ALLOCATE_PAGES)(u32, u32, UINTN, EFI_PHYSICAL_ADDRESS *);
 typedef EFI_STATUS (EFIAPI *EFI_FREE_PAGES)(EFI_PHYSICAL_ADDRESS, UINTN);

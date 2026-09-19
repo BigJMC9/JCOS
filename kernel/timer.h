@@ -10,8 +10,8 @@
  *   legacy IRQ0
  *   IDT vector 0x20
  *
- * Initialization currently requires the
- * 8259 PIC fallback controller.
+ * IRQ0 is delivered through the active controller:
+ * either the IOAPIC path or the 8259 PIC fallback.
  */
 bool timer_init(u32 frequency_hz);
 

@@ -28,6 +28,7 @@
 #include "syscall.h"
 #include "user_elf.h"
 #include "supervisor.h"
+#include "power.h"
 #include "user_runtime_test.h"
 #include "user_runtime_block_test.h"
 #include "user_ipc_cancel_test.h"
@@ -5587,6 +5588,27 @@ static void command_acpi(void) {
     terminal_writeln(!info->i8042_known ? "UNKNOWN" : (info->i8042_present ? "PRESENT" : "ABSENT"));
     terminal_write("ACPI RESET REGISTER: ");
     terminal_writeln(info->reset_supported ? "YES" : "NO");
+    terminal_write("ACPI S5 TABLES: ");
+    terminal_writeln(info->poweroff_supported ? "YES" : "NO");
+    terminal_write("ACPI S5 READY: ");
+    terminal_writeln(acpi_poweroff_supported() ? "YES" : "NO");
+    if (info->poweroff_supported) {
+        terminal_write("PM1A CONTROL: ");
+        terminal_write(info->pm1a_control.address_space == ACPI_ADDRESS_SPACE_SYSTEM_IO ? "IO " : "MMIO ");
+        terminal_write_hex(info->pm1a_control.address);
+        terminal_putchar('\n');
+        if (info->pm1b_control.address) {
+            terminal_write("PM1B CONTROL: ");
+            terminal_write(info->pm1b_control.address_space == ACPI_ADDRESS_SPACE_SYSTEM_IO ? "IO " : "MMIO ");
+            terminal_write_hex(info->pm1b_control.address);
+            terminal_putchar('\n');
+        }
+        terminal_write("S5 TYPE A: ");
+        terminal_write_u64(info->s5_type_a);
+        terminal_write("  TYPE B: ");
+        terminal_write_u64(info->s5_type_b);
+        terminal_putchar('\n');
+    }
 }
 
 static const char *pci_device_kind(const PciDevice *device) {
@@ -6224,19 +6246,60 @@ static void command_fatread(const char *arguments) {
     }
 }
 
-static NORETURN void command_reboot(void) {
+static void command_power_result(const char *action, PowerResult result) {
+    terminal_set_color(terminal_error_color());
+    terminal_write(action);
+    terminal_write(" REFUSED: ");
+    terminal_writeln(power_result_name(result));
+    terminal_set_color(terminal_default_color());
+}
+
+static void command_power(void) {
+    PowerResult shutdown = power_check_shutdown();
+    PowerResult reboot = power_check_reboot();
+
+    terminal_write("SHUTDOWN READY: ");
+    terminal_writeln(shutdown == POWER_RESULT_OK ? "YES" : "NO");
+    if (shutdown != POWER_RESULT_OK) {
+        terminal_write("  REASON: ");
+        terminal_writeln(power_result_name(shutdown));
+    }
+    terminal_write("REBOOT READY: ");
+    terminal_writeln(reboot == POWER_RESULT_OK ? "YES" : "NO");
+    if (reboot != POWER_RESULT_OK) {
+        terminal_write("  REASON: ");
+        terminal_writeln(power_result_name(reboot));
+    }
+    terminal_write("STORAGE SAFE: ");
+    terminal_writeln(power_storage_safe() ? "YES (READ-ONLY / NO DIRTY CACHE)" : "NO");
+}
+
+static void command_shutdown(void) {
+    PowerResult ready = power_check_shutdown();
+    if (ready != POWER_RESULT_OK) {
+        command_power_result("SHUTDOWN", ready);
+        return;
+    }
+
+    terminal_set_color(terminal_accent_color());
+    terminal_writeln("SHUTTING DOWN...");
+    terminal_set_color(terminal_default_color());
+    PowerResult result = power_shutdown();
+    command_power_result("SHUTDOWN", result);
+}
+
+static void command_reboot(void) {
+    PowerResult ready = power_check_reboot();
+    if (ready != POWER_RESULT_OK) {
+        command_power_result("REBOOT", ready);
+        return;
+    }
+
     terminal_set_color(terminal_accent_color());
     terminal_writeln("REBOOTING...");
-    interrupts_disable();
-    (void)acpi_try_reset();
-    for (volatile u64 i = 0; i < 10000000ULL; ++i) arch_pause();
-    for (u32 i = 0; i < 200000; ++i) {
-        if (!(arch_in8(0x64) & 0x02)) break;
-        arch_pause();
-    }
-    arch_out8(0x64, 0xFE);
-    for (volatile u64 i = 0; i < 10000000ULL; ++i) arch_pause();
-    arch_triple_fault();
+    terminal_set_color(terminal_default_color());
+    PowerResult result = power_reboot();
+    command_power_result("REBOOT", result);
 }
 
 static void command_pwd(void) {
@@ -6395,7 +6458,8 @@ static void shell_registry_init(void) {
     shell_add_command("help", "help [COMMAND]", "show command help", SHELL_GROUP_GENERAL, 0, command_help, true);
     shell_add_command("about", "about", "describe this kernel", SHELL_GROUP_GENERAL, command_about, 0, true);
     shell_add_command("clear", "clear", "clear the terminal", SHELL_GROUP_GENERAL, command_clear, 0, true);
-    shell_add_command("reboot", "reboot", "reset the system", SHELL_GROUP_GENERAL, command_reboot, 0, true);
+    shell_add_command("shutdown", "shutdown", "gracefully power off the system", SHELL_GROUP_GENERAL, command_shutdown, 0, true);
+    shell_add_command("reboot", "reboot", "gracefully restart the system", SHELL_GROUP_GENERAL, command_reboot, 0, true);
     shell_add_command("pwd", "pwd", "print the current directory", SHELL_GROUP_FILESYSTEM, command_pwd, 0, true);
     shell_add_command("ls", "ls", "list files in the current directory", SHELL_GROUP_FILESYSTEM, command_ls, 0, true);
     shell_add_command("cd", "cd PATH", "change the current directory", SHELL_GROUP_FILESYSTEM, 0, command_cd, true);
@@ -6404,6 +6468,7 @@ static void shell_registry_init(void) {
     shell_add_command("cpu", "cpu", "show CPUID information", SHELL_GROUP_SYSTEM, command_cpu, 0, true);
     shell_add_command("interrupts", "interrupts", "show interrupt-controller and keyboard state", SHELL_GROUP_SYSTEM, command_interrupts, 0, true);
     shell_add_command("timer", "timer", "show PIT timer state", SHELL_GROUP_SYSTEM, command_timer, 0, true);
+    shell_add_command("power", "power", "show shutdown/reboot readiness", SHELL_GROUP_SYSTEM, command_power, 0, true);
     shell_add_command("acpi", "acpi", "show ACPI discovery results", SHELL_GROUP_HARDWARE, command_acpi, 0, true);
     shell_add_command("pci", "pci", "list discovered PCI devices", SHELL_GROUP_HARDWARE, command_pci, 0, true);
     shell_add_command("ahci", "ahci", "show AHCI controller and SATA ports", SHELL_GROUP_HARDWARE, command_ahci, 0, true);

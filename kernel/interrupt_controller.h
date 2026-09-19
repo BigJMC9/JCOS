@@ -23,11 +23,10 @@ InterruptControllerInfo interrupt_controller_info(void);
 const char *interrupt_controller_name(void);
 
 /*
- * Unmask a legacy 8259 IRQ.
- *
- * Currently valid only while the controller is
- * operating in PIC fallback mode.
+ * Enable a legacy ISA IRQ through the active interrupt controller.
+ * APIC mode applies the ACPI MADT interrupt-source override, if any.
+ * PIC fallback accepts the fixed remapped vector for that IRQ.
  */
-bool interrupt_controller_unmask_legacy_irq(u8 irq);
+bool interrupt_controller_enable_legacy_irq(u8 irq, u8 vector);
 
 #endif

@@ -29,6 +29,7 @@
 
 static InterruptControllerInfo g_info;
 static u64 g_lapic_base;
+static const AcpiInfo *g_acpi;
 
 static void io_wait(void) {
     arch_out8(0x80, 0);
@@ -123,35 +124,48 @@ static void ioapic_mask_all(const AcpiIoApic *io) {
     }
 }
 
-static bool ioapic_route_keyboard(const AcpiInfo *acpi) {
+static bool ioapic_route_gsi(const AcpiInfo *acpi, u32 gsi, u16 flags, u8 vector) {
     /* The legacy I/O APIC destination field is eight bits without interrupt remapping. */
-    if (g_info.local_apic_id > 255) return false;
+    if (!acpi || g_info.local_apic_id > 255 || vector < 0x20U || vector == SPURIOUS_VECTOR) return false;
+
     const AcpiIoApic *target = 0;
     u32 pin = 0;
     for (u32 i = 0; i < acpi->io_apic_count; ++i) {
         const AcpiIoApic *io = &acpi->io_apics[i];
         u32 count = ioapic_redirection_count(io->address);
-        if (acpi->keyboard_gsi >= io->gsi_base && acpi->keyboard_gsi - io->gsi_base < count) {
+        if (gsi >= io->gsi_base && gsi - io->gsi_base < count) {
             target = io;
-            pin = acpi->keyboard_gsi - io->gsi_base;
+            pin = gsi - io->gsi_base;
             break;
         }
     }
     if (!target) return false;
 
-    u32 polarity = acpi->keyboard_flags & 3U;
-    u32 trigger = (acpi->keyboard_flags >> 2) & 3U;
-    u32 low = KEYBOARD_VECTOR;
+    u32 polarity = flags & 3U;
+    u32 trigger = (flags >> 2) & 3U;
+    if (polarity == 2U || trigger == 2U) return false; /* Reserved ACPI encodings. */
+
+    u32 low = vector;
     if (polarity == 3U) low |= (1U << 13); /* Active low. */
     if (trigger == 3U) low |= (1U << 15);  /* Level triggered. */
     u32 high = (g_info.local_apic_id & 0xFFU) << 24;
     u8 reg = (u8)(0x10 + pin * 2);
-    ioapic_write(target->address, (u8)(reg + 1), high); 
+
+    /* Keep the entry masked while changing its destination and mode. */
+    ioapic_write(target->address, reg, low | LAPIC_LVT_MASKED);
+    ioapic_write(target->address, (u8)(reg + 1), high);
     ioapic_write(target->address, reg, low);
     return true;
 }
 
+static bool ioapic_route_legacy_irq(const AcpiInfo *acpi, u8 irq, u8 vector) {
+    if (!acpi || irq >= ACPI_LEGACY_IRQ_COUNT) return false;
+    const AcpiLegacyIrq *route = &acpi->legacy_irqs[irq];
+    return ioapic_route_gsi(acpi, route->gsi, route->flags, vector);
+}
+
 bool interrupt_controller_init(const AcpiInfo *acpi) {
+    g_acpi = 0;
     g_info.mode = INTERRUPT_CONTROLLER_NONE;
     g_info.keyboard_gsi = 1;
     g_info.local_apic_id = 0;
@@ -163,8 +177,9 @@ bool interrupt_controller_init(const AcpiInfo *acpi) {
         lapic_ready = lapic_initialize(acpi);
         if (lapic_ready) {
             for (u32 i = 0; i < acpi->io_apic_count; ++i) ioapic_mask_all(&acpi->io_apics[i]);
-            if (ioapic_route_keyboard(acpi)) {
+            if (ioapic_route_legacy_irq(acpi, 1U, KEYBOARD_VECTOR)) {
                 pic_mask_all();
+                g_acpi = acpi;
                 g_info.mode = INTERRUPT_CONTROLLER_APIC;
                 return true;
             }
@@ -202,8 +217,8 @@ const char *interrupt_controller_name(void) {
     return "NONE";
 }
 
-bool interrupt_controller_unmask_legacy_irq(u8 irq) {
-    if (g_info.mode != INTERRUPT_CONTROLLER_PIC || irq >= 16U) return false;
+static bool pic_unmask_irq(u8 irq) {
+    if (irq >= 16U) return false;
     if (irq < 8U) {
         u8 mask = arch_in8(PIC1_DATA);
         mask &= (u8)~(1U << irq);
@@ -219,4 +234,19 @@ bool interrupt_controller_unmask_legacy_irq(u8 irq) {
     slave_mask &= (u8)~(1U << (irq - 8U));
     arch_out8(PIC2_DATA, slave_mask);
     return true;
+}
+
+bool interrupt_controller_enable_legacy_irq(u8 irq, u8 vector) {
+    if (irq >= ACPI_LEGACY_IRQ_COUNT || vector < 0x20U || vector == SPURIOUS_VECTOR) return false;
+
+    if (g_info.mode == INTERRUPT_CONTROLLER_PIC) {
+        if (vector != (u8)(0x20U + irq)) return false;
+        return pic_unmask_irq(irq);
+    }
+
+    if (g_info.mode == INTERRUPT_CONTROLLER_APIC) {
+        return g_acpi && ioapic_route_legacy_irq(g_acpi, irq, vector);
+    }
+
+    return false;
 }

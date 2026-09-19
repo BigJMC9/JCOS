@@ -215,6 +215,17 @@ static bool build_kernel_page_map(VmPageMap *map, const BootInfo *boot, const Ac
         if (!vmm_identity_map_range(map, acpi->reset_address, VM_PAGE_SIZE, VM_WRITE)) goto fail;
     }
 
+    /* ACPI PM1 control blocks may also be SystemMemory GAS registers. */
+    if (acpi && acpi->poweroff_supported) {
+        if (acpi->pm1a_control.address_space == ACPI_ADDRESS_SPACE_SYSTEM_MEMORY &&
+            acpi->pm1a_control.address &&
+            !vmm_identity_map_range(map, acpi->pm1a_control.address, sizeof(u16), VM_WRITE)) goto fail;
+
+        if (acpi->pm1b_control.address_space == ACPI_ADDRESS_SPACE_SYSTEM_MEMORY &&
+            acpi->pm1b_control.address &&
+            !vmm_identity_map_range(map, acpi->pm1b_control.address, sizeof(u16), VM_WRITE)) goto fail;
+    }
+
     return true;
 
 fail:

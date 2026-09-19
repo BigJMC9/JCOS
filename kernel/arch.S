@@ -7,7 +7,9 @@
 .global arch_pause
 .global arch_halt
 .global arch_in8
+.global arch_in16
 .global arch_out8
+.global arch_out16
 .global arch_in32
 .global arch_out32
 .global arch_read_msr
@@ -65,10 +67,20 @@ arch_in8:
     xor eax, eax
     in al, dx
     ret
+arch_in16:
+    mov dx, di
+    xor eax, eax
+    in ax, dx
+    ret
 arch_out8:
     mov dx, di
     mov eax, esi
     out dx, al
+    ret
+arch_out16:
+    mov dx, di
+    mov eax, esi
+    out dx, ax
     ret
 arch_in32:
     mov dx, di

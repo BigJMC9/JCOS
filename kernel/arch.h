@@ -12,7 +12,9 @@ NORETURN void arch_triple_fault(void);
 NORETURN void arch_enter_user(u64 rip, u64 rsp);
 
 u8  arch_in8(u16 port);
+u16 arch_in16(u16 port);
 void arch_out8(u16 port, u8 value);
+void arch_out16(u16 port, u16 value);
 u32 arch_in32(u16 port);
 void arch_out32(u16 port, u32 value);
 

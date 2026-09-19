@@ -5,6 +5,7 @@
 
 #define PIT_CHANNEL0_DATA 0x40U
 #define PIT_COMMAND       0x43U
+#define PIT_VECTOR        0x20U
 
 #define PIT_INPUT_HZ      1193182U
 
@@ -65,10 +66,8 @@ bool timer_init(u32 frequency_hz) {
         (u8)((divisor >> 8) & 0xFFU)
     );
 
-    /*
-     * v1 uses the legacy PIC path only.
-     */
-    if (!interrupt_controller_unmask_legacy_irq(0U))
+    /* Route legacy IRQ0 through whichever controller was selected at boot. */
+    if (!interrupt_controller_enable_legacy_irq(0U, PIT_VECTOR))
         return false;
 
     g_ticks = 0;

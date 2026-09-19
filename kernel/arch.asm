@@ -9,7 +9,9 @@ GLOBAL arch_sti
 GLOBAL arch_pause
 GLOBAL arch_halt
 GLOBAL arch_in8
+GLOBAL arch_in16
 GLOBAL arch_out8
+GLOBAL arch_out16
 GLOBAL arch_in32
 GLOBAL arch_out32
 GLOBAL arch_read_msr
@@ -73,10 +75,22 @@ arch_in8:
     in al, dx
     ret
 
+arch_in16:
+    mov dx, di
+    xor eax, eax
+    in ax, dx
+    ret
+
 arch_out8:
     mov dx, di
     mov eax, esi
     out dx, al
+    ret
+
+arch_out16:
+    mov dx, di
+    mov eax, esi
+    out dx, ax
     ret
 
 arch_in32:
