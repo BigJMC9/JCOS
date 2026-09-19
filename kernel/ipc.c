@@ -390,7 +390,7 @@ static bool ipc_receive_blocking_common(Process *process, CapabilityHandle handl
             break;
         }
         ++g_park_attempts;
-        if (!scheduler_block_current()) {
+        if (!scheduler_wait_current()) {
             ipc_finish(current, endpoint, THREAD_WAIT_IPC_RECEIVE, id, THREAD_WAIT_RESULT_CANCELLED);
             break;
         }
@@ -446,7 +446,7 @@ static bool ipc_send_blocking_common(Process *process, CapabilityHandle handle, 
         if (current->wait_result != THREAD_WAIT_RESULT_PENDING) break;
         if (!endpoint->waiting_sender_message_ready) cpu_halt_forever();
         ++g_park_attempts;
-        if (!scheduler_block_current()) {
+        if (!scheduler_wait_current()) {
             ipc_finish(current, endpoint, THREAD_WAIT_IPC_SEND, id, THREAD_WAIT_RESULT_CANCELLED);
             break;
         }

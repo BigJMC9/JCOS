@@ -1,6 +1,8 @@
 #include "scheduler.h"
 #include "arch.h"
 
+#define SCHEDULER_RFLAGS_IF (1ULL << 9)
+
 typedef enum {
     SCHEDULER_TRAP_INVALID = 0,
     SCHEDULER_TRAP_YIELD = 1,
@@ -17,6 +19,7 @@ static bool g_initialized;
 static u64 g_reschedule_count;
 static bool g_preemption_enabled;
 static u64 g_preemption_count;
+static u64 g_idle_wait_count;
 
 static bool scheduler_interrupt_frame_valid(const Thread *thread, const InterruptFrame *frame) {
     if (!thread || 
@@ -53,6 +56,7 @@ bool scheduler_init(void) {
     g_preemption_enabled = false;
     g_preemption_count = 0;
     g_reschedule_count = 0;
+    g_idle_wait_count = 0;
 
     return true;
 }
@@ -174,6 +178,41 @@ bool scheduler_block_current(void) {
 
     /* On success this INT does not return until scheduler_wake() makes us READY and the scheduler selects this saved frame again. */
     return arch_reschedule_interrupt(SCHEDULER_TRAP_BLOCK) != 0;
+}
+
+bool scheduler_wait_current(void) {
+    if (!g_initialized || !g_run_head || !g_run_tail || !g_run_count) return false;
+
+    u64 flags = 0;
+    __asm__ volatile ("pushfq; popq %0" : "=r"(flags) : : "memory");
+    arch_cli();
+
+    Thread *current = thread_current();
+    bool valid = current && current->id && current->on_run_queue &&
+        current->state == THREAD_STATE_RUNNING && current->run_next;
+    bool result = false;
+
+    if (valid && g_run_count > 1ULL) {
+        result = scheduler_block_current();
+    } else if (valid && g_run_count == 1ULL && g_run_head == current && g_run_tail == current &&
+        current->run_next == current) {
+        /*
+         * No other runnable context exists. Keep the current kernel continuation
+         * intact and idle the CPU for one interrupt. STI;HLT is race-free on
+         * x86: interrupts are recognized only after the following HLT begins.
+         * The caller must re-check its blocking predicate after we return.
+         */
+        ++g_idle_wait_count;
+        __asm__ volatile ("sti; hlt; cli" : : : "memory");
+        result = true;
+    }
+
+    if (flags & SCHEDULER_RFLAGS_IF) arch_sti();
+    return result;
+}
+
+u64 scheduler_idle_wait_count(void) {
+    return g_initialized ? g_idle_wait_count : 0;
 }
 
 bool scheduler_wake(Thread *thread) {

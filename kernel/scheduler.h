@@ -24,13 +24,25 @@ bool scheduler_yield(void);
 u64 scheduler_thread_count(void);
 
 /*
- * Block the current thread.
+ * Block the current thread when another runnable context exists.
  *
  * Returns only after scheduler_wake() makes
  * this thread runnable and its saved interrupt
  * frame is scheduled again.
  */
 bool scheduler_block_current(void);
+
+/*
+ * Predicate-loop parking primitive.
+ *
+ * With another runnable thread this performs a normal scheduler block. If the
+ * caller is the sole runnable thread it preserves the continuation in place,
+ * idles with STI;HLT for one interrupt, and returns so the caller can re-check
+ * its blocking predicate. The caller's original IF state is restored exactly.
+ */
+bool scheduler_wait_current(void);
+u64 scheduler_idle_wait_count(void);
+
 bool scheduler_wake(Thread *thread);
 
 /*

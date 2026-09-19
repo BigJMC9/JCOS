@@ -317,19 +317,6 @@ static bool stale_identity(void) {
         matches(&g_wait.outputs[0], WAIT_PAYLOAD_B) && matches(&g_wait.outputs[1], WAIT_PAYLOAD_B);
 }
 
-static bool park_failure(bool sender) {
-    if (!start(sender, 1U, false)) return false;
-    IpcMessage message;
-    fill(&message, WAIT_PAYLOAD_B);
-    bool result = sender ? ipc_send_blocking(g_wait.kernel, g_wait.send, &message) :
-        ipc_receive_blocking(g_wait.kernel, g_wait.receive, &message);
-    if (result || thread_wait_active(g_wait.main) || g_wait.endpoint.waiting_receiver ||
-        g_wait.endpoint.waiting_receiver_id || g_wait.endpoint.waiting_sender || g_wait.endpoint.waiting_sender_id ||
-        g_wait.endpoint.waiting_sender_message_ready || scheduler_thread_count() != 1ULL) return false;
-    if (!sender) return empty_output(&message);
-    return ipc_try_receive(g_wait.kernel, g_wait.receive, &message) && matches(&message, WAIT_PAYLOAD_A);
-}
-
 static bool finish_case(const char *name, bool behavior) {
     bool released = cleanup();
     report(name, behavior && released);
@@ -366,8 +353,9 @@ void ipc_wait_order_test_run(void) {
     if (pass) pass = finish_case("KILL READY RECEIVE / MESSAGE RETAINED", kill_ready(false));
     if (pass) pass = finish_case("KILL COMMITTED SEND / MESSAGE RETAINED", kill_ready(true));
     if (pass) pass = finish_case("OLD WAIT ID CANNOT COMPLETE NEXT WAIT", stale_identity());
-    if (pass) pass = finish_case("NO-RUNNABLE RECEIVE PARK ROLLBACK", park_failure(false));
-    if (pass) pass = finish_case("NO-RUNNABLE SEND PARK ROLLBACK", park_failure(true));
+    /* R4.1A deliberately changed sole-runnable blocking IPC from immediate
+     * park rollback to idle-and-recheck. The timed form is covered by
+     * scheduler-idle; an untimed wait with no producer would correctly wait. */
     u64 after = pmm_stats().free_pages;
     terminal_write("  FREE BEFORE: "); terminal_write_u64(before); terminal_putchar('\n');
     terminal_write("  FREE AFTER: "); terminal_write_u64(after); terminal_putchar('\n');

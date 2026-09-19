@@ -9,6 +9,7 @@
 #include "ipc_wait_order_test.h"
 #include "lib.h"
 #include "peer_death_test.h"
+#include "scheduler_idle_test.h"
 #include "process_terminate_test.h"
 #include "lifetime_ipc_acceptance_test.h"
 #include "lifetime_stress_test.h"
@@ -57,6 +58,7 @@ static void kernel_test_registry_init(void) {
     kernel_test_add("wait-order", "bounded IPC completion ordering", KERNEL_TEST_IPC, ipc_wait_order_test_run, ipc_wait_order_cleanup_run);
     kernel_test_add("peer-death", "owned-endpoint peer-death propagation", KERNEL_TEST_IPC, peer_death_test_run, peer_death_cleanup_run);
     kernel_test_add("timeout", "IPC timeout/deadline ordering", KERNEL_TEST_IPC, ipc_timeout_order_test_run, ipc_timeout_order_cleanup_run);
+    kernel_test_add("scheduler-idle", "last-runnable blocking and IF-preserving idle wait", KERNEL_TEST_SCHEDULING, scheduler_idle_test_run, scheduler_idle_test_cleanup_run);
     kernel_test_add("user-ipc-cancel", "Ring3 IPC cancellation and close", KERNEL_TEST_USERSPACE, user_ipc_cancel_test_run, user_fixture_cleanup_retry_run);
     kernel_test_add("user-process-cleanup", "shared user-process cleanup", KERNEL_TEST_USERSPACE, user_process_cleanup_test_run, user_fixture_cleanup_retry_run);
     kernel_test_add("user-protection", "hardware NX and W^X enforcement", KERNEL_TEST_USERSPACE, user_protection_test_run, user_fixture_cleanup_retry_run);
