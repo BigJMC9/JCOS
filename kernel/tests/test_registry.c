@@ -19,38 +19,60 @@
 #include "user_test_fixture.h"
 #include "vmm_reclaim_test.h"
 
-static const KernelTest g_tests[] = {
-    { "capability", "capability handles, rights and revoke", KERNEL_TEST_LIFETIME, capability_table_test_run, 0 },
-    { "capability-lifetime", "capability lifetime and safe storage reuse", KERNEL_TEST_LIFETIME, capability_lifetime_test_run, 0 },
-    { "constructor", "creation rollback and storage lifetime", KERNEL_TEST_LIFETIME, constructor_test_run, 0 },
-    { "stack-reclaim", "atomic kernel-stack release and retry", KERNEL_TEST_MEMORY, stack_reclaim_test_run, 0 },
-    { "elf-reclaim", "ELF cleanup failure and retry", KERNEL_TEST_MEMORY, elf_reclaim_test_run, 0 },
-    { "vmm-reclaim", "page-table cleanup failure and retry", KERNEL_TEST_MEMORY, vmm_reclaim_test_run, 0 },
-    { "force-thread", "forced IPC thread termination", KERNEL_TEST_TASK, force_thread_test_run, force_thread_cleanup_run },
-    { "published-cleanup", "published fixture cleanup and retry", KERNEL_TEST_LIFETIME, published_cleanup_test_run, force_thread_cleanup_run },
-    { "process-kill", "forced multi-thread process termination", KERNEL_TEST_TASK, process_terminate_test_run, user_fixture_cleanup_retry_run },
-    { "wait-order", "bounded IPC completion ordering", KERNEL_TEST_IPC, ipc_wait_order_test_run, ipc_wait_order_cleanup_run },
-    { "peer-death", "owned-endpoint peer-death propagation", KERNEL_TEST_IPC, peer_death_test_run, peer_death_cleanup_run },
-    { "timeout", "IPC timeout/deadline ordering", KERNEL_TEST_IPC, ipc_timeout_order_test_run, ipc_timeout_order_cleanup_run },
-    { "user-ipc-cancel", "Ring3 IPC cancellation and close", KERNEL_TEST_USERSPACE, user_ipc_cancel_test_run, user_fixture_cleanup_retry_run },
-    { "user-process-cleanup", "shared user-process cleanup", KERNEL_TEST_USERSPACE, user_process_cleanup_test_run, user_fixture_cleanup_retry_run },
-    { "user-runtime", "shared Ring3 C runtime", KERNEL_TEST_USERSPACE, user_runtime_test_run, user_fixture_cleanup_retry_run },
-    { "user-runtime-block", "blocking Ring3 C runtime", KERNEL_TEST_USERSPACE, user_runtime_block_test_run, user_fixture_cleanup_retry_run },
-    { "lifetime-stress", "IPC/process lifetime recovery stress", KERNEL_TEST_ACCEPTANCE, r2_stress_test_run, user_fixture_cleanup_retry_run },
-    { "final-acceptance", "integrated lifetime and IPC robustness gate", KERNEL_TEST_ACCEPTANCE, r2_acceptance_test_run, r2_acceptance_cleanup_run }
-};
+#define KERNEL_TEST_CAPACITY 32U
+
+static KernelTest g_tests[KERNEL_TEST_CAPACITY];
+static u32 g_test_count;
+static bool g_test_registry_initialized;
+
+static void kernel_test_add(const char *name, const char *description, KernelTestGroup group,
+    void (*run)(void), void (*cleanup)(void)) {
+    if (g_test_count >= KERNEL_TEST_CAPACITY) return;
+    KernelTest *test = &g_tests[g_test_count++];
+    test->name = name;
+    test->description = description;
+    test->group = group;
+    test->run = run;
+    test->cleanup = cleanup;
+}
+
+static void kernel_test_registry_init(void) {
+    if (g_test_registry_initialized) return;
+    g_test_registry_initialized = true;
+    kernel_test_add("capability", "capability handles, rights and revoke", KERNEL_TEST_LIFETIME, capability_table_test_run, 0);
+    kernel_test_add("capability-lifetime", "capability lifetime and safe storage reuse", KERNEL_TEST_LIFETIME, capability_lifetime_test_run, 0);
+    kernel_test_add("constructor", "creation rollback and storage lifetime", KERNEL_TEST_LIFETIME, constructor_test_run, 0);
+    kernel_test_add("stack-reclaim", "atomic kernel-stack release and retry", KERNEL_TEST_MEMORY, stack_reclaim_test_run, 0);
+    kernel_test_add("elf-reclaim", "ELF cleanup failure and retry", KERNEL_TEST_MEMORY, elf_reclaim_test_run, 0);
+    kernel_test_add("vmm-reclaim", "page-table cleanup failure and retry", KERNEL_TEST_MEMORY, vmm_reclaim_test_run, 0);
+    kernel_test_add("force-thread", "forced IPC thread termination", KERNEL_TEST_TASK, force_thread_test_run, force_thread_cleanup_run);
+    kernel_test_add("published-cleanup", "published fixture cleanup and retry", KERNEL_TEST_LIFETIME, published_cleanup_test_run, force_thread_cleanup_run);
+    kernel_test_add("process-kill", "forced multi-thread process termination", KERNEL_TEST_TASK, process_terminate_test_run, user_fixture_cleanup_retry_run);
+    kernel_test_add("wait-order", "bounded IPC completion ordering", KERNEL_TEST_IPC, ipc_wait_order_test_run, ipc_wait_order_cleanup_run);
+    kernel_test_add("peer-death", "owned-endpoint peer-death propagation", KERNEL_TEST_IPC, peer_death_test_run, peer_death_cleanup_run);
+    kernel_test_add("timeout", "IPC timeout/deadline ordering", KERNEL_TEST_IPC, ipc_timeout_order_test_run, ipc_timeout_order_cleanup_run);
+    kernel_test_add("user-ipc-cancel", "Ring3 IPC cancellation and close", KERNEL_TEST_USERSPACE, user_ipc_cancel_test_run, user_fixture_cleanup_retry_run);
+    kernel_test_add("user-process-cleanup", "shared user-process cleanup", KERNEL_TEST_USERSPACE, user_process_cleanup_test_run, user_fixture_cleanup_retry_run);
+    kernel_test_add("user-runtime", "shared Ring3 C runtime", KERNEL_TEST_USERSPACE, user_runtime_test_run, user_fixture_cleanup_retry_run);
+    kernel_test_add("user-runtime-block", "blocking Ring3 C runtime", KERNEL_TEST_USERSPACE, user_runtime_block_test_run, user_fixture_cleanup_retry_run);
+    kernel_test_add("lifetime-stress", "IPC/process lifetime recovery stress", KERNEL_TEST_ACCEPTANCE, r2_stress_test_run, user_fixture_cleanup_retry_run);
+    kernel_test_add("final-acceptance", "integrated lifetime and IPC robustness gate", KERNEL_TEST_ACCEPTANCE, r2_acceptance_test_run, r2_acceptance_cleanup_run);
+}
 
 u32 kernel_test_registry_count(void) {
-    return (u32)(sizeof(g_tests) / sizeof(g_tests[0]));
+    kernel_test_registry_init();
+    return g_test_count;
 }
 
 const KernelTest *kernel_test_registry_at(u32 index) {
-    return index < kernel_test_registry_count() ? &g_tests[index] : 0;
+    kernel_test_registry_init();
+    return index < g_test_count ? &g_tests[index] : 0;
 }
 
 const KernelTest *kernel_test_registry_find(const char *name) {
+    kernel_test_registry_init();
     if (!name || !*name) return 0;
-    for (u32 i = 0; i < kernel_test_registry_count(); ++i) {
+    for (u32 i = 0; i < g_test_count; ++i) {
         if (k_strieq(name, g_tests[i].name)) return &g_tests[i];
     }
     return 0;

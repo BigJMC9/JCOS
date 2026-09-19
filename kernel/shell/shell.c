@@ -6331,115 +6331,141 @@ typedef struct {
 static void command_clear(void) { terminal_clear(); }
 static void command_fault(void) { __asm__ volatile ("ud2"); }
 
-static const ShellLocalTest g_shell_tests[] = {
-    { "frame", "PMM allocation/free/reuse", KERNEL_TEST_MEMORY, command_frametest },
-    { "vmm-basic", "x86-64 page-table operations", KERNEL_TEST_MEMORY, command_vmmtest },
-    { "address-space", "address-space ownership and sharing", KERNEL_TEST_MEMORY, command_astest },
-    { "supervisor", "long-lived Ring3 supervisor", KERNEL_TEST_USERSPACE, command_supervisortest },
-    { "endpoint", "endpoint objects and capability rights", KERNEL_TEST_IPC, command_endpointtest },
-    { "ipc", "non-blocking capability IPC", KERNEL_TEST_IPC, command_ipctest },
-    { "ipc-receive-block", "blocking IPC receive/wakeup", KERNEL_TEST_IPC, command_ipcblocktest },
-    { "ipc-send-block", "blocking IPC send/wakeup", KERNEL_TEST_IPC, command_ipcsendblocktest },
-    { "user-ipc", "Ring3 capability IPC syscalls", KERNEL_TEST_USERSPACE, command_useripctest },
-    { "user-ipc-receive-block", "Ring3 blocking IPC receive", KERNEL_TEST_USERSPACE, command_useripcblocktest },
-    { "user-ipc-send-block", "Ring3 blocking IPC send", KERNEL_TEST_USERSPACE, command_useripcsendblocktest },
-    { "process", "process/address-space/capability ownership", KERNEL_TEST_TASK, command_processtest },
-    { "thread", "thread lifecycle and kernel stacks", KERNEL_TEST_TASK, command_threadtest },
-    { "scheduler", "round-robin full-frame scheduling", KERNEL_TEST_SCHEDULING, command_schedtest },
-    { "block", "thread blocking and wakeup", KERNEL_TEST_SCHEDULING, command_blocktest },
-    { "exit", "permanent current-thread termination", KERNEL_TEST_TASK, command_exittest },
-    { "syscall", "Ring3 syscall round-trip", KERNEL_TEST_USERSPACE, command_syscalltest },
-    { "user-isolation", "recoverable Ring3 fault isolation", KERNEL_TEST_USERSPACE, command_userisotest },
-    { "user-page-fault", "recoverable Ring3 page fault", KERNEL_TEST_USERSPACE, command_userpftest },
-    { "timer-irq", "periodic IRQ0 ticks", KERNEL_TEST_SCHEDULING, command_timertest },
-    { "preemption", "timer-driven involuntary switching", KERNEL_TEST_SCHEDULING, command_preempttest },
-    { "user-preemption", "PIT preemption from Ring3", KERNEL_TEST_SCHEDULING, command_userpreempttest },
-    { "user-elf", "filesystem ELF Ring3 loader", KERNEL_TEST_USERSPACE, command_userelftest },
-    { "reschedule", "INT 0x81 full-frame scheduling", KERNEL_TEST_SCHEDULING, command_reschedtest }
-};
+#define SHELL_COMMAND_CAPACITY 96U
+#define SHELL_LOCAL_TEST_CAPACITY 32U
 
-static const ShellCommand g_commands[] = {
-    { "help", "help [COMMAND]", "show command help", SHELL_GROUP_GENERAL, 0, command_help, true },
-    { "about", "about", "describe this kernel", SHELL_GROUP_GENERAL, command_about, 0, true },
-    { "clear", "clear", "clear the terminal", SHELL_GROUP_GENERAL, command_clear, 0, true },
-    { "reboot", "reboot", "reset the system", SHELL_GROUP_GENERAL, command_reboot, 0, true },
+static ShellCommand g_commands[SHELL_COMMAND_CAPACITY];
+static u32 g_command_count;
+static ShellLocalTest g_shell_tests[SHELL_LOCAL_TEST_CAPACITY];
+static u32 g_shell_test_count;
+static bool g_shell_registry_initialized;
 
-    { "pwd", "pwd", "print the current directory", SHELL_GROUP_FILESYSTEM, command_pwd, 0, true },
-    { "ls", "ls", "list files in the current directory", SHELL_GROUP_FILESYSTEM, command_ls, 0, true },
-    { "cd", "cd PATH", "change the current directory", SHELL_GROUP_FILESYSTEM, 0, command_cd, true },
-    { "cat", "cat FILE", "print a file", SHELL_GROUP_FILESYSTEM, 0, command_cat, true },
+static void shell_add_command(const char *name, const char *usage, const char *description,
+    ShellCommandGroup group, ShellCommandNoArgs no_args, ShellCommandArgs with_args, bool visible) {
+    if (g_command_count >= SHELL_COMMAND_CAPACITY) return;
+    ShellCommand *command = &g_commands[g_command_count++];
+    command->name = name;
+    command->usage = usage;
+    command->description = description;
+    command->group = group;
+    command->no_args = no_args;
+    command->with_args = with_args;
+    command->visible = visible;
+}
 
-    { "memory", "memory", "show memory-map and allocator state", SHELL_GROUP_SYSTEM, command_memory, 0, true },
-    { "cpu", "cpu", "show CPUID information", SHELL_GROUP_SYSTEM, command_cpu, 0, true },
-    { "interrupts", "interrupts", "show interrupt-controller and keyboard state", SHELL_GROUP_SYSTEM, command_interrupts, 0, true },
-    { "timer", "timer", "show PIT timer state", SHELL_GROUP_SYSTEM, command_timer, 0, true },
+static void shell_add_local_test(const char *name, const char *description,
+    KernelTestGroup group, void (*run)(void)) {
+    if (g_shell_test_count >= SHELL_LOCAL_TEST_CAPACITY) return;
+    ShellLocalTest *test = &g_shell_tests[g_shell_test_count++];
+    test->name = name;
+    test->description = description;
+    test->group = group;
+    test->run = run;
+}
 
-    { "acpi", "acpi", "show ACPI discovery results", SHELL_GROUP_HARDWARE, command_acpi, 0, true },
-    { "pci", "pci", "list discovered PCI devices", SHELL_GROUP_HARDWARE, command_pci, 0, true },
-    { "ahci", "ahci", "show AHCI controller and SATA ports", SHELL_GROUP_HARDWARE, command_ahci, 0, true },
+static void shell_registry_init(void) {
+    if (g_shell_registry_initialized) return;
+    g_shell_registry_initialized = true;
 
-    { "disks", "disks", "list block devices", SHELL_GROUP_STORAGE, command_disks, 0, true },
-    { "sector", "sector LBA", "dump a raw disk sector", SHELL_GROUP_STORAGE, 0, command_sector, true },
-    { "partitions", "partitions", "list GPT partitions", SHELL_GROUP_STORAGE, command_partitions, 0, true },
-    { "fat32", "fat32", "show FAT32 filesystem information", SHELL_GROUP_STORAGE, command_fat32, 0, true },
-    { "fatls", "fatls", "list the FAT32 root directory", SHELL_GROUP_STORAGE, command_fatls, 0, true },
-    { "fatread", "fatread FILE [OFFSET] [COUNT]", "read/test a FAT32 root file", SHELL_GROUP_STORAGE, 0, command_fatread, true },
+    shell_add_local_test("frame", "PMM allocation/free/reuse", KERNEL_TEST_MEMORY, command_frametest);
+    shell_add_local_test("vmm-basic", "x86-64 page-table operations", KERNEL_TEST_MEMORY, command_vmmtest);
+    shell_add_local_test("address-space", "address-space ownership and sharing", KERNEL_TEST_MEMORY, command_astest);
+    shell_add_local_test("supervisor", "long-lived Ring3 supervisor", KERNEL_TEST_USERSPACE, command_supervisortest);
+    shell_add_local_test("endpoint", "endpoint objects and capability rights", KERNEL_TEST_IPC, command_endpointtest);
+    shell_add_local_test("ipc", "non-blocking capability IPC", KERNEL_TEST_IPC, command_ipctest);
+    shell_add_local_test("ipc-receive-block", "blocking IPC receive/wakeup", KERNEL_TEST_IPC, command_ipcblocktest);
+    shell_add_local_test("ipc-send-block", "blocking IPC send/wakeup", KERNEL_TEST_IPC, command_ipcsendblocktest);
+    shell_add_local_test("user-ipc", "Ring3 capability IPC syscalls", KERNEL_TEST_USERSPACE, command_useripctest);
+    shell_add_local_test("user-ipc-receive-block", "Ring3 blocking IPC receive", KERNEL_TEST_USERSPACE, command_useripcblocktest);
+    shell_add_local_test("user-ipc-send-block", "Ring3 blocking IPC send", KERNEL_TEST_USERSPACE, command_useripcsendblocktest);
+    shell_add_local_test("process", "process/address-space/capability ownership", KERNEL_TEST_TASK, command_processtest);
+    shell_add_local_test("thread", "thread lifecycle and kernel stacks", KERNEL_TEST_TASK, command_threadtest);
+    shell_add_local_test("scheduler", "round-robin full-frame scheduling", KERNEL_TEST_SCHEDULING, command_schedtest);
+    shell_add_local_test("block", "thread blocking and wakeup", KERNEL_TEST_SCHEDULING, command_blocktest);
+    shell_add_local_test("exit", "permanent current-thread termination", KERNEL_TEST_TASK, command_exittest);
+    shell_add_local_test("syscall", "Ring3 syscall round-trip", KERNEL_TEST_USERSPACE, command_syscalltest);
+    shell_add_local_test("user-isolation", "recoverable Ring3 fault isolation", KERNEL_TEST_USERSPACE, command_userisotest);
+    shell_add_local_test("user-page-fault", "recoverable Ring3 page fault", KERNEL_TEST_USERSPACE, command_userpftest);
+    shell_add_local_test("timer-irq", "periodic IRQ0 ticks", KERNEL_TEST_SCHEDULING, command_timertest);
+    shell_add_local_test("preemption", "timer-driven involuntary switching", KERNEL_TEST_SCHEDULING, command_preempttest);
+    shell_add_local_test("user-preemption", "PIT preemption from Ring3", KERNEL_TEST_SCHEDULING, command_userpreempttest);
+    shell_add_local_test("user-elf", "filesystem ELF Ring3 loader", KERNEL_TEST_USERSPACE, command_userelftest);
+    shell_add_local_test("reschedule", "INT 0x81 full-frame scheduling", KERNEL_TEST_SCHEDULING, command_reschedtest);
 
-    { "test", "test list [GROUP] | test NAME [cleanup]", "list or run kernel diagnostics", SHELL_GROUP_DEVELOPMENT, 0, command_test, true },
-    { "alloc", "alloc", "allocate one physical 4 KiB frame", SHELL_GROUP_DEVELOPMENT, command_alloc, 0, true },
-    { "fault", "fault", "deliberately execute UD2 in the kernel", SHELL_GROUP_DEVELOPMENT, command_fault, 0, true },
-    { "userfault", "userfault", "enter Ring3 and deliberately execute UD2", SHELL_GROUP_DEVELOPMENT, command_userfault, 0, true },
-
-    /* Compatibility aliases: accepted but intentionally omitted from normal help. */
-    { "frametest", "frametest", "legacy alias for test frame", SHELL_GROUP_DEVELOPMENT, command_frametest, 0, false },
-    { "vmmtest", "vmmtest", "legacy alias for test vmm-basic", SHELL_GROUP_DEVELOPMENT, command_vmmtest, 0, false },
-    { "astest", "astest", "legacy alias for test address-space", SHELL_GROUP_DEVELOPMENT, command_astest, 0, false },
-    { "threadtest", "threadtest", "legacy alias for test thread", SHELL_GROUP_DEVELOPMENT, command_threadtest, 0, false },
-    { "forcethreadtest", "forcethreadtest", "legacy test alias", SHELL_GROUP_DEVELOPMENT, force_thread_test_run, 0, false },
-    { "supervisortest", "supervisortest", "legacy alias for test supervisor", SHELL_GROUP_DEVELOPMENT, command_supervisortest, 0, false },
-    { "captest", "captest", "legacy test alias", SHELL_GROUP_DEVELOPMENT, command_captest, 0, false },
-    { "caplifetimetest", "caplifetimetest", "legacy test alias", SHELL_GROUP_DEVELOPMENT, capability_lifetime_test_run, 0, false },
-    { "endpointtest", "endpointtest", "legacy alias for test endpoint", SHELL_GROUP_DEVELOPMENT, command_endpointtest, 0, false },
-    { "ipctest", "ipctest", "legacy alias for test ipc", SHELL_GROUP_DEVELOPMENT, command_ipctest, 0, false },
-    { "ipcblocktest", "ipcblocktest", "legacy receive-block test alias", SHELL_GROUP_DEVELOPMENT, command_ipcblocktest, 0, false },
-    { "ipcsendblocktest", "ipcsendblocktest", "legacy send-block test alias", SHELL_GROUP_DEVELOPMENT, command_ipcsendblocktest, 0, false },
-    { "r2stresstest", "r2stresstest", "legacy test alias", SHELL_GROUP_DEVELOPMENT, r2_stress_test_run, 0, false },
-    { "r2finaltest", "r2finaltest", "legacy test alias", SHELL_GROUP_DEVELOPMENT, r2_acceptance_test_run, 0, false },
-    { "r2finalcleanupretry", "r2finalcleanupretry", "legacy cleanup alias", SHELL_GROUP_DEVELOPMENT, r2_acceptance_cleanup_run, 0, false },
-    { "stackreclaimtest", "stackreclaimtest", "legacy test alias", SHELL_GROUP_DEVELOPMENT, stack_reclaim_test_run, 0, false },
-    { "waitordertest", "waitordertest", "legacy test alias", SHELL_GROUP_DEVELOPMENT, ipc_wait_order_test_run, 0, false },
-    { "waitcleanupretry", "waitcleanupretry", "legacy cleanup alias", SHELL_GROUP_DEVELOPMENT, ipc_wait_order_cleanup_run, 0, false },
-    { "useripctest", "useripctest", "legacy alias for test user-ipc", SHELL_GROUP_DEVELOPMENT, command_useripctest, 0, false },
-    { "useripccanceltest", "useripccanceltest", "legacy test alias", SHELL_GROUP_DEVELOPMENT, user_ipc_cancel_test_run, 0, false },
-    { "useripcblocktest", "useripcblocktest", "legacy user receive-block alias", SHELL_GROUP_DEVELOPMENT, command_useripcblocktest, 0, false },
-    { "useripcsendblocktest", "useripcsendblocktest", "legacy user send-block alias", SHELL_GROUP_DEVELOPMENT, command_useripcsendblocktest, 0, false },
-    { "processtest", "processtest", "legacy alias for test process", SHELL_GROUP_DEVELOPMENT, command_processtest, 0, false },
-    { "processkilltest", "processkilltest", "legacy test alias", SHELL_GROUP_DEVELOPMENT, process_terminate_test_run, 0, false },
-    { "peerdeathtest", "peerdeathtest", "legacy test alias", SHELL_GROUP_DEVELOPMENT, peer_death_test_run, 0, false },
-    { "peerdeathcleanupretry", "peerdeathcleanupretry", "legacy cleanup alias", SHELL_GROUP_DEVELOPMENT, peer_death_cleanup_run, 0, false },
-    { "userprocesscleanuptest", "userprocesscleanuptest", "legacy test alias", SHELL_GROUP_DEVELOPMENT, user_process_cleanup_test_run, 0, false },
-    { "usercleanupretry", "usercleanupretry", "legacy cleanup alias", SHELL_GROUP_DEVELOPMENT, user_fixture_cleanup_retry_run, 0, false },
-    { "schedtest", "schedtest", "legacy alias for test scheduler", SHELL_GROUP_DEVELOPMENT, command_schedtest, 0, false },
-    { "blocktest", "blocktest", "legacy alias for test block", SHELL_GROUP_DEVELOPMENT, command_blocktest, 0, false },
-    { "exittest", "exittest", "legacy alias for test exit", SHELL_GROUP_DEVELOPMENT, command_exittest, 0, false },
-    { "syscalltest", "syscalltest", "legacy alias for test syscall", SHELL_GROUP_DEVELOPMENT, command_syscalltest, 0, false },
-    { "timeouttest", "timeouttest", "legacy test alias", SHELL_GROUP_DEVELOPMENT, ipc_timeout_order_test_run, 0, false },
-    { "timeoutcleanupretry", "timeoutcleanupretry", "legacy cleanup alias", SHELL_GROUP_DEVELOPMENT, ipc_timeout_order_cleanup_run, 0, false },
-    { "userisotest", "userisotest", "legacy alias for test user-isolation", SHELL_GROUP_DEVELOPMENT, command_userisotest, 0, false },
-    { "userpftest", "userpftest", "legacy alias for test user-page-fault", SHELL_GROUP_DEVELOPMENT, command_userpftest, 0, false },
-    { "userelftest", "userelftest", "legacy alias for test user-elf", SHELL_GROUP_DEVELOPMENT, command_userelftest, 0, false },
-    { "userruntimetest", "userruntimetest", "legacy test alias", SHELL_GROUP_DEVELOPMENT, user_runtime_test_run, 0, false },
-    { "userruntimeblocktest", "userruntimeblocktest", "legacy test alias", SHELL_GROUP_DEVELOPMENT, user_runtime_block_test_run, 0, false },
-    { "elfreclaimtest", "elfreclaimtest", "legacy test alias", SHELL_GROUP_DEVELOPMENT, elf_reclaim_test_run, 0, false },
-    { "vmmreclaimtest", "vmmreclaimtest", "legacy test alias", SHELL_GROUP_DEVELOPMENT, vmm_reclaim_test_run, 0, false },
-    { "constructortest", "constructortest", "legacy test alias", SHELL_GROUP_DEVELOPMENT, constructor_test_run, 0, false },
-    { "publishedcleanuptest", "publishedcleanuptest", "legacy test alias", SHELL_GROUP_DEVELOPMENT, published_cleanup_test_run, 0, false },
-    { "forcecleanupretry", "forcecleanupretry", "legacy cleanup alias", SHELL_GROUP_DEVELOPMENT, force_thread_cleanup_run, 0, false },
-    { "timertest", "timertest", "legacy alias for test timer-irq", SHELL_GROUP_DEVELOPMENT, command_timertest, 0, false },
-    { "preempttest", "preempttest", "legacy alias for test preemption", SHELL_GROUP_DEVELOPMENT, command_preempttest, 0, false },
-    { "userpreempttest", "userpreempttest", "legacy alias for test user-preemption", SHELL_GROUP_DEVELOPMENT, command_userpreempttest, 0, false },
-    { "reschedtest", "reschedtest", "legacy alias for test reschedule", SHELL_GROUP_DEVELOPMENT, command_reschedtest, 0, false }
-};
+    shell_add_command("help", "help [COMMAND]", "show command help", SHELL_GROUP_GENERAL, 0, command_help, true);
+    shell_add_command("about", "about", "describe this kernel", SHELL_GROUP_GENERAL, command_about, 0, true);
+    shell_add_command("clear", "clear", "clear the terminal", SHELL_GROUP_GENERAL, command_clear, 0, true);
+    shell_add_command("reboot", "reboot", "reset the system", SHELL_GROUP_GENERAL, command_reboot, 0, true);
+    shell_add_command("pwd", "pwd", "print the current directory", SHELL_GROUP_FILESYSTEM, command_pwd, 0, true);
+    shell_add_command("ls", "ls", "list files in the current directory", SHELL_GROUP_FILESYSTEM, command_ls, 0, true);
+    shell_add_command("cd", "cd PATH", "change the current directory", SHELL_GROUP_FILESYSTEM, 0, command_cd, true);
+    shell_add_command("cat", "cat FILE", "print a file", SHELL_GROUP_FILESYSTEM, 0, command_cat, true);
+    shell_add_command("memory", "memory", "show memory-map and allocator state", SHELL_GROUP_SYSTEM, command_memory, 0, true);
+    shell_add_command("cpu", "cpu", "show CPUID information", SHELL_GROUP_SYSTEM, command_cpu, 0, true);
+    shell_add_command("interrupts", "interrupts", "show interrupt-controller and keyboard state", SHELL_GROUP_SYSTEM, command_interrupts, 0, true);
+    shell_add_command("timer", "timer", "show PIT timer state", SHELL_GROUP_SYSTEM, command_timer, 0, true);
+    shell_add_command("acpi", "acpi", "show ACPI discovery results", SHELL_GROUP_HARDWARE, command_acpi, 0, true);
+    shell_add_command("pci", "pci", "list discovered PCI devices", SHELL_GROUP_HARDWARE, command_pci, 0, true);
+    shell_add_command("ahci", "ahci", "show AHCI controller and SATA ports", SHELL_GROUP_HARDWARE, command_ahci, 0, true);
+    shell_add_command("disks", "disks", "list block devices", SHELL_GROUP_STORAGE, command_disks, 0, true);
+    shell_add_command("sector", "sector LBA", "dump a raw disk sector", SHELL_GROUP_STORAGE, 0, command_sector, true);
+    shell_add_command("partitions", "partitions", "list GPT partitions", SHELL_GROUP_STORAGE, command_partitions, 0, true);
+    shell_add_command("fat32", "fat32", "show FAT32 filesystem information", SHELL_GROUP_STORAGE, command_fat32, 0, true);
+    shell_add_command("fatls", "fatls", "list the FAT32 root directory", SHELL_GROUP_STORAGE, command_fatls, 0, true);
+    shell_add_command("fatread", "fatread FILE [OFFSET] [COUNT]", "read/test a FAT32 root file", SHELL_GROUP_STORAGE, 0, command_fatread, true);
+    shell_add_command("test", "test list [GROUP] | test NAME [cleanup]", "list or run kernel diagnostics", SHELL_GROUP_DEVELOPMENT, 0, command_test, true);
+    shell_add_command("alloc", "alloc", "allocate one physical 4 KiB frame", SHELL_GROUP_DEVELOPMENT, command_alloc, 0, true);
+    shell_add_command("fault", "fault", "deliberately execute UD2 in the kernel", SHELL_GROUP_DEVELOPMENT, command_fault, 0, true);
+    shell_add_command("userfault", "userfault", "enter Ring3 and deliberately execute UD2", SHELL_GROUP_DEVELOPMENT, command_userfault, 0, true);
+    shell_add_command("frametest", "frametest", "legacy alias for test frame", SHELL_GROUP_DEVELOPMENT, command_frametest, 0, false);
+    shell_add_command("vmmtest", "vmmtest", "legacy alias for test vmm-basic", SHELL_GROUP_DEVELOPMENT, command_vmmtest, 0, false);
+    shell_add_command("astest", "astest", "legacy alias for test address-space", SHELL_GROUP_DEVELOPMENT, command_astest, 0, false);
+    shell_add_command("threadtest", "threadtest", "legacy alias for test thread", SHELL_GROUP_DEVELOPMENT, command_threadtest, 0, false);
+    shell_add_command("forcethreadtest", "forcethreadtest", "legacy test alias", SHELL_GROUP_DEVELOPMENT, force_thread_test_run, 0, false);
+    shell_add_command("supervisortest", "supervisortest", "legacy alias for test supervisor", SHELL_GROUP_DEVELOPMENT, command_supervisortest, 0, false);
+    shell_add_command("captest", "captest", "legacy test alias", SHELL_GROUP_DEVELOPMENT, command_captest, 0, false);
+    shell_add_command("caplifetimetest", "caplifetimetest", "legacy test alias", SHELL_GROUP_DEVELOPMENT, capability_lifetime_test_run, 0, false);
+    shell_add_command("endpointtest", "endpointtest", "legacy alias for test endpoint", SHELL_GROUP_DEVELOPMENT, command_endpointtest, 0, false);
+    shell_add_command("ipctest", "ipctest", "legacy alias for test ipc", SHELL_GROUP_DEVELOPMENT, command_ipctest, 0, false);
+    shell_add_command("ipcblocktest", "ipcblocktest", "legacy receive-block test alias", SHELL_GROUP_DEVELOPMENT, command_ipcblocktest, 0, false);
+    shell_add_command("ipcsendblocktest", "ipcsendblocktest", "legacy send-block test alias", SHELL_GROUP_DEVELOPMENT, command_ipcsendblocktest, 0, false);
+    shell_add_command("r2stresstest", "r2stresstest", "legacy test alias", SHELL_GROUP_DEVELOPMENT, r2_stress_test_run, 0, false);
+    shell_add_command("r2finaltest", "r2finaltest", "legacy test alias", SHELL_GROUP_DEVELOPMENT, r2_acceptance_test_run, 0, false);
+    shell_add_command("r2finalcleanupretry", "r2finalcleanupretry", "legacy cleanup alias", SHELL_GROUP_DEVELOPMENT, r2_acceptance_cleanup_run, 0, false);
+    shell_add_command("stackreclaimtest", "stackreclaimtest", "legacy test alias", SHELL_GROUP_DEVELOPMENT, stack_reclaim_test_run, 0, false);
+    shell_add_command("waitordertest", "waitordertest", "legacy test alias", SHELL_GROUP_DEVELOPMENT, ipc_wait_order_test_run, 0, false);
+    shell_add_command("waitcleanupretry", "waitcleanupretry", "legacy cleanup alias", SHELL_GROUP_DEVELOPMENT, ipc_wait_order_cleanup_run, 0, false);
+    shell_add_command("useripctest", "useripctest", "legacy alias for test user-ipc", SHELL_GROUP_DEVELOPMENT, command_useripctest, 0, false);
+    shell_add_command("useripccanceltest", "useripccanceltest", "legacy test alias", SHELL_GROUP_DEVELOPMENT, user_ipc_cancel_test_run, 0, false);
+    shell_add_command("useripcblocktest", "useripcblocktest", "legacy user receive-block alias", SHELL_GROUP_DEVELOPMENT, command_useripcblocktest, 0, false);
+    shell_add_command("useripcsendblocktest", "useripcsendblocktest", "legacy user send-block alias", SHELL_GROUP_DEVELOPMENT, command_useripcsendblocktest, 0, false);
+    shell_add_command("processtest", "processtest", "legacy alias for test process", SHELL_GROUP_DEVELOPMENT, command_processtest, 0, false);
+    shell_add_command("processkilltest", "processkilltest", "legacy test alias", SHELL_GROUP_DEVELOPMENT, process_terminate_test_run, 0, false);
+    shell_add_command("peerdeathtest", "peerdeathtest", "legacy test alias", SHELL_GROUP_DEVELOPMENT, peer_death_test_run, 0, false);
+    shell_add_command("peerdeathcleanupretry", "peerdeathcleanupretry", "legacy cleanup alias", SHELL_GROUP_DEVELOPMENT, peer_death_cleanup_run, 0, false);
+    shell_add_command("userprocesscleanuptest", "userprocesscleanuptest", "legacy test alias", SHELL_GROUP_DEVELOPMENT, user_process_cleanup_test_run, 0, false);
+    shell_add_command("usercleanupretry", "usercleanupretry", "legacy cleanup alias", SHELL_GROUP_DEVELOPMENT, user_fixture_cleanup_retry_run, 0, false);
+    shell_add_command("schedtest", "schedtest", "legacy alias for test scheduler", SHELL_GROUP_DEVELOPMENT, command_schedtest, 0, false);
+    shell_add_command("blocktest", "blocktest", "legacy alias for test block", SHELL_GROUP_DEVELOPMENT, command_blocktest, 0, false);
+    shell_add_command("exittest", "exittest", "legacy alias for test exit", SHELL_GROUP_DEVELOPMENT, command_exittest, 0, false);
+    shell_add_command("syscalltest", "syscalltest", "legacy alias for test syscall", SHELL_GROUP_DEVELOPMENT, command_syscalltest, 0, false);
+    shell_add_command("timeouttest", "timeouttest", "legacy test alias", SHELL_GROUP_DEVELOPMENT, ipc_timeout_order_test_run, 0, false);
+    shell_add_command("timeoutcleanupretry", "timeoutcleanupretry", "legacy cleanup alias", SHELL_GROUP_DEVELOPMENT, ipc_timeout_order_cleanup_run, 0, false);
+    shell_add_command("userisotest", "userisotest", "legacy alias for test user-isolation", SHELL_GROUP_DEVELOPMENT, command_userisotest, 0, false);
+    shell_add_command("userpftest", "userpftest", "legacy alias for test user-page-fault", SHELL_GROUP_DEVELOPMENT, command_userpftest, 0, false);
+    shell_add_command("userelftest", "userelftest", "legacy alias for test user-elf", SHELL_GROUP_DEVELOPMENT, command_userelftest, 0, false);
+    shell_add_command("userruntimetest", "userruntimetest", "legacy test alias", SHELL_GROUP_DEVELOPMENT, user_runtime_test_run, 0, false);
+    shell_add_command("userruntimeblocktest", "userruntimeblocktest", "legacy test alias", SHELL_GROUP_DEVELOPMENT, user_runtime_block_test_run, 0, false);
+    shell_add_command("elfreclaimtest", "elfreclaimtest", "legacy test alias", SHELL_GROUP_DEVELOPMENT, elf_reclaim_test_run, 0, false);
+    shell_add_command("vmmreclaimtest", "vmmreclaimtest", "legacy test alias", SHELL_GROUP_DEVELOPMENT, vmm_reclaim_test_run, 0, false);
+    shell_add_command("constructortest", "constructortest", "legacy test alias", SHELL_GROUP_DEVELOPMENT, constructor_test_run, 0, false);
+    shell_add_command("publishedcleanuptest", "publishedcleanuptest", "legacy test alias", SHELL_GROUP_DEVELOPMENT, published_cleanup_test_run, 0, false);
+    shell_add_command("forcecleanupretry", "forcecleanupretry", "legacy cleanup alias", SHELL_GROUP_DEVELOPMENT, force_thread_cleanup_run, 0, false);
+    shell_add_command("timertest", "timertest", "legacy alias for test timer-irq", SHELL_GROUP_DEVELOPMENT, command_timertest, 0, false);
+    shell_add_command("preempttest", "preempttest", "legacy alias for test preemption", SHELL_GROUP_DEVELOPMENT, command_preempttest, 0, false);
+    shell_add_command("userpreempttest", "userpreempttest", "legacy alias for test user-preemption", SHELL_GROUP_DEVELOPMENT, command_userpreempttest, 0, false);
+    shell_add_command("reschedtest", "reschedtest", "legacy alias for test reschedule", SHELL_GROUP_DEVELOPMENT, command_reschedtest, 0, false);
+}
 
 static const char *shell_group_name(ShellCommandGroup group) {
     switch (group) {
@@ -6454,8 +6480,9 @@ static const char *shell_group_name(ShellCommandGroup group) {
 }
 
 static const ShellCommand *shell_find_command(const char *name) {
+    shell_registry_init();
     if (!name || !*name) return 0;
-    for (u32 i = 0; i < (u32)(sizeof(g_commands) / sizeof(g_commands[0])); ++i) {
+    for (u32 i = 0; i < g_command_count; ++i) {
         if (k_strieq(name, g_commands[i].name)) return &g_commands[i];
     }
     return 0;
@@ -6474,6 +6501,7 @@ static void shell_print_padded(const char *usage, const char *description) {
 }
 
 static void shell_print_help(const char *topic) {
+    shell_registry_init();
     char name[64];
     char extra[64];
     const char *cursor = topic ? topic : "";
@@ -6510,7 +6538,7 @@ static void shell_print_help(const char *topic) {
     for (u32 group = 0; group < SHELL_GROUP_COUNT; ++group) {
         terminal_putchar('\n');
         terminal_writeln(shell_group_name((ShellCommandGroup)group));
-        for (u32 i = 0; i < (u32)(sizeof(g_commands) / sizeof(g_commands[0])); ++i) {
+        for (u32 i = 0; i < g_command_count; ++i) {
             const ShellCommand *command = &g_commands[i];
             if (command->visible && command->group == (ShellCommandGroup)group)
                 shell_print_padded(command->usage, command->description);
@@ -6522,14 +6550,16 @@ static void shell_print_help(const char *topic) {
 }
 
 static const ShellLocalTest *shell_find_local_test(const char *name) {
+    shell_registry_init();
     if (!name || !*name) return 0;
-    for (u32 i = 0; i < (u32)(sizeof(g_shell_tests) / sizeof(g_shell_tests[0])); ++i) {
+    for (u32 i = 0; i < g_shell_test_count; ++i) {
         if (k_strieq(name, g_shell_tests[i].name)) return &g_shell_tests[i];
     }
     return 0;
 }
 
 static void shell_list_tests(const char *filter) {
+    shell_registry_init();
     bool matched_group = !filter || !*filter;
 
     for (u32 group = 0; group < KERNEL_TEST_GROUP_COUNT; ++group) {
@@ -6540,7 +6570,7 @@ static void shell_list_tests(const char *filter) {
         terminal_putchar('\n');
         terminal_writeln(kernel_test_group_title(current));
 
-        for (u32 i = 0; i < (u32)(sizeof(g_shell_tests) / sizeof(g_shell_tests[0])); ++i) {
+        for (u32 i = 0; i < g_shell_test_count; ++i) {
             if (g_shell_tests[i].group == current)
                 shell_print_padded(g_shell_tests[i].name, g_shell_tests[i].description);
         }
