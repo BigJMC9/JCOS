@@ -38,7 +38,8 @@ static bool power_object_state_clean(bool supervisor_expected) {
     u32 expected_threads = supervisor_expected ? 2U : 1U;
     u32 expected_endpoints = supervisor_expected ? 2U : 0U;
     u32 expected_tables = supervisor_expected ? 2U : 1U;
-    u32 expected_kernel_caps = supervisor_expected ? 2U : 0U;
+    /* R5 supervisor: SEND + RECEIVE plus two TRANSFER grant authorities. */
+    u32 expected_kernel_caps = supervisor_expected ? 4U : 0U;
 
     return process_object_count() == expected_processes &&
         address_space_object_count() == expected_spaces &&

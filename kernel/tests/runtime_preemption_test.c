@@ -19,6 +19,7 @@
 #define RUNTIME_PREEMPT_TEXT ADDRESS_SPACE_USER_BASE
 #define RUNTIME_PREEMPT_DATA (ADDRESS_SPACE_USER_BASE + VM_PAGE_SIZE)
 #define RUNTIME_PREEMPT_COOKIE 0x505245454D50544FULL
+#define RUNTIME_PREEMPT_PROGRESS_RETRIES 4U
 
 static void report(const char *name, bool pass) {
     terminal_write("  ");
@@ -122,9 +123,27 @@ void runtime_preemption_test_run(void) {
     bool queued = scheduler_add(spinner);
     u64 reply = 0;
     bool ping = queued && supervisor_ping(RUNTIME_PREEMPT_COOKIE, &reply);
+    u64 spin_count = counter ? *counter : 0;
+
+    /* Main deliberately keeps IF clear while arranging this contention case.
+     * A PIT IRQ can therefore already be pending when the first IRETQ enters
+     * the spinner. x86 may take that interrupt before the spinner executes its
+     * first INC, which is valid preemption but leaves the counter at zero.
+     *
+     * Give the non-yielding spinner a few bounded follow-up slices before
+     * declaring that it never executed. scheduler_yield() only dispatches the
+     * spinner; because the spinner itself contains no syscall/yield/block, the
+     * only normal way control returns here is timer preemption. */
+    for (u32 retry = 0; queued && spin_count == 0ULL &&
+            retry < RUNTIME_PREEMPT_PROGRESS_RETRIES &&
+            spinner->state == THREAD_STATE_READY && spinner->on_run_queue &&
+            spinner->interrupt_context_ready && spinner->interrupt_rsp; ++retry) {
+        if (!scheduler_yield()) break;
+        spin_count = counter ? *counter : 0;
+    }
+
     u64 preempt_delta = scheduler_preemption_count() - preempt_before;
     u64 tick_delta = timer_ticks() - ticks_before;
-    u64 spin_count = counter ? *counter : 0;
 
     bool main_restored = thread_current() == main && main->state == THREAD_STATE_RUNNING && main->on_run_queue;
     bool spinner_suspended = queued && spinner->state == THREAD_STATE_READY && spinner->on_run_queue &&
