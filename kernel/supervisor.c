@@ -6,45 +6,33 @@
 #include "interrupts.h"
 #include "ipc.h"
 #include "lib.h"
-#include "physmap.h"
-#include "pmm.h"
 #include "process.h"
+#include "program.h"
 #include "scheduler.h"
 #include "thread.h"
 #include "timer.h"
-#include "user_elf.h"
 #include "vfs.h"
-#include "vmm.h"
 #include "user_stack.h"
 
 #define SUPERVISOR_PATH "/bin/supervisor.elf"
 #define SUPERVISOR_CALL_TIMEOUT_SECONDS 2ULL
-#define SUPERVISOR_USER_STACK (ADDRESS_SPACE_USER_BASE + 0x100000ULL)
-#define SUPERVISOR_USER_STACK_TOP (SUPERVISOR_USER_STACK + VM_PAGE_SIZE)
-#define SUPERVISOR_INITIAL_STACK_SIZE (2ULL * sizeof(u64))
+#define SUPERVISOR_BOOT_START_MAX_TURNS 64U
 #define SUPERVISOR_RFLAGS_IF (1ULL << 9)
 
 typedef struct {
-    Process process;
-    Thread thread;
+    ProgramInstance program;
     Endpoint command_endpoint;
     Endpoint reply_endpoint;
     CapabilityHandle kernel_send_handle;
     CapabilityHandle kernel_receive_handle;
-    CapabilityHandle user_receive_handle;
-    CapabilityHandle user_send_handle;
-    UserElfImage image;
-    frame_t stack_frame;
-    bool process_created;
+    CapabilityHandle kernel_command_grant_handle;
+    CapabilityHandle kernel_reply_grant_handle;
     bool command_created;
     bool reply_created;
     bool kernel_send_cap;
     bool kernel_receive_cap;
-    bool user_receive_cap;
-    bool user_send_cap;
-    bool thread_created;
-    bool stack_frame_allocated;
-    bool stack_mapped;
+    bool kernel_command_grant_cap;
+    bool kernel_reply_grant_cap;
     bool active;
 } SupervisorState;
 
@@ -83,10 +71,48 @@ static u64 supervisor_call_timeout_ticks(void) {
     return frequency ? (u64)frequency * SUPERVISOR_CALL_TIMEOUT_SECONDS : 0;
 }
 
+static Thread *supervisor_thread(void) {
+    return g_supervisor.program.thread_created ? &g_supervisor.program.thread : 0;
+}
+
+static bool supervisor_ready(void) {
+    Thread *thread = supervisor_thread();
+    return thread && thread->state == THREAD_STATE_BLOCKED &&
+        !thread->on_run_queue && thread->interrupt_context_ready && thread->interrupt_rsp &&
+        endpoint_receiver_waiting(&g_supervisor.command_endpoint);
+}
+
+static bool supervisor_wait_ready(void) {
+    u64 timeout_ticks = supervisor_call_timeout_ticks();
+    u64 started = timeout_ticks ? timer_ticks() : 0;
+    u32 turns = 0;
+
+    for (;;) {
+        if (supervisor_ready()) return true;
+
+        /* If main is executing on this UP kernel, the not-yet-ready service
+         * can only be READY. DEAD/BLOCKED-without-receive is a failed start. */
+        Thread *thread = supervisor_thread();
+        if (!thread || thread->state != THREAD_STATE_READY || !thread->on_run_queue) return false;
+
+        if (timeout_ticks) {
+            if ((u64)(timer_ticks() - started) >= timeout_ticks) return false;
+        } else {
+            /* Early boot starts the supervisor before PIT initialization.
+             * With no timer preemption one turn is normally sufficient, but
+             * keep the fallback finite rather than relying on one exact turn. */
+            if (turns >= SUPERVISOR_BOOT_START_MAX_TURNS) return false;
+        }
+
+        if (!supervisor_schedule_once()) return false;
+        ++turns;
+    }
+}
+
 static bool supervisor_thread_dead(void) {
-    return g_supervisor.thread.state == THREAD_STATE_DEAD &&
-        !g_supervisor.thread.on_run_queue && !g_supervisor.thread.interrupt_context_ready &&
-        !g_supervisor.thread.interrupt_rsp;
+    Thread *thread = supervisor_thread();
+    return thread && thread->state == THREAD_STATE_DEAD &&
+        !thread->on_run_queue && !thread->interrupt_context_ready && !thread->interrupt_rsp;
 }
 
 static bool supervisor_wait_thread_dead(u64 timeout_ticks) {
@@ -99,43 +125,32 @@ static bool supervisor_wait_thread_dead(u64 timeout_ticks) {
         /* If the reply woke the caller before the supervisor executed its
          * THREAD_EXIT syscall, keep scheduling boundedly until that terminal
          * transition happens. READY is the only valid non-dead state here. */
-        if (g_supervisor.thread.state != THREAD_STATE_READY || !g_supervisor.thread.on_run_queue) return false;
+        Thread *thread = supervisor_thread();
+        if (!thread || thread->state != THREAD_STATE_READY || !thread->on_run_queue) return false;
         if (!supervisor_schedule_once()) return false;
     }
     return true;
 }
 
-static bool supervisor_release(void) {
-    AddressSpace *space = g_supervisor.process_created ? process_address_space(&g_supervisor.process) : 0;
+static bool supervisor_needs_cleanup(void) {
+    return program_instance_needs_cleanup(&g_supervisor.program) ||
+        g_supervisor.command_created || g_supervisor.reply_created ||
+        g_supervisor.kernel_send_cap || g_supervisor.kernel_receive_cap ||
+        g_supervisor.kernel_command_grant_cap || g_supervisor.kernel_reply_grant_cap ||
+        g_supervisor.kernel_send_handle != CAPABILITY_INVALID_HANDLE ||
+        g_supervisor.kernel_receive_handle != CAPABILITY_INVALID_HANDLE ||
+        g_supervisor.kernel_command_grant_handle != CAPABILITY_INVALID_HANDLE ||
+        g_supervisor.kernel_reply_grant_handle != CAPABILITY_INVALID_HANDLE;
+}
 
-    if (g_supervisor.thread_created) {
-        if (thread_current() == &g_supervisor.thread || g_supervisor.thread.on_run_queue ||
-            g_supervisor.thread.state == THREAD_STATE_RUNNING ||
-            g_supervisor.thread.state == THREAD_STATE_BLOCKED) return false;
-        if (!thread_destroy(&g_supervisor.thread)) return false;
-        g_supervisor.thread_created = false;
+static bool supervisor_release(bool force_program) {
+    if (program_instance_needs_cleanup(&g_supervisor.program)) {
+        bool released = force_program ? program_terminate(&g_supervisor.program) : program_reap(&g_supervisor.program);
+        if (!released) return false;
     }
-
-    if (g_supervisor.stack_mapped) {
-        frame_t mapped = FRAME_INVALID;
-        frame_t old = FRAME_INVALID;
-        if (!space || !user_stack_mapping_valid(space, SUPERVISOR_USER_STACK, g_supervisor.stack_frame)) return false;
-        if (!address_space_query_page(space, SUPERVISOR_USER_STACK, &mapped, 0) || mapped != g_supervisor.stack_frame) return false;
-        if (!address_space_unmap_page(space, SUPERVISOR_USER_STACK, &old)) return false;
-        g_supervisor.stack_mapped = false;
-        if (old != g_supervisor.stack_frame) return false;
-    }
-    if (g_supervisor.stack_frame_allocated) {
-        if (!frame_free(g_supervisor.stack_frame)) return false;
-        g_supervisor.stack_frame_allocated = false;
-    }
-
-    /* Failed load rollback can own pages even though load returned false. */
-    if (user_elf_needs_cleanup(&g_supervisor.image) && !user_elf_unload(&g_supervisor.process, &g_supervisor.image)) return false;
 
     Process *kernel_process = process_kernel();
     CapabilityTable *kernel_caps = kernel_process ? process_capabilities(kernel_process) : 0;
-    CapabilityTable *user_caps = g_supervisor.process_created ? process_capabilities(&g_supervisor.process) : 0;
 
     if (g_supervisor.kernel_send_cap) {
         if (!kernel_caps || !capability_revoke(kernel_caps, g_supervisor.kernel_send_handle)) return false;
@@ -145,13 +160,13 @@ static bool supervisor_release(void) {
         if (!kernel_caps || !capability_revoke(kernel_caps, g_supervisor.kernel_receive_handle)) return false;
         g_supervisor.kernel_receive_cap = false;
     }
-    if (g_supervisor.user_receive_cap) {
-        if (!user_caps || !capability_revoke(user_caps, g_supervisor.user_receive_handle)) return false;
-        g_supervisor.user_receive_cap = false;
+    if (g_supervisor.kernel_command_grant_cap) {
+        if (!kernel_caps || !capability_revoke(kernel_caps, g_supervisor.kernel_command_grant_handle)) return false;
+        g_supervisor.kernel_command_grant_cap = false;
     }
-    if (g_supervisor.user_send_cap) {
-        if (!user_caps || !capability_revoke(user_caps, g_supervisor.user_send_handle)) return false;
-        g_supervisor.user_send_cap = false;
+    if (g_supervisor.kernel_reply_grant_cap) {
+        if (!kernel_caps || !capability_revoke(kernel_caps, g_supervisor.kernel_reply_grant_handle)) return false;
+        g_supervisor.kernel_reply_grant_cap = false;
     }
     if (g_supervisor.command_created) {
         if (!endpoint_destroy(&g_supervisor.command_endpoint)) return false;
@@ -161,10 +176,7 @@ static bool supervisor_release(void) {
         if (!endpoint_destroy(&g_supervisor.reply_endpoint)) return false;
         g_supervisor.reply_created = false;
     }
-    if (g_supervisor.process_created) {
-        if (!process_destroy(&g_supervisor.process)) return false;
-        g_supervisor.process_created = false;
-    }
+
     k_memset(&g_supervisor, 0, sizeof(g_supervisor));
     return true;
 }
@@ -172,8 +184,7 @@ static bool supervisor_release(void) {
 bool supervisor_start(void) {
     if (g_supervisor.active) return false;
 
-    /* Retry retained cleanup instead of erasing a failed prior startup. */
-    if (!supervisor_release()) return false;
+    if (!supervisor_release(true)) return false;
 
     Process *kernel_process = process_kernel();
     Thread *current = thread_current();
@@ -184,100 +195,61 @@ bool supervisor_start(void) {
     }
 
     CapabilityTable *kernel_caps = process_capabilities(kernel_process);
-
     if (!kernel_caps) return false;
-    if (!process_create(&g_supervisor.process)) return false;
 
-    g_supervisor.process_created = true;
-
-    AddressSpace *space = process_address_space(&g_supervisor.process);
-    CapabilityTable *user_caps = process_capabilities(&g_supervisor.process);
-
-    if (!space || !user_caps) goto fail;
     if (!endpoint_create(&g_supervisor.command_endpoint)) goto fail;
-
     g_supervisor.command_created = true;
 
     if (!endpoint_create(&g_supervisor.reply_endpoint)) goto fail;
-
     g_supervisor.reply_created = true;
 
     if (!capability_insert(kernel_caps, &g_supervisor.command_endpoint, CAPABILITY_TYPE_ENDPOINT,
-            CAPABILITY_RIGHT_SEND, &g_supervisor.kernel_send_handle)) {
-        goto fail;
-    }
-
+            CAPABILITY_RIGHT_SEND, &g_supervisor.kernel_send_handle)) goto fail;
     g_supervisor.kernel_send_cap = true;
 
     if (!capability_insert(kernel_caps, &g_supervisor.reply_endpoint, CAPABILITY_TYPE_ENDPOINT,
-            CAPABILITY_RIGHT_RECEIVE, &g_supervisor.kernel_receive_handle)) {
-        goto fail;
-    }
-
+            CAPABILITY_RIGHT_RECEIVE, &g_supervisor.kernel_receive_handle)) goto fail;
     g_supervisor.kernel_receive_cap = true;
 
-    if (!capability_insert(user_caps, &g_supervisor.command_endpoint, CAPABILITY_TYPE_ENDPOINT,
-            CAPABILITY_RIGHT_RECEIVE, &g_supervisor.user_receive_handle)) {
-        goto fail;
-    }
+    if (!capability_insert(kernel_caps, &g_supervisor.command_endpoint, CAPABILITY_TYPE_ENDPOINT,
+            CAPABILITY_RIGHT_RECEIVE | CAPABILITY_RIGHT_TRANSFER,
+            &g_supervisor.kernel_command_grant_handle)) goto fail;
+    g_supervisor.kernel_command_grant_cap = true;
 
-    g_supervisor.user_receive_cap = true;
-
-    if (!capability_insert(user_caps, &g_supervisor.reply_endpoint, CAPABILITY_TYPE_ENDPOINT,
-            CAPABILITY_RIGHT_SEND, &g_supervisor.user_send_handle)) {
-        goto fail;
-    }
-
-    g_supervisor.user_send_cap = true;
-
-    if (!thread_create(&g_supervisor.thread, &g_supervisor.process)) goto fail;
-
-    g_supervisor.thread_created = true;
+    if (!capability_insert(kernel_caps, &g_supervisor.reply_endpoint, CAPABILITY_TYPE_ENDPOINT,
+            CAPABILITY_RIGHT_SEND | CAPABILITY_RIGHT_TRANSFER,
+            &g_supervisor.kernel_reply_grant_handle)) goto fail;
+    g_supervisor.kernel_reply_grant_cap = true;
 
     VfsNode *file = vfs_resolve(vfs_root(), SUPERVISOR_PATH);
-
     if (!file || file->type != VFS_FILE || !file->data || !file->size) goto fail;
-    if (!user_elf_load(&g_supervisor.process, file, &g_supervisor.image)) goto fail;
 
-    g_supervisor.stack_frame = frame_alloc();
+    ProgramLaunchSpec spec;
+    k_memset(&spec, 0, sizeof(spec));
+    spec.file = file;
+    spec.startup_grant_count = 2U;
+    spec.startup_grants[0].authority_table = kernel_caps;
+    spec.startup_grants[0].authority_handle = g_supervisor.kernel_command_grant_handle;
+    spec.startup_grants[0].object = &g_supervisor.command_endpoint;
+    spec.startup_grants[0].type = CAPABILITY_TYPE_ENDPOINT;
+    spec.startup_grants[0].rights = CAPABILITY_RIGHT_RECEIVE;
+    spec.startup_grants[1].authority_table = kernel_caps;
+    spec.startup_grants[1].authority_handle = g_supervisor.kernel_reply_grant_handle;
+    spec.startup_grants[1].object = &g_supervisor.reply_endpoint;
+    spec.startup_grants[1].type = CAPABILITY_TYPE_ENDPOINT;
+    spec.startup_grants[1].rights = CAPABILITY_RIGHT_SEND;
 
-    if (g_supervisor.stack_frame == FRAME_INVALID) goto fail;
+    if (!program_launch(&g_supervisor.program, &spec)) goto fail;
 
-    g_supervisor.stack_frame_allocated = true;
-
-    if (!user_stack_map_page(space, SUPERVISOR_USER_STACK, g_supervisor.stack_frame)) goto fail;
-
-    g_supervisor.stack_mapped = true;
-    u8 *stack = (u8 *)phys_to_virt(frame_to_phys(g_supervisor.stack_frame));
-
-    if (!stack) goto fail;
-
-    k_memset(stack, 0, (usize)VM_PAGE_SIZE);
-
-    u64 initial_rsp = SUPERVISOR_USER_STACK_TOP - SUPERVISOR_INITIAL_STACK_SIZE;
-    u64 stack_offset = initial_rsp - SUPERVISOR_USER_STACK;
-    u64 *initial_stack = (u64 *)(void *)(stack + stack_offset);
-
-    initial_stack[0] = g_supervisor.user_receive_handle;
-    initial_stack[1] = g_supervisor.user_send_handle;
-
-    if (!thread_prepare_user(&g_supervisor.thread, g_supervisor.image.entry, initial_rsp)) goto fail;
-    if (!scheduler_add(&g_supervisor.thread)) goto fail;
-
-    /* From this point forward, generic cleanup is no longer safe until the user thread voluntarily exits. */
     g_supervisor.active = true;
+    if (supervisor_wait_ready()) return true;
 
-    /* Run /bin/supervisor.elf until it reaches its first blocking RECEIVE syscall. */
-    if (!supervisor_schedule_once()) return false;
-
-    bool idle = g_supervisor.thread.state == THREAD_STATE_BLOCKED && !g_supervisor.thread.on_run_queue &&
-        g_supervisor.thread.interrupt_context_ready && g_supervisor.thread.interrupt_rsp &&
-        endpoint_receiver_waiting(&g_supervisor.command_endpoint) && scheduler_thread_count() == 1ULL;
-
-    return idle;
+    g_supervisor.active = false;
+    (void)supervisor_release(true);
+    return false;
 
 fail:
-    (void)supervisor_release();
+    (void)supervisor_release(true);
     return false;
 }
 
@@ -285,15 +257,14 @@ bool supervisor_ping(u64 cookie, u64 *out_cookie) {
     if (!g_supervisor.active || !out_cookie) return false;
 
     Process *kernel_process = process_kernel();
+    Thread *thread = supervisor_thread();
 
-    if (!kernel_process) return false;
-    if (g_supervisor.thread.state != THREAD_STATE_BLOCKED) return false;
+    if (!kernel_process || !thread) return false;
+    if (thread->state != THREAD_STATE_BLOCKED) return false;
     if (!endpoint_receiver_waiting(&g_supervisor.command_endpoint)) return false;
 
     IpcMessage request;
-
     k_memset(&request, 0, sizeof(request));
-
     request.word_count = 2U;
     request.words[0] = SUPERVISOR_MESSAGE_PING;
     request.words[1] = cookie;
@@ -311,30 +282,29 @@ bool supervisor_ping(u64 cookie, u64 *out_cookie) {
             &reply, timeout)) return false;
 
     bool valid = reply.word_count == 2U && reply.words[0] == SUPERVISOR_REPLY_PONG &&
-        reply.words[1] == cookie && g_supervisor.thread.state == THREAD_STATE_BLOCKED &&
-        !g_supervisor.thread.on_run_queue && endpoint_receiver_waiting(&g_supervisor.command_endpoint);
+        reply.words[1] == cookie && thread->state == THREAD_STATE_BLOCKED &&
+        !thread->on_run_queue && endpoint_receiver_waiting(&g_supervisor.command_endpoint);
 
     if (!valid) return false;
 
     *out_cookie = reply.words[1];
-
     return true;
 }
 
 bool supervisor_stop(void) {
     if (!g_supervisor.active) {
-        return g_supervisor.process_created && supervisor_release();
+        return supervisor_needs_cleanup() && supervisor_release(true);
     }
 
     Process *kernel_process = process_kernel();
+    Thread *thread = supervisor_thread();
 
-    if (!kernel_process) return false;
-    if (g_supervisor.thread.state != THREAD_STATE_BLOCKED ||
+    if (!kernel_process || !thread) return false;
+    if (thread->state != THREAD_STATE_BLOCKED ||
         !endpoint_receiver_waiting(&g_supervisor.command_endpoint)) return false;
 
     IpcMessage request;
     k_memset(&request, 0, sizeof(request));
-
     request.word_count = 1U;
     request.words[0] = SUPERVISOR_MESSAGE_SHUTDOWN;
 
@@ -364,31 +334,25 @@ bool supervisor_stop(void) {
 
     /* Thread is dead now, so transactional resource destruction is safe. */
     g_supervisor.active = false;
-    return supervisor_release();
+    return supervisor_release(false);
 }
 
 bool supervisor_running(void) {
-    return
-        g_supervisor.active &&
-        g_supervisor.process_created &&
-        g_supervisor.thread_created;
+    return g_supervisor.active && g_supervisor.program.process_created &&
+        g_supervisor.program.thread_created && g_supervisor.program.published;
 }
 
 u64 supervisor_process_id(void) {
-    return
-        supervisor_running()
-            ? g_supervisor.process.id
-            : 0;
+    return supervisor_running() ? g_supervisor.program.process.id : 0;
 }
 
 u64 supervisor_thread_id(void) {
-    return
-        supervisor_running()
-            ? g_supervisor.thread.id
-            : 0;
+    return supervisor_running() ? g_supervisor.program.thread.id : 0;
 }
+
 bool supervisor_stack_guarded(void) {
-    if (!supervisor_running() || !g_supervisor.stack_mapped) return false;
-    AddressSpace *space = process_address_space(&g_supervisor.process);
-    return space && user_stack_mapping_valid(space, SUPERVISOR_USER_STACK, g_supervisor.stack_frame);
+    if (!supervisor_running() || !g_supervisor.program.stack_mapped) return false;
+    AddressSpace *space = process_address_space(&g_supervisor.program.process);
+    return space && user_stack_mapping_valid(space, USER_STACK_INITIAL_BASE,
+        g_supervisor.program.stack_frame);
 }

@@ -11,6 +11,8 @@
 #include "interrupt_state_test.h"
 #include "lib.h"
 #include "peer_death_test.h"
+#include "program_launch_test.h"
+#include "program_startup_test.h"
 #include "runtime_preemption_test.h"
 #include "service_order_test.h"
 #include "scheduler_idle_test.h"
@@ -74,6 +76,8 @@ static void kernel_test_registry_init(void) {
     kernel_test_add("peer-death", "owned-endpoint peer-death propagation", KERNEL_TEST_IPC, peer_death_test_run, peer_death_cleanup_run);
     kernel_test_add("timeout", "IPC timeout/deadline ordering", KERNEL_TEST_IPC, ipc_timeout_order_test_run, ipc_timeout_order_cleanup_run);
     kernel_test_add("irq-state", "interrupt-state preservation across critical sections", KERNEL_TEST_SCHEDULING, interrupt_state_test_run, 0);
+    kernel_test_add("program-launch", "generic protected program launch, rollback and reap", KERNEL_TEST_USERSPACE, program_launch_test_run, program_launch_test_cleanup_run);
+    kernel_test_add("program-startup", "versioned startup ABI and common launcher adoption", KERNEL_TEST_USERSPACE, program_startup_test_run, program_startup_test_cleanup_run);
     kernel_test_add("execution-profile", "single-CPU restricted FP/SIMD execution profile",
         KERNEL_TEST_SCHEDULING, execution_profile_test_run, user_fixture_cleanup_retry_run);
     kernel_test_add("scheduler-idle", "last-runnable blocking and IF-preserving idle wait", KERNEL_TEST_SCHEDULING, scheduler_idle_test_run, scheduler_idle_test_cleanup_run);

@@ -5,13 +5,14 @@ ROOTFS_DIR := rootfs
 ROOTFS := $(BUILD)/ROOTFS.TAR
 USER_ELF_TEST := $(ROOTFS_DIR)/bin/elftest.elf
 USER_SUPERVISOR := $(ROOTFS_DIR)/bin/supervisor.elf
+USER_LAUNCH_PROBE := $(ROOTFS_DIR)/bin/launchprobe.elf
 USER_RUNTIME_TEST := $(ROOTFS_DIR)/bin/runtimetest.elf
 USER_RUNTIME_CANCEL_TEST := $(ROOTFS_DIR)/bin/runtimecanceltest.elf
 USER_RUNTIME_BLOCK_TEST := $(ROOTFS_DIR)/bin/runtimeblocktest.elf
 .DEFAULT_GOAL := all
 .DELETE_ON_ERROR:
 
-USER_PROGRAMS := $(USER_ELF_TEST) $(USER_SUPERVISOR) $(USER_RUNTIME_TEST) $(USER_RUNTIME_BLOCK_TEST) $(USER_RUNTIME_CANCEL_TEST)
+USER_PROGRAMS := $(USER_ELF_TEST) $(USER_SUPERVISOR) $(USER_LAUNCH_PROBE) $(USER_RUNTIME_TEST) $(USER_RUNTIME_BLOCK_TEST) $(USER_RUNTIME_CANCEL_TEST)
 ROOTFS_FILES := $(shell test -d $(ROOTFS_DIR) && find $(ROOTFS_DIR) -type f)
 IMAGE := $(BUILD)/JA-os.img
 
@@ -57,16 +58,20 @@ $(USER_ELF_TEST): $(BUILD)/user_elftest.o user/elftest.ld Makefile.msys2
 $(BUILD)/user_crt0.o: user/crt0.S | $(BUILD)
 	$(CLANG) --target=x86_64-unknown-none-elf -c $< -o $@
 
+$(BUILD)/user_crt0_startup.o: user/crt0_startup.S include/program_startup.h include/user_abi.h | $(BUILD)
+	$(CLANG) --target=x86_64-unknown-none-elf -c $< -o $@
+
 $(BUILD)/user_syscall.o: user/lib/syscall.S include/user_abi.h | $(BUILD)
 	$(CLANG) --target=x86_64-unknown-none-elf -c $< -o $@
 
 $(BUILD)/user_supervisor.o: user/supervisor.c \
                             user/lib/syscall.h \
                             include/user_abi.h \
+                            include/program_startup.h \
                             include/supervisor_protocol.h | $(BUILD)
 	$(CLANG) $(USER_CFLAGS) -c $< -o $@
 
-$(USER_SUPERVISOR): $(BUILD)/user_crt0.o \
+$(USER_SUPERVISOR): $(BUILD)/user_crt0_startup.o \
                     $(BUILD)/user_syscall.o \
                     $(BUILD)/user_supervisor.o \
                     user/supervisor.ld Makefile.msys2
@@ -74,9 +79,29 @@ $(USER_SUPERVISOR): $(BUILD)/user_crt0.o \
 	$(LD) -m elf_x86_64 -nostdlib -static \
 	      -T user/supervisor.ld \
 	      -o $@ \
-	      $(BUILD)/user_crt0.o \
+	      $(BUILD)/user_crt0_startup.o \
 	      $(BUILD)/user_syscall.o \
 	      $(BUILD)/user_supervisor.o
+	$(CHECK_ELF_RELOCATIONS)
+
+$(BUILD)/user_launch_probe.o: user/launch_probe.c \
+                              user/lib/syscall.h \
+                              include/user_abi.h \
+                              include/program_startup.h \
+                              include/launch_probe_protocol.h | $(BUILD)
+	$(CLANG) $(USER_CFLAGS) -c $< -o $@
+
+$(USER_LAUNCH_PROBE): $(BUILD)/user_crt0_startup.o \
+                      $(BUILD)/user_syscall.o \
+                      $(BUILD)/user_launch_probe.o \
+                      user/launch_probe.ld Makefile.msys2
+	mkdir -p $(dir $@)
+	$(LD) -m elf_x86_64 -nostdlib -static \
+	      -T user/launch_probe.ld \
+	      -o $@ \
+	      $(BUILD)/user_crt0_startup.o \
+	      $(BUILD)/user_syscall.o \
+	      $(BUILD)/user_launch_probe.o
 	$(CHECK_ELF_RELOCATIONS)
 
 $(BUILD)/user_runtime_test.o: user/runtime_test.c \
