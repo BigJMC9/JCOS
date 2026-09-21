@@ -179,17 +179,66 @@ static void clear_state(void) {
     g_queue_tail = 0;
 }
 
-static void *dma_page(u64 *physical) {
-    frame_t frame = frame_alloc();
-    if (frame == FRAME_INVALID) return 0;
-    *physical = frame_to_phys(frame);
-    void *virtual = phys_to_virt(*physical);
-    if (!virtual) {
-        (void)frame_free(frame);
+static void *dma_pages(u64 count, u64 *physical) {
+    if (!physical || !count || count > (~0ULL / FRAME_SIZE)) return 0;
+
+    u64 bytes = count * FRAME_SIZE;
+    u64 address = pmm_alloc_pages(count);
+    if (!address) return 0;
+
+    if (!g_xhci.addr64 &&
+        (address > 0xFFFFFFFFULL || bytes - 1ULL > 0xFFFFFFFFULL - address)) {
+        (void)frame_free_range(phys_to_frame(address), count);
         return 0;
     }
-    k_memset(virtual, 0, (usize)FRAME_SIZE);
+
+    void *virtual = phys_to_virt(address);
+    if (!virtual) {
+        (void)frame_free_range(phys_to_frame(address), count);
+        return 0;
+    }
+
+    k_memset(virtual, 0, (usize)bytes);
+    *physical = address;
     return virtual;
+}
+
+static void *dma_page(u64 *physical) {
+    return dma_pages(1ULL, physical);
+}
+
+static bool setup_scratchpads(u32 hcs2) {
+    u32 count = (((hcs2 >> 21) & 0x1FU) << 5) | ((hcs2 >> 27) & 0x1FU);
+    g_xhci.scratchpad_count = count;
+
+    u64 *dcbaa = (u64 *)phys_to_virt(g_xhci.dcbaa_phys);
+    if (!dcbaa) return false;
+
+    dcbaa[0] = 0;
+    if (!count) return true;
+
+    u64 array_bytes = (u64)count * sizeof(u64);
+    u64 array_pages = (array_bytes + FRAME_SIZE - 1ULL) / FRAME_SIZE;
+    u64 array_phys = 0;
+    u64 *array = (u64 *)dma_pages(array_pages, &array_phys);
+    if (!array) return false;
+
+    for (u32 i = 0; i < count; ++i) {
+        u64 buffer_phys = 0;
+        if (!dma_page(&buffer_phys)) {
+            for (u32 j = 0; j < i; ++j) {
+                (void)frame_free(phys_to_frame(array[j]));
+            }
+            (void)frame_free_range(phys_to_frame(array_phys), array_pages);
+            return false;
+        }
+        array[i] = buffer_phys;
+    }
+
+    g_xhci.scratchpad_array_phys = array_phys;
+    dcbaa[0] = array_phys;
+    __asm__ volatile ("mfence" ::: "memory");
+    return true;
 }
 
 static bool controller_halted(void) {
@@ -206,6 +255,37 @@ static bool wait_condition(bool (*condition)(void)) {
         arch_pause();
     }
     return false;
+}
+
+static void discover_port_protocols(u64 base, u32 hcc) {
+    u32 pointer = ((hcc >> 16) & 0xFFFFU) * 4U;
+
+    for (u32 inspected = 0; pointer && inspected < 64U; ++inspected) {
+        if (pointer + 12U > XHCI_MMIO_SIZE) break;
+
+        volatile u32 *capability = reg32(base, pointer);
+        u32 header = capability[0];
+
+        if (XHCI_EXT_CAP_ID(header) == XHCI_EXT_CAP_SUPPORTED_PROTOCOL) {
+            u8 major = (u8)(header >> 24);
+            u32 ports = capability[2];
+            u32 offset = ports & 0xFFU;
+            u32 count = (ports >> 8) & 0xFFU;
+
+            if (offset) {
+                for (u32 i = 0; i < count; ++i) {
+                    u32 port = offset - 1U + i;
+                    if (port < g_xhci.max_ports && port < XHCI_MAX_PORTS) {
+                        g_xhci.port_protocol[port] = major;
+                    }
+                }
+            }
+        }
+
+        u32 next = XHCI_EXT_CAP_NEXT(header);
+        if (!next) break;
+        pointer += next * 4U;
+    }
 }
 
 static bool release_legacy_control(u64 base, u32 hcc) {
@@ -231,10 +311,84 @@ static bool release_legacy_control(u64 base, u32 hcc) {
     return true;
 }
 
-static void ring_doorbell(u32 endpoint) {
+static void ring_command_doorbell(void) {
     __asm__ volatile ("mfence" ::: "memory");
     g_xhci.doorbells[0] = 0U;
-    if (endpoint) g_xhci.doorbells[g_xhci.slot] = endpoint;
+}
+
+static void ring_endpoint_doorbell(u32 endpoint) {
+    __asm__ volatile ("mfence" ::: "memory");
+    if (g_xhci.slot && endpoint) {
+        g_xhci.doorbells[g_xhci.slot] = endpoint;
+    }
+}
+
+static u64 interrupter0(void) {
+    return (u64)g_xhci.runtime + XHCI_RUNTIME_INTERRUPTER0_OFFSET;
+}
+
+static u32 portsc_neutral(u32 value) {
+    return value & ~XHCI_PORTSC_WRITE_ONE_BITS;
+}
+
+static void portsc_set_bits(volatile u32 *portsc, u32 bits) {
+    *portsc = portsc_neutral(*portsc) | bits;
+}
+
+static void portsc_ack_changes(volatile u32 *portsc, u32 bits) {
+    *portsc = portsc_neutral(*portsc) | (bits & XHCI_PORTSC_CHANGE_BITS);
+}
+
+static u32 mfindex(void) {
+    return g_xhci.runtime ?
+        (*reg32((u64)g_xhci.runtime, 0x00U) & 0x3FFFU) : 0U;
+}
+
+static u32 mf_elapsed(u32 start) {
+    return (mfindex() - start) & 0x3FFFU;
+}
+
+static bool wait_for_any_connection(u32 ports) {
+    u32 start = mfindex();
+
+    do {
+        for (u32 port = 0; port < ports; ++port) {
+            volatile u32 *portsc =
+                reg32((u64)g_xhci.op, 0x400U + port * 0x10U);
+            if (*portsc & XHCI_PORTSC_CCS) return true;
+        }
+        arch_pause();
+    } while (mf_elapsed(start) < 2000U);
+
+    return false;
+}
+
+static bool reset_port(volatile u32 *portsc, bool superspeed) {
+    if (!portsc) return false;
+
+    portsc_ack_changes(portsc, XHCI_PORTSC_CHANGE_BITS);
+
+    if (superspeed && (*portsc & XHCI_PORTSC_PED)) return true;
+
+    u32 reset_bit = superspeed ? XHCI_PORTSC_WPR : XHCI_PORTSC_PR;
+    u32 completion_bits = superspeed ?
+        (XHCI_PORTSC_WRC | XHCI_PORTSC_PRC) : XHCI_PORTSC_PRC;
+
+    portsc_set_bits(portsc, reset_bit);
+
+    u32 start = mfindex();
+    do {
+        u32 status = *portsc;
+
+        if ((status & completion_bits) && !(status & XHCI_PORTSC_PR)) {
+            portsc_ack_changes(portsc, completion_bits);
+            return (status & XHCI_PORTSC_PED) != 0;
+        }
+
+        arch_pause();
+    } while (mf_elapsed(start) < 1600U);
+
+    return false;
 }
 
 static XhciTrb *command_ring(void) { return (XhciTrb *)phys_to_virt(g_xhci.command_ring_phys); }
@@ -254,7 +408,7 @@ static void ring_command(u64 parameter, u32 control) {
         g_xhci.command_index = 0;
         g_xhci.command_cycle ^= TRB_CYCLE;
     }
-    ring_doorbell(0);
+    ring_command_doorbell();
 }
 
 static bool next_event(XhciTrb *event) {
@@ -267,8 +421,10 @@ static bool next_event(XhciTrb *event) {
         g_xhci.event_cycle ^= TRB_CYCLE;
     }
     u64 dequeue = g_xhci.event_ring_phys + (u64)g_xhci.event_index * sizeof(XhciTrb);
-    *(volatile u32 *)((u64)g_xhci.runtime + 0x18U) = (u32)dequeue | XHCI_ERDP_EHB;
-    *(volatile u32 *)((u64)g_xhci.runtime + 0x1CU) = (u32)(dequeue >> 32);
+    *(volatile u32 *)(interrupter0() + 0x18U) =
+        (u32)dequeue | XHCI_ERDP_EHB;
+    *(volatile u32 *)(interrupter0() + 0x1CU) =
+        (u32)(dequeue >> 32);
     return true;
 }
 
@@ -313,7 +469,7 @@ static bool control_transfer(u8 request, u8 request_type, u16 value, u16 index, 
     trb->parameter = 0;
     trb->status = 0;
     trb->control = TRB_TYPE(TRB_STATUS_STAGE) | (in ? 0U : TRB_DIR) | TRB_IOC | TRB_CYCLE;
-    ring_doorbell(1);
+    ring_endpoint_doorbell(1);
     return wait_completion(TRB_TRANSFER_EVENT, 0);
 }
 
@@ -368,7 +524,7 @@ static void submit_keyboard_report(void) {
         g_xhci.transfer_index = 0;
         g_xhci.transfer_cycle ^= TRB_CYCLE;
     }
-    ring_doorbell(g_xhci.endpoint_id);
+    ring_endpoint_doorbell(g_xhci.endpoint_id);
 }
 
 static void prepare_address_context(u8 speed) {
