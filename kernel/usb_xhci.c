@@ -776,7 +776,10 @@ bool xhci_init(VmPageMap *kernel_map) {
         if (!(*portsc & XHCI_PORTSC_CCS)) continue;
         connected_port = true;
 
-        bool superspeed = g_xhci.port_protocol[port] >= 3U;
+        u8 initial_speed = (u8)((*portsc >> 10) & 0x0FU);
+        bool superspeed =
+            g_xhci.port_protocol[port] >= 3U || initial_speed >= 4U;
+
         if (!reset_port(portsc, superspeed)) {
             xhci_report_failure_detail("port reset or enable", *portsc);
             continue;
