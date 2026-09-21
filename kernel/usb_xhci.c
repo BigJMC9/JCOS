@@ -296,7 +296,10 @@ static bool release_legacy_control(u64 base, u32 hcc) {
         u32 header = *capability;
         if (XHCI_EXT_CAP_ID(header) == 1U) {
             volatile u32 *legacy_control = capability + 1;
-            *legacy_control &= ~0x0FU;
+            u32 control = *legacy_control;
+            control &= ~((1U << 0) | (1U << 4) |
+                (1U << 13) | (1U << 14) | (1U << 15));
+            *legacy_control = control;
             if (!(header & XHCI_LEGACY_BIOS_OWNED)) return true;
             *capability = header | XHCI_LEGACY_OS_OWNED;
             for (u32 wait = 0; wait < XHCI_WAIT_LIMIT; ++wait) {
