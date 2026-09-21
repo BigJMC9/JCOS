@@ -522,7 +522,12 @@ static bool configure_keyboard(u8 endpoint_address, u8 interval, u16 max_packet,
         ((endpoint_address & 0x80U) ? 1U : 0U);
     u32 *ep = (u32 *)(void *)(input + XHCI_INPUT_CONTROL_SIZE + g_xhci.context_size * endpoint_id);
     g_xhci.endpoint_id = endpoint_id;
-    control[1] = (1U << 0) | (1U << 1) | (1U << endpoint_id);
+    /*
+     * Configure Endpoint requires A0 (Slot) plus the endpoint being added.
+     * A1 (the default control endpoint) must remain clear for this command.
+     */
+    control[0] = 0;
+    control[1] = (1U << 0) | (1U << endpoint_id);
     slot[0] = ((u32)speed << 20) | (endpoint_id << 27);
     slot[1] = (u32)(g_xhci.port + 1U) << 16;
     ep0[1] = ((u32)g_xhci.packet_size << 16) | (3U << 1) | (4U << 3);
