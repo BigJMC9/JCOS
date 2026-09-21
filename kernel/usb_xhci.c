@@ -291,6 +291,7 @@ static void discover_port_protocols(u64 base, u32 hcc) {
 static bool release_legacy_control(u64 base, u32 hcc) {
     u32 pointer = ((hcc >> 16) & 0xFFFFU) * 4U;
     for (u32 inspected = 0; pointer && inspected < 64U; ++inspected) {
+        if (pointer + 8U > XHCI_MMIO_SIZE) return false;
         volatile u32 *capability = reg32(base, pointer);
         u32 header = *capability;
         if (XHCI_EXT_CAP_ID(header) == 1U) {
@@ -446,6 +447,21 @@ static bool wait_completion(u32 type, u32 *slot_out) {
 static bool command(u32 type, u64 parameter, u32 slot_id, u32 *slot) {
     ring_command(parameter, TRB_TYPE(type) | TRB_SLOT_ID(slot_id));
     return wait_completion(TRB_COMMAND_COMPLETION, slot);
+}
+
+static void release_current_slot(void) {
+    if (!g_xhci.slot) return;
+
+    u32 slot = g_xhci.slot;
+    (void)command(TRB_DISABLE_SLOT, 0, slot, 0);
+
+    u64 *dcbaa = (u64 *)phys_to_virt(g_xhci.dcbaa_phys);
+    if (dcbaa) {
+        dcbaa[slot] = 0;
+        __asm__ volatile ("mfence" ::: "memory");
+    }
+
+    g_xhci.slot = 0;
 }
 
 static bool control_transfer(u8 request, u8 request_type, u16 value, u16 index, u16 length, bool in) {
@@ -784,49 +800,59 @@ bool xhci_init(VmPageMap *kernel_map) {
         if (!command(TRB_ADDRESS_DEVICE, g_xhci.input_context_phys,
                 g_xhci.slot, 0)) {
             xhci_report_failure("address device");
+            release_current_slot();
             continue;
         }
         u8 *descriptor = (u8 *)phys_to_virt(buffer);
         if (!control_transfer(USB_REQ_GET_DESCRIPTOR, 0x80U, USB_DESC_DEVICE << 8, 0, 8, true)) {
             xhci_report_failure("device descriptor");
+            release_current_slot();
             continue;
         }
         g_xhci.packet_size = descriptor[7] ? descriptor[7] : 8U;
         if (((*portsc >> 10) & 0x0FU) >= 4U) g_xhci.packet_size = (u16)(1U << g_xhci.packet_size);
         if (!update_ep0_context()) {
             xhci_report_failure("update control endpoint");
+            release_current_slot();
             continue;
         }
         if (!control_transfer(USB_REQ_GET_DESCRIPTOR, 0x80U, USB_DESC_CONFIGURATION << 8, 0, 9, true)) {
             xhci_report_failure("configuration header");
+            release_current_slot();
             continue;
         }
         u16 configuration_length = descriptor[2] | ((u16)descriptor[3] << 8);
         if (configuration_length > 4096U || configuration_length < 9U) {
             xhci_report_failure("configuration length");
+            release_current_slot();
             continue;
         }
         if (!control_transfer(USB_REQ_GET_DESCRIPTOR, 0x80U, USB_DESC_CONFIGURATION << 8, 0, configuration_length, true)) {
             xhci_report_failure("configuration descriptor");
+            release_current_slot();
             continue;
         }
         u8 interface_number = 0, endpoint_address = 0, interval = 0, transactions = 1U; u16 max_packet = 0;
         if (!find_keyboard_endpoint(descriptor, configuration_length, &interface_number,
                         &endpoint_address, &interval, &max_packet, &transactions)) {
             xhci_report_failure("boot keyboard endpoint");
+            release_current_slot();
             continue;
         }
         if (!control_transfer(USB_REQ_SET_CONFIGURATION, 0x00U, descriptor[5], 0, 0, false)) {
             xhci_report_failure("set configuration");
+            release_current_slot();
             continue;
         }
         if (!control_transfer(USB_REQ_SET_PROTOCOL, 0x21U, 0, interface_number, 0, false)) {
             xhci_report_failure("set boot protocol");
+            release_current_slot();
             continue;
         }
         if (!configure_keyboard(endpoint_address, interval, max_packet, transactions,
                     (u8)((*portsc >> 10) & 0x0FU))) {
             xhci_report_failure("configure keyboard endpoint");
+            release_current_slot();
             continue;
         }
         submit_keyboard_report();
