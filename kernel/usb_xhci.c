@@ -484,9 +484,9 @@ static bool control_transfer(u8 request, u8 request_type, u16 value, u16 index, 
     return wait_completion(TRB_TRANSFER_EVENT, 0);
 }
 
-static u16 default_ep0_packet_size(u8 speed) {
+static u16 default_ep0_packet_size(u8 speed, bool superspeed) {
+    if (superspeed) return 512U;
     if (speed == 3U) return 64U;
-    if (speed >= 4U) return 512U;
     return 8U;
 }
 
@@ -881,7 +881,7 @@ bool xhci_init(VmPageMap *kernel_map) {
         g_xhci.slot = slot;
 
         u8 speed = (u8)((*portsc >> 10) & 0x0FU);
-        g_xhci.packet_size = default_ep0_packet_size(speed);
+        g_xhci.packet_size = default_ep0_packet_size(speed, superspeed);
         g_xhci.endpoint_index = 0U;
         g_xhci.transfer_index = 0U;
         g_xhci.transfer_cycle = 1U;
@@ -915,7 +915,14 @@ bool xhci_init(VmPageMap *kernel_map) {
             continue;
         }
         g_xhci.packet_size = descriptor[7] ? descriptor[7] : 8U;
-        if (((*portsc >> 10) & 0x0FU) >= 4U) g_xhci.packet_size = (u16)(1U << g_xhci.packet_size);
+        if (superspeed) {
+            if (g_xhci.packet_size >= 16U) {
+                xhci_report_failure("invalid control packet size");
+                release_current_slot();
+                continue;
+            }
+            g_xhci.packet_size = (u16)(1U << g_xhci.packet_size);
+        }
         if (!update_ep0_context()) {
             xhci_report_failure("update control endpoint");
             release_current_slot();
