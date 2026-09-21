@@ -380,7 +380,7 @@ static bool reset_port(volatile u32 *portsc, bool superspeed) {
     do {
         u32 status = *portsc;
 
-        if ((status & completion_bits) && !(status & XHCI_PORTSC_PR)) {
+        if ((status & completion_bits) && !(status & reset_bit)) {
             portsc_ack_changes(portsc, completion_bits);
             return (status & XHCI_PORTSC_PED) != 0;
         }
@@ -471,6 +471,12 @@ static bool control_transfer(u8 request, u8 request_type, u16 value, u16 index, 
     trb->control = TRB_TYPE(TRB_STATUS_STAGE) | (in ? 0U : TRB_DIR) | TRB_IOC | TRB_CYCLE;
     ring_endpoint_doorbell(1);
     return wait_completion(TRB_TRANSFER_EVENT, 0);
+}
+
+static u16 default_ep0_packet_size(u8 speed) {
+    if (speed == 3U) return 64U;
+    if (speed >= 4U) return 512U;
+    return 8U;
 }
 
 static u8 endpoint_interval(u8 speed, u8 b_interval) {
@@ -641,12 +647,45 @@ bool xhci_init(VmPageMap *kernel_map) {
     pci_enable_memory_space(device); pci_enable_bus_master(device);
     g_xhci.mmio = (volatile u8 *)(u64)base;
     u32 cap_length = g_xhci.mmio[0];
+    u32 hcs1 = *reg32((u64)g_xhci.mmio, 0x04U);
+    u32 hcs2 = *reg32((u64)g_xhci.mmio, 0x08U);
     u32 hcc = *reg32((u64)g_xhci.mmio, 0x10U);
-    if (!cap_length || cap_length >= XHCI_MMIO_SIZE || !release_legacy_control(base, hcc)) return xhci_fail("capability or legacy handoff");
-    g_xhci.context_size = (hcc & 4U) ? 64U : 32U;
+    u32 doorbell_offset =
+        *reg32((u64)g_xhci.mmio, 0x14U) & ~3U;
+    u32 runtime_offset =
+        *reg32((u64)g_xhci.mmio, 0x18U) & ~0x1FU;
+
+    g_xhci.max_slots = hcs1 & 0xFFU;
+    g_xhci.max_ports = (hcs1 >> 24) & 0xFFU;
+    g_xhci.context_size = (hcc & XHCI_HCC_CSZ) ? 64U : 32U;
+    g_xhci.addr64 = (hcc & XHCI_HCC_AC64) != 0;
+
+    u64 port_register_end =
+        (u64)cap_length + 0x400ULL + (u64)g_xhci.max_ports * 0x10ULL;
+    u64 doorbell_end =
+        (u64)doorbell_offset + ((u64)g_xhci.max_slots + 1ULL) * sizeof(u32);
+
+    if (!cap_length || cap_length >= XHCI_MMIO_SIZE ||
+        !g_xhci.max_slots || !g_xhci.max_ports ||
+        g_xhci.max_ports > XHCI_MAX_PORTS ||
+        port_register_end > XHCI_MMIO_SIZE ||
+        doorbell_end > XHCI_MMIO_SIZE ||
+        runtime_offset > XHCI_MMIO_SIZE - 0x40U ||
+        !release_legacy_control(base, hcc)) {
+        return xhci_fail("capability or legacy handoff");
+    }
+
+    discover_port_protocols(base, hcc);
+
     g_xhci.op = (volatile u32 *)(u64)(base + cap_length);
-    g_xhci.doorbells = (volatile u32 *)(u64)(base + *reg32((u64)g_xhci.mmio, 0x14U));
-    g_xhci.runtime = (volatile u32 *)(u64)(base + *reg32((u64)g_xhci.mmio, 0x18U));
+    g_xhci.doorbells =
+        (volatile u32 *)(u64)(base + doorbell_offset);
+    g_xhci.runtime =
+        (volatile u32 *)(u64)(base + runtime_offset);
+
+    if (!(*reg32((u64)g_xhci.op, 0x08U) & 1U)) {
+        return xhci_fail("4K page unsupported");
+    }
     volatile u32 *usbcmd = reg32((u64)g_xhci.op, 0x00U);
     *usbcmd &= ~XHCI_USBCMD_RUN;
     if (!wait_condition(controller_halted)) return xhci_fail("controller halt");
@@ -658,47 +697,90 @@ bool xhci_init(VmPageMap *kernel_map) {
     if (!dma_page(&dcbaa) || !dma_page(&input) || !dma_page(&device_context) || !dma_page(&command_ring_phys) || !dma_page(&event_ring_phys) || !dma_page(&event_table) || !dma_page(&ep0_ring_phys) || !dma_page(&endpoint_ring_phys) || !dma_page(&buffer)) return xhci_fail("DMA allocation");
     g_xhci.dcbaa_phys = dcbaa; g_xhci.input_context_phys = input; g_xhci.device_context_phys = device_context; g_xhci.command_ring_phys = command_ring_phys;
     g_xhci.event_ring_phys = event_ring_phys; g_xhci.event_table_phys = event_table; g_xhci.ep0_ring_phys = ep0_ring_phys; g_xhci.endpoint_ring_phys = endpoint_ring_phys; g_xhci.transfer_buffer_phys = buffer;
-    ((u64 *)phys_to_virt(dcbaa))[0] = device_context;
+    if (!setup_scratchpads(hcs2)) return xhci_fail("scratchpad allocation");
     ((XhciTrb *)phys_to_virt(command_ring_phys))[XHCI_MAX_TRBS - 1U].parameter = command_ring_phys;
     ((XhciTrb *)phys_to_virt(command_ring_phys))[XHCI_MAX_TRBS - 1U].control = (6U << 10) | 2U | TRB_CYCLE;
     *reg32((u64)g_xhci.op, 0x30U) = (u32)dcbaa; *reg32((u64)g_xhci.op, 0x34U) = (u32)(dcbaa >> 32);
     *reg32((u64)g_xhci.op, 0x18U) = (u32)command_ring_phys | 1U; *reg32((u64)g_xhci.op, 0x1CU) = (u32)(command_ring_phys >> 32);
-    u32 max_slots = *reg32((u64)g_xhci.mmio, 0x04U) & 0xFFU;
-    if (!max_slots) return xhci_fail("no device slots");
-    *reg32((u64)g_xhci.op, 0x38U) = max_slots;
-        u32 *event_table_words = (u32 *)phys_to_virt(event_table);
-        event_table_words[0] = (u32)event_ring_phys; event_table_words[1] = (u32)(event_ring_phys >> 32); event_table_words[2] = 256U; event_table_words[3] = 0;
-    *(volatile u32 *)((u64)g_xhci.runtime + 0x08U) = 1U;
-    *(volatile u32 *)((u64)g_xhci.runtime + 0x10U) = (u32)event_table;
-    *(volatile u32 *)((u64)g_xhci.runtime + 0x14U) = (u32)(event_table >> 32);
-    *(volatile u32 *)((u64)g_xhci.runtime + 0x18U) = (u32)event_ring_phys | XHCI_ERDP_EHB;
-    *(volatile u32 *)((u64)g_xhci.runtime + 0x1CU) = (u32)(event_ring_phys >> 32);
+    *reg32((u64)g_xhci.op, 0x38U) = g_xhci.max_slots;
+
+    u32 *event_table_words = (u32 *)phys_to_virt(event_table);
+    event_table_words[0] = (u32)event_ring_phys;
+    event_table_words[1] = (u32)(event_ring_phys >> 32);
+    event_table_words[2] = XHCI_MAX_TRBS;
+    event_table_words[3] = 0;
+
+    *(volatile u32 *)(interrupter0() + 0x08U) = 1U;
+    *(volatile u32 *)(interrupter0() + 0x10U) = (u32)event_table;
+    *(volatile u32 *)(interrupter0() + 0x14U) = (u32)(event_table >> 32);
+    *(volatile u32 *)(interrupter0() + 0x18U) =
+        (u32)event_ring_phys | XHCI_ERDP_EHB;
+    *(volatile u32 *)(interrupter0() + 0x1CU) =
+        (u32)(event_ring_phys >> 32);
     __asm__ volatile ("mfence" ::: "memory");
     g_xhci.command_cycle = 1U; g_xhci.event_cycle = 1U; g_xhci.transfer_cycle = 1U; g_xhci.initialized = true;
     *usbcmd |= XHCI_USBCMD_RUN;
     if (!wait_condition(controller_not_ready) || controller_halted()) return xhci_fail("controller start");
-    u32 ports = (*reg32((u64)g_xhci.mmio, 0x04U) >> 24) & 0xFFU;
-    bool connected_port = false;
-    for (u32 port = 0; port < ports && port < 16U; ++port) {
-        volatile u32 *portsc = reg32((u64)g_xhci.op, 0x400U + port * 0x10U);
+    u32 ports = g_xhci.max_ports;
+
+    if (hcc & XHCI_HCC_PPC) {
+        for (u32 port = 0; port < ports; ++port) {
+            volatile u32 *portsc =
+                reg32((u64)g_xhci.op, 0x400U + port * 0x10U);
+            if (!(*portsc & XHCI_PORTSC_PP)) {
+                portsc_set_bits(portsc, XHCI_PORTSC_PP);
+            }
+        }
+    }
+
+    bool connected_port = wait_for_any_connection(ports);
+
+    for (u32 port = 0; port < ports; ++port) {
+        volatile u32 *portsc =
+            reg32((u64)g_xhci.op, 0x400U + port * 0x10U);
+
         if (!(*portsc & XHCI_PORTSC_CCS)) continue;
         connected_port = true;
-        *portsc |= XHCI_PORTSC_PR;
-        for (u32 wait = 0; wait < XHCI_WAIT_LIMIT &&
-             ((*portsc & XHCI_PORTSC_PR) || !(*portsc & XHCI_PORTSC_PRC)); ++wait) arch_pause();
-        if (*portsc & XHCI_PORTSC_PRC) *portsc |= XHCI_PORTSC_PRC;
-        if (!(*portsc & XHCI_PORTSC_PED)) {
-            xhci_report_failure("port reset or enable");
+
+        bool superspeed = g_xhci.port_protocol[port] >= 3U;
+        if (!reset_port(portsc, superspeed)) {
+            xhci_report_failure_detail("port reset or enable", *portsc);
             continue;
         }
+
         g_xhci.port = port;
         u32 slot = 0;
-        if (!command(TRB_ENABLE_SLOT, 0, 0, &slot) || !slot) {
+
+        if (!command(TRB_ENABLE_SLOT, 0, 0, &slot) ||
+            !slot || slot > g_xhci.max_slots) {
             xhci_report_failure("enable slot");
             continue;
         }
-        g_xhci.slot = slot; g_xhci.packet_size = 8U;
-        prepare_address_context((u8)((*portsc >> 10) & 0x0FU));
+
+        g_xhci.slot = slot;
+
+        u8 speed = (u8)((*portsc >> 10) & 0x0FU);
+        g_xhci.packet_size = default_ep0_packet_size(speed);
+        g_xhci.endpoint_index = 0U;
+        g_xhci.transfer_index = 0U;
+        g_xhci.transfer_cycle = 1U;
+
+        k_memset(phys_to_virt(g_xhci.input_context_phys), 0,
+            (usize)FRAME_SIZE);
+        k_memset(phys_to_virt(g_xhci.device_context_phys), 0,
+            (usize)FRAME_SIZE);
+        k_memset(phys_to_virt(g_xhci.ep0_ring_phys), 0,
+            (usize)FRAME_SIZE);
+        k_memset(phys_to_virt(g_xhci.endpoint_ring_phys), 0,
+            (usize)FRAME_SIZE);
+
+        u64 *dcbaa_entries =
+            (u64 *)phys_to_virt(g_xhci.dcbaa_phys);
+        dcbaa_entries[g_xhci.slot] = g_xhci.device_context_phys;
+        __asm__ volatile ("mfence" ::: "memory");
+
+        prepare_address_context(speed);
+
         if (!command(TRB_ADDRESS_DEVICE, g_xhci.input_context_phys,
                 g_xhci.slot, 0)) {
             xhci_report_failure("address device");
@@ -755,7 +837,7 @@ bool xhci_init(VmPageMap *kernel_map) {
         if (connected_port) xhci_report_failure("no boot keyboard found");
         else {
             xhci_report_failure_detail("no connected USB port", ports);
-            for (u32 port = 0; port < ports && port < 16U; ++port) {
+            for (u32 port = 0; port < ports; ++port) {
                 volatile u32 *portsc = reg32((u64)g_xhci.op, 0x400U + port * 0x10U);
                 xhci_report_failure_detail("port status", *portsc);
             }
