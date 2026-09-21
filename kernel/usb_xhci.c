@@ -621,9 +621,27 @@ static KeyCode usage_key(u8 usage, char *character) {
     if (usage >= 30U && usage <= 38U) { *character = (char)('1' + usage - 30U); return KEY_CHARACTER; }
     if (usage == 39U) { *character = '0'; return KEY_CHARACTER; }
     switch (usage) {
-        case 40U: return KEY_ENTER; case 41U: return KEY_ESCAPE; case 42U: return KEY_BACKSPACE;
-        case 43U: return KEY_TAB; case 44U: *character = ' '; return KEY_CHARACTER;
-        case 79U: return KEY_RIGHT; case 80U: return KEY_LEFT; case 81U: return KEY_DOWN; case 82U: return KEY_UP;
+        case 40U: return KEY_ENTER;
+        case 41U: return KEY_ESCAPE;
+        case 42U: return KEY_BACKSPACE;
+        case 43U: return KEY_TAB;
+        case 44U: *character = ' '; return KEY_CHARACTER;
+        case 45U: *character = '-'; return KEY_CHARACTER;
+        case 46U: *character = '='; return KEY_CHARACTER;
+        case 47U: *character = '['; return KEY_CHARACTER;
+        case 48U: *character = ']'; return KEY_CHARACTER;
+        case 54U: *character = ','; return KEY_CHARACTER;
+        case 55U: *character = '.'; return KEY_CHARACTER;
+        case 56U: *character = '/'; return KEY_CHARACTER;
+        case 74U: return KEY_HOME;
+        case 75U: return KEY_PAGE_UP;
+        case 76U: return KEY_DELETE;
+        case 77U: return KEY_END;
+        case 78U: return KEY_PAGE_DOWN;
+        case 79U: return KEY_RIGHT;
+        case 80U: return KEY_LEFT;
+        case 81U: return KEY_DOWN;
+        case 82U: return KEY_UP;
         default: return KEY_NONE;
     }
 }
