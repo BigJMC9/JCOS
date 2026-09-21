@@ -877,6 +877,14 @@ void kernel_main(BootInfo *boot) {
     system_console_write(xhci_present() ? "DETECTED" : "NOT DETECTED");
     system_console_write("  COM1: ");
     system_console_writeln(serial_available() ? "READY" : "NOT DETECTED");
+
+    system_console_write("XHCI: ");
+    system_console_write(xhci_controller_ready() ? "READY" : "FAILED");
+    system_console_write("  ROOT PORTS: ");
+    system_console_write_u64(xhci_root_port_count());
+    system_console_write("  SCRATCHPADS: ");
+    system_console_write_u64(xhci_scratchpad_count());
+    system_console_putchar('\n');
     system_console_write("ROOTFS: ");
     system_console_writeln(rootfs_ok ? "READY" : "FAILED");
     system_console_write("GPT: ");
