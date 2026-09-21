@@ -27,12 +27,14 @@
 #include "execution_profile.h"
 #include "scheduler.h"
 #include "supervisor.h"
+#include "system_console.h"
+#include "userspace_shell.h"
 #include "timer.h"
 #include "splash.h"
 
 #define CR4_LA57 (1ULL << 12)
 #define DIRECT_MAP_MIN_PHYSICAL 0x100000ULL
-#define BOOT_STAGE_COUNT 22U
+#define BOOT_STAGE_COUNT 23U
 
 extern const u8 __kernel_text_start[] __attribute__((visibility("hidden")));
 extern const u8 __kernel_text_end[] __attribute__((visibility("hidden")));
@@ -665,6 +667,19 @@ void kernel_main(BootInfo *boot) {
     interrupts_enable();
 
     ++boot_stage;
+    splash_update(boot_stage, BOOT_STAGE_COUNT, "Starting userspace console service");
+    bool archive_portal_ok = boot->initrd_base && boot->initrd_size &&
+        system_console_configure_boot_archive((const void *)(u64)boot->initrd_base, boot->initrd_size);
+    bool console_ok = archive_portal_ok && system_console_start();
+    if (!console_ok) {
+        serial_write("JA OS: userspace console service initialization failed.\n");
+        terminal_set_color(terminal_error_color());
+        terminal_writeln("USERSPACE CONSOLE SERVICE INITIALIZATION FAILED.");
+        terminal_set_color(terminal_default_color());
+        cpu_halt_forever();
+    }
+
+    ++boot_stage;
     splash_update(boot_stage, BOOT_STAGE_COUNT, "Boot complete");
 
     ArchDescriptorTablePointer gdtr;
@@ -676,112 +691,131 @@ void kernel_main(BootInfo *boot) {
 
     terminal_clear();
     terminal_set_color(terminal_accent_color());
-    terminal_writeln("JA OS - INTERACTIVE X86_64 KERNEL");
+    system_console_writeln("JA OS - INTERACTIVE X86_64 KERNEL");
     terminal_set_color(terminal_default_color());
-    terminal_writeln("UEFI BOOT SERVICES EXITED. FRAMEBUFFER + SERIAL CONSOLES ONLINE.");
-    terminal_write("IDT: READY  GDT/TSS: ");
-    terminal_write(gdt_ok ? "READY" : "FAILED");
-    terminal_write("  PMM: ");
-    terminal_writeln(pmm_ok ? "READY" : "FAILED");
-    terminal_write("PAGING: ");
-    terminal_writeln(paging_ok ? "JCOS CR3 ACTIVE" : "FAILED");
-    terminal_write("  NX: ");
-    terminal_writeln(vmm_nx_enabled() ? "ACTIVE" : "INACTIVE");
-    terminal_write("  CR0.WP: ");
-    terminal_writeln(vmm_write_protect_enabled() ? "ACTIVE" : "INACTIVE");
-    terminal_write("  KERNEL W^X: ");
-    terminal_writeln(kernel_wx_ok ? "ACTIVE" : "FAILED");
-    terminal_write("  PHYS MAP: ");
-    terminal_writeln(vmm_phys_map_access_enabled() ? "ACTIVE" : "INACTIVE");
-    terminal_write("  PMM PHYS MAP: ");
-    terminal_writeln(pmm_phys_map_access_enabled() ? "ACTIVE" : "INACTIVE");
-    terminal_writeln("  LOW PMM IDENTITY: OFF");
-    terminal_write("  PHYS MAP BASE: ");
-    terminal_write_hex(PHYS_MAP_BASE);
-    terminal_putchar('\n');
-    terminal_write("  AHCI DMA PHYS MAP: ");
-    terminal_writeln(ahci_phys_map_access_enabled() ? "ACTIVE" : "INACTIVE");
+    system_console_writeln("UEFI BOOT SERVICES EXITED. FRAMEBUFFER + SERIAL CONSOLES ONLINE.");
+    system_console_write("IDT: READY  GDT/TSS: ");
+    system_console_write(gdt_ok ? "READY" : "FAILED");
+    system_console_write("  PMM: ");
+    system_console_writeln(pmm_ok ? "READY" : "FAILED");
+    system_console_write("PAGING: ");
+    system_console_writeln(paging_ok ? "JCOS CR3 ACTIVE" : "FAILED");
+    system_console_write("  NX: ");
+    system_console_writeln(vmm_nx_enabled() ? "ACTIVE" : "INACTIVE");
+    system_console_write("  CR0.WP: ");
+    system_console_writeln(vmm_write_protect_enabled() ? "ACTIVE" : "INACTIVE");
+    system_console_write("  KERNEL W^X: ");
+    system_console_writeln(kernel_wx_ok ? "ACTIVE" : "FAILED");
+    system_console_write("  PHYS MAP: ");
+    system_console_writeln(vmm_phys_map_access_enabled() ? "ACTIVE" : "INACTIVE");
+    system_console_write("  PMM PHYS MAP: ");
+    system_console_writeln(pmm_phys_map_access_enabled() ? "ACTIVE" : "INACTIVE");
+    system_console_writeln("  LOW PMM IDENTITY: OFF");
+    system_console_write("  PHYS MAP BASE: ");
+    system_console_write_hex(PHYS_MAP_BASE);
+    system_console_putchar('\n');
+    system_console_write("  AHCI DMA PHYS MAP: ");
+    system_console_writeln(ahci_phys_map_access_enabled() ? "ACTIVE" : "INACTIVE");
 
     u64 root_physical = frame_to_phys(kernel_space->page_map.root_frame);
     u64 root_direct = 0;
 
     if (physmap_virtual_address(root_physical, &root_direct)) {
-        terminal_write("  PML4 DIRECT: ");
-        terminal_write_hex(root_direct);
-        terminal_putchar('\n');
+        system_console_write("  PML4 DIRECT: ");
+        system_console_write_hex(root_direct);
+        system_console_putchar('\n');
     }
-    terminal_write("  CS: ");
-    terminal_write_hex(arch_read_cs());
-    terminal_write("  TR: ");
-    terminal_write_hex(arch_read_tr());
-    terminal_putchar('\n');
-    terminal_write("  RSP0: ");
-    terminal_write_hex(gdt_rsp0());
-    terminal_putchar('\n');
-    terminal_write("  IST1: ");
-    terminal_write_hex(gdt_ist1());
-    terminal_putchar('\n');
-    terminal_write("  OLD CR3: ");
-    terminal_write_hex(old_cr3);
-    terminal_putchar('\n');
-    terminal_write("  NEW CR3: ");
-    terminal_write_hex(new_cr3);
-    terminal_putchar('\n');
-    terminal_write("  PML4 FRAME: ");
-    terminal_write_u64(kernel_space->page_map.root_frame);
-    terminal_write("  GDTR BASE: ");
-    terminal_write_hex(gdtr.base);
-    terminal_write("  LIMIT: ");
-    terminal_write_u64(gdtr.limit);
-    terminal_putchar('\n');
-    terminal_write("  ACPI: ");
-    terminal_write(acpi_ok ? "READY" : "FALLBACK");
-    terminal_write("  IRQ: ");
-    terminal_writeln(controller_ok ? interrupt_controller_name() : "FAILED");
-    terminal_write("PCI: ");
-    terminal_write_u64(pci_device_count());
-    terminal_writeln(" DEVICE(S)");
-    terminal_write("BLOCK DEVICES: ");
-    terminal_write_u64(block_device_count());
-    terminal_putchar('\n');
-    terminal_write("AHCI: ");
-    terminal_writeln(ahci_ok ? "DETECTED" : "NOT DETECTED");
-    terminal_write("PROCESSES: ");
-    terminal_writeln(process_ok ? "READY" : "FAILED");
-    terminal_write("ENDPOINTS: ");
-    terminal_writeln(endpoint_ok ? "READY" : "FAILED");
-    terminal_write("THREADS: ");
-    terminal_writeln(thread_ok ? "READY" : "FAILED");
-    terminal_write("SCHEDULER: ");
-    terminal_writeln(scheduler_ok ? "READY" : "FAILED");
-    terminal_write("EXECUTION PROFILE: ");
-    terminal_writeln(execution_profile_ok && execution_profile_fp_simd_restricted() ? "UP / FP-SIMD RESTRICTED" : "FAILED");
-    terminal_write("SUPERVISOR: ");
-    terminal_writeln(supervisor_ok ? "READY" : "FAILED");
-    terminal_write("TIMER: ");
+    system_console_write("  CS: ");
+    system_console_write_hex(arch_read_cs());
+    system_console_write("  TR: ");
+    system_console_write_hex(arch_read_tr());
+    system_console_putchar('\n');
+    system_console_write("  RSP0: ");
+    system_console_write_hex(gdt_rsp0());
+    system_console_putchar('\n');
+    system_console_write("  IST1: ");
+    system_console_write_hex(gdt_ist1());
+    system_console_putchar('\n');
+    system_console_write("  OLD CR3: ");
+    system_console_write_hex(old_cr3);
+    system_console_putchar('\n');
+    system_console_write("  NEW CR3: ");
+    system_console_write_hex(new_cr3);
+    system_console_putchar('\n');
+    system_console_write("  PML4 FRAME: ");
+    system_console_write_u64(kernel_space->page_map.root_frame);
+    system_console_write("  GDTR BASE: ");
+    system_console_write_hex(gdtr.base);
+    system_console_write("  LIMIT: ");
+    system_console_write_u64(gdtr.limit);
+    system_console_putchar('\n');
+    system_console_write("  ACPI: ");
+    system_console_write(acpi_ok ? "READY" : "FALLBACK");
+    system_console_write("  IRQ: ");
+    system_console_writeln(controller_ok ? interrupt_controller_name() : "FAILED");
+    system_console_write("PCI: ");
+    system_console_write_u64(pci_device_count());
+    system_console_writeln(" DEVICE(S)");
+    system_console_write("BLOCK DEVICES: ");
+    system_console_write_u64(block_device_count());
+    system_console_putchar('\n');
+    system_console_write("AHCI: ");
+    system_console_writeln(ahci_ok ? "DETECTED" : "NOT DETECTED");
+    system_console_write("PROCESSES: ");
+    system_console_writeln(process_ok ? "READY" : "FAILED");
+    system_console_write("ENDPOINTS: ");
+    system_console_writeln(endpoint_ok ? "READY" : "FAILED");
+    system_console_write("THREADS: ");
+    system_console_writeln(thread_ok ? "READY" : "FAILED");
+    system_console_write("SCHEDULER: ");
+    system_console_writeln(scheduler_ok ? "READY" : "FAILED");
+    system_console_write("EXECUTION PROFILE: ");
+    system_console_writeln(execution_profile_ok && execution_profile_fp_simd_restricted() ? "UP / FP-SIMD RESTRICTED" : "FAILED");
+    system_console_write("SUPERVISOR: ");
+    system_console_writeln(supervisor_ok ? "READY" : "FAILED");
+    system_console_write("CONSOLE SERVICE: ");
+    system_console_writeln(console_ok && system_console_running() ? "READY" : "FAILED");
+    system_console_write("BOOT ARCHIVE: ");
+    system_console_writeln(archive_portal_ok && system_console_archive_size() == boot->initrd_size
+        ? "RAW PORTAL / RING3 NAMESPACE" : "FAILED");
+    system_console_write("TIMER: ");
     if (timer_ok) {
-        terminal_write("PIT ");
-        terminal_write_u64(timer_frequency());
-        terminal_writeln(" HZ");
+        system_console_write("PIT ");
+        system_console_write_u64(timer_frequency());
+        system_console_writeln(" HZ");
     } 
     else {
-        terminal_writeln("FAILED");
+        system_console_writeln("FAILED");
     }
-    terminal_write("PREEMPTION: ");
-    terminal_writeln(preemption_ok && scheduler_preemption_enabled() ? "ACTIVE" : "FAILED");
-    terminal_write("PS/2: ");
-    terminal_write(keyboard_ok ? "DETECTED" : "NOT DETECTED");
-    terminal_write("  COM1: ");
-    terminal_writeln(serial_available() ? "READY" : "NOT DETECTED");
-    terminal_write("ROOTFS: ");
-    terminal_writeln(rootfs_ok ? "READY" : "FAILED");
-    terminal_write("GPT: ");
-    terminal_writeln(gpt_ok ? "READY" : "FAILED");
-    terminal_write("  PARTITIONS: ");
-    terminal_writeln(partitions_ok ? "READY" : "FAILED");
-    terminal_write("FAT32: ");
-    terminal_writeln(fat32_ok ? "READY" : "FAILED");
-    terminal_writeln("TYPE help AND PRESS ENTER.");
+    system_console_write("PREEMPTION: ");
+    system_console_writeln(preemption_ok && scheduler_preemption_enabled() ? "ACTIVE" : "FAILED");
+    system_console_write("PS/2: ");
+    system_console_write(keyboard_ok ? "DETECTED" : "NOT DETECTED");
+    system_console_write("  COM1: ");
+    system_console_writeln(serial_available() ? "READY" : "NOT DETECTED");
+    system_console_write("ROOTFS: ");
+    system_console_writeln(rootfs_ok ? "READY" : "FAILED");
+    system_console_write("GPT: ");
+    system_console_writeln(gpt_ok ? "READY" : "FAILED");
+    system_console_write("  PARTITIONS: ");
+    system_console_writeln(partitions_ok ? "READY" : "FAILED");
+    system_console_write("FAT32: ");
+    system_console_writeln(fat32_ok ? "READY" : "FAILED");
+    system_console_writeln("DEFAULT SHELL: RING3 USERSPACE.");
+    system_console_writeln("TYPE help AT THE USER SHELL PROMPT; TYPE monitor OR PRESS ESC FOR THE KERNEL MONITOR.");
+    system_console_putchar('\n');
+
+    if (!userspace_shell_run_boot_default()) {
+        serial_write("R7 SHELL: default userspace shell unavailable; entering kernel emergency monitor.\n");
+        terminal_set_color(terminal_error_color());
+        terminal_writeln("USERSPACE SHELL UNAVAILABLE. ENTERING KERNEL EMERGENCY MONITOR.");
+        terminal_set_color(terminal_default_color());
+    } else {
+        terminal_set_color(terminal_accent_color());
+        terminal_writeln("KERNEL EMERGENCY / DEVELOPMENT MONITOR ACTIVE.");
+        terminal_set_color(terminal_default_color());
+        terminal_writeln("TYPE usershell TO RETURN TO THE NORMAL RING3 SHELL.");
+    }
     terminal_putchar('\n');
 
     shell_run(boot);

@@ -514,3 +514,7 @@ void terminal_scrollback_to_bottom(void) {
 bool terminal_scrollback_active(void) {
     return g_ready && (!g_follow_output || g_view_top != live_view_top());
 }
+
+bool terminal_scrollback_can_page_up(void) {
+    return g_ready && g_view_top > g_first_line;
+}

@@ -1,0 +1,7 @@
+#ifndef JA_OS_FOREGROUND_LAUNCH_POLICY_TEST_H
+#define JA_OS_FOREGROUND_LAUNCH_POLICY_TEST_H
+
+void foreground_launch_policy_test_run(void);
+void foreground_launch_policy_test_cleanup_run(void);
+
+#endif

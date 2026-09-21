@@ -1,0 +1,7 @@
+#ifndef JCOS_HELLO_APP_ABI_H
+#define JCOS_HELLO_APP_ABI_H
+
+#define JCOS_HELLO_APP_PATH "/bin/hello.elf"
+#define JCOS_HELLO_APP_TEXT "HELLO FROM INDEPENDENT RING3 APP R7B.1"
+
+#endif

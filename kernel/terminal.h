@@ -28,5 +28,6 @@ void terminal_scrollback_page_up(void);
 void terminal_scrollback_page_down(void);
 void terminal_scrollback_to_bottom(void);
 bool terminal_scrollback_active(void);
+bool terminal_scrollback_can_page_up(void);
 
 #endif

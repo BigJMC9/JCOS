@@ -49,6 +49,7 @@
 #include "test_registry.h"
 #include "editor.h"
 #include "input.h"
+#include "userspace_shell.h"
 
 
 static VfsNode *g_cwd;
@@ -6385,6 +6386,14 @@ typedef struct {
 } ShellLocalTest;
 
 static void command_clear(void) { terminal_clear(); }
+
+static void command_usershell(void) {
+    if (userspace_shell_run()) return;
+    terminal_set_color(terminal_error_color());
+    terminal_writeln("USERSPACE SHELL HANDOFF FAILED; KERNEL MONITOR REMAINS ACTIVE.");
+    terminal_set_color(terminal_default_color());
+}
+
 static void command_fault(void) { __asm__ volatile ("ud2"); }
 
 #define SHELL_COMMAND_CAPACITY 96U
@@ -6450,6 +6459,8 @@ static void shell_registry_init(void) {
 
     shell_add_command("help", "help [COMMAND]", "show command help", SHELL_GROUP_GENERAL, 0, command_help, true);
     shell_add_command("about", "about", "describe this kernel", SHELL_GROUP_GENERAL, command_about, 0, true);
+    shell_add_command("usershell", "usershell", "return to the normal Ring3 shell; monitor/Escape returns",
+        SHELL_GROUP_GENERAL, command_usershell, 0, true);
     shell_add_command("clear", "clear", "clear the terminal", SHELL_GROUP_GENERAL, command_clear, 0, true);
     shell_add_command("shutdown", "shutdown", "gracefully power off the system", SHELL_GROUP_GENERAL, command_shutdown, 0, true);
     shell_add_command("reboot", "reboot", "gracefully restart the system", SHELL_GROUP_GENERAL, command_reboot, 0, true);

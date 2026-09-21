@@ -23,11 +23,29 @@ typedef enum {
     MANAGED_SERVICE_STOP_FAILED
 } ManagedServiceStopResult;
 
+#define MANAGED_SERVICE_BASE_STARTUP_CAPABILITIES 2U
+#define MANAGED_SERVICE_BASE_STARTUP_ARGUMENTS    1U
+#define MANAGED_SERVICE_MAX_EXTRA_CAPABILITIES \
+    (JCOS_PROGRAM_STARTUP_MAX_CAPABILITIES - MANAGED_SERVICE_BASE_STARTUP_CAPABILITIES)
+#define MANAGED_SERVICE_MAX_EXTRA_ARGUMENTS \
+    (JCOS_PROGRAM_STARTUP_MAX_ARGUMENTS - MANAGED_SERVICE_BASE_STARTUP_ARGUMENTS)
+
 typedef struct {
     const char *path;
     u64 shutdown_message;
     u64 shutdown_reply;
 } ManagedServiceSpec;
+
+/* Optional R7+ protocol-specific launch envelope. R6 callers continue using
+ * ManagedServiceSpec alone and retain the original two-cap/one-argument ABI. */
+typedef struct {
+    ProgramGrantSpec startup_grants[MANAGED_SERVICE_MAX_EXTRA_CAPABILITIES];
+    u32 startup_grant_count;
+    u64 startup_arguments[MANAGED_SERVICE_MAX_EXTRA_ARGUMENTS];
+    u32 startup_argument_count;
+    u32 shutdown_request_word_count;
+    u64 shutdown_request_words[IPC_MESSAGE_MAX_WORDS];
+} ManagedServiceLaunchExtras;
 
 /* Kernel-client connection snapshot. Handles belong to the kernel capability
  * table and are valid only for this exact service incarnation. A replacement
@@ -53,6 +71,8 @@ typedef struct {
     u64 incarnation;
     u64 shutdown_message;
     u64 shutdown_reply;
+    u32 shutdown_request_word_count;
+    u64 shutdown_request_words[IPC_MESSAGE_MAX_WORDS];
 
     bool exit_queue_created;
     bool command_created;
@@ -70,12 +90,23 @@ typedef struct {
 /* Standard managed-service startup profile:
  *   cap[0] = RECEIVE command endpoint
  *   cap[1] = SEND reply endpoint
+ *   cap[2..] = optional protocol-specific attenuated grants
  *   arg[0] = boot-unique nonzero service incarnation
+ *   arg[1..] = optional protocol-specific opaque arguments
  * Every reply must carry that incarnation in word 1. */
 bool managed_service_start(ManagedService *service, const ManagedServiceSpec *spec);
+bool managed_service_start_ex(ManagedService *service, const ManagedServiceSpec *spec,
+    const ManagedServiceLaunchExtras *extras);
+/* R7d generic mechanism entry: launch from a validated immutable file view
+ * without interpreting a pathname. The file storage only needs to remain valid
+ * for the synchronous launch transaction; program_launch copies mapped bytes. */
+bool managed_service_start_file_ex(ManagedService *service, const VfsNode *file,
+    u64 shutdown_message, u64 shutdown_reply, const ManagedServiceLaunchExtras *extras);
 ManagedServiceStopResult managed_service_stop_bounded(ManagedService *service);
 bool managed_service_recover(ManagedService *service);
 bool managed_service_restart(ManagedService *service, const ManagedServiceSpec *spec);
+bool managed_service_restart_ex(ManagedService *service, const ManagedServiceSpec *spec,
+    const ManagedServiceLaunchExtras *extras);
 
 ManagedServiceState managed_service_state(ManagedService *service);
 bool managed_service_running(ManagedService *service);

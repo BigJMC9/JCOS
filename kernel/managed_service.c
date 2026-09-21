@@ -232,15 +232,26 @@ static bool service_spec_valid(const ManagedServiceSpec *spec) {
     return spec && spec->path && spec->path[0] && spec->shutdown_message && spec->shutdown_reply;
 }
 
+static bool service_extras_valid(const ManagedServiceLaunchExtras *extras) {
+    if (!extras) return true;
+    if (extras->startup_grant_count > MANAGED_SERVICE_MAX_EXTRA_CAPABILITIES ||
+        extras->startup_argument_count > MANAGED_SERVICE_MAX_EXTRA_ARGUMENTS ||
+        extras->shutdown_request_word_count > IPC_MESSAGE_MAX_WORDS) return false;
+    if (extras->shutdown_request_word_count && !extras->shutdown_request_words[0]) return false;
+    return true;
+}
+
 static bool service_allocate_incarnation(u64 *out) {
     if (!out || !g_next_managed_service_incarnation) return false;
     *out = g_next_managed_service_incarnation++;
     return *out != 0ULL;
 }
 
-bool managed_service_start(ManagedService *service, const ManagedServiceSpec *spec) {
-    if (!service || !service_spec_valid(spec) || service->state != MANAGED_SERVICE_STOPPED ||
-        service_needs_cleanup(service)) return false;
+static bool managed_service_start_resolved_ex(ManagedService *service, const VfsNode *file,
+    u64 shutdown_message, u64 shutdown_reply, const ManagedServiceLaunchExtras *extras) {
+    if (!service || !file || file->type != VFS_FILE || !file->data || !file->size ||
+        !shutdown_message || !shutdown_reply || !service_extras_valid(extras) ||
+        service->state != MANAGED_SERVICE_STOPPED || service_needs_cleanup(service)) return false;
 
     ProcessExitInfo previous_exit;
     k_memcpy(&previous_exit, &service->last_exit, sizeof(previous_exit));
@@ -249,8 +260,16 @@ bool managed_service_start(ManagedService *service, const ManagedServiceSpec *sp
     k_memcpy(&service->last_exit, &previous_exit, sizeof(service->last_exit));
     service->last_exit_valid = previous_exit_valid;
     service->state = MANAGED_SERVICE_STARTING;
-    service->shutdown_message = spec->shutdown_message;
-    service->shutdown_reply = spec->shutdown_reply;
+    service->shutdown_message = shutdown_message;
+    service->shutdown_reply = shutdown_reply;
+    if (extras && extras->shutdown_request_word_count) {
+        service->shutdown_request_word_count = extras->shutdown_request_word_count;
+        k_memcpy(service->shutdown_request_words, extras->shutdown_request_words,
+            sizeof(service->shutdown_request_words));
+    } else {
+        service->shutdown_request_word_count = 1U;
+        service->shutdown_request_words[0] = shutdown_message;
+    }
 
     if (!service_allocate_incarnation(&service->incarnation)) goto fail;
 
@@ -282,14 +301,10 @@ bool managed_service_start(ManagedService *service, const ManagedServiceSpec *sp
             &service->kernel_reply_grant_handle)) goto fail;
     service->kernel_reply_grant_cap = true;
 
-    VfsNode *file = vfs_resolve(vfs_root(), spec->path);
-    if (!file || file->type != VFS_FILE || !file->data || !file->size) goto fail;
-
     ProgramLaunchSpec launch;
     k_memset(&launch, 0, sizeof(launch));
     launch.file = file;
     launch.exit_queue = &service->exit_queue;
-    launch.startup_grant_count = 2U;
     launch.startup_grants[0].authority_table = caps;
     launch.startup_grants[0].authority_handle = service->kernel_command_grant_handle;
     launch.startup_grants[0].object = &service->command_endpoint;
@@ -300,8 +315,19 @@ bool managed_service_start(ManagedService *service, const ManagedServiceSpec *sp
     launch.startup_grants[1].object = &service->reply_endpoint;
     launch.startup_grants[1].type = CAPABILITY_TYPE_ENDPOINT;
     launch.startup_grants[1].rights = CAPABILITY_RIGHT_SEND;
-    launch.startup_argument_count = 1U;
+    u32 extra_grants = extras ? extras->startup_grant_count : 0U;
+    launch.startup_grant_count = MANAGED_SERVICE_BASE_STARTUP_CAPABILITIES + extra_grants;
+    for (u32 i = 0; i < extra_grants; ++i) {
+        k_memcpy(&launch.startup_grants[MANAGED_SERVICE_BASE_STARTUP_CAPABILITIES + i],
+            &extras->startup_grants[i], sizeof(ProgramGrantSpec));
+    }
+
+    u32 extra_arguments = extras ? extras->startup_argument_count : 0U;
+    launch.startup_argument_count = MANAGED_SERVICE_BASE_STARTUP_ARGUMENTS + extra_arguments;
     launch.startup_arguments[0] = service->incarnation;
+    for (u32 i = 0; i < extra_arguments; ++i) {
+        launch.startup_arguments[MANAGED_SERVICE_BASE_STARTUP_ARGUMENTS + i] = extras->startup_arguments[i];
+    }
 
     if (!program_launch(&service->program, &launch) || !service_wait_ready(service)) goto fail;
     service->state = MANAGED_SERVICE_RUNNING;
@@ -311,6 +337,24 @@ fail:
     service->state = MANAGED_SERVICE_FAILED;
     (void)service_release(service, true);
     return false;
+}
+
+bool managed_service_start_file_ex(ManagedService *service, const VfsNode *file,
+    u64 shutdown_message, u64 shutdown_reply, const ManagedServiceLaunchExtras *extras) {
+    return managed_service_start_resolved_ex(service, file, shutdown_message, shutdown_reply, extras);
+}
+
+bool managed_service_start_ex(ManagedService *service, const ManagedServiceSpec *spec,
+    const ManagedServiceLaunchExtras *extras) {
+    if (!service_spec_valid(spec) || !service_extras_valid(extras)) return false;
+    VfsNode *file = vfs_resolve(vfs_root(), spec->path);
+    if (!file) return false;
+    return managed_service_start_resolved_ex(service, file, spec->shutdown_message,
+        spec->shutdown_reply, extras);
+}
+
+bool managed_service_start(ManagedService *service, const ManagedServiceSpec *spec) {
+    return managed_service_start_ex(service, spec, 0);
 }
 
 ManagedServiceState managed_service_state(ManagedService *service) {
@@ -406,8 +450,8 @@ ManagedServiceStopResult managed_service_stop_bounded(ManagedService *service) {
         service->state = MANAGED_SERVICE_CLOSING;
         IpcMessage request;
         k_memset(&request, 0, sizeof(request));
-        request.word_count = 1U;
-        request.words[0] = service->shutdown_message;
+        request.word_count = service->shutdown_request_word_count;
+        k_memcpy(request.words, service->shutdown_request_words, sizeof(request.words));
 
         Process *kernel = process_kernel();
         IpcMessage reply;
@@ -452,8 +496,9 @@ bool managed_service_recover(ManagedService *service) {
     return service_release(service, true);
 }
 
-bool managed_service_restart(ManagedService *service, const ManagedServiceSpec *spec) {
-    if (!service || !service_spec_valid(spec)) return false;
+bool managed_service_restart_ex(ManagedService *service, const ManagedServiceSpec *spec,
+    const ManagedServiceLaunchExtras *extras) {
+    if (!service || !service_spec_valid(spec) || !service_extras_valid(extras)) return false;
     ManagedServiceState state = managed_service_state(service);
     if (state == MANAGED_SERVICE_RUNNING) {
         ManagedServiceStopResult stopped = managed_service_stop_bounded(service);
@@ -461,7 +506,11 @@ bool managed_service_restart(ManagedService *service, const ManagedServiceSpec *
     } else if (state != MANAGED_SERVICE_STOPPED && !managed_service_recover(service)) {
         return false;
     }
-    return managed_service_start(service, spec);
+    return managed_service_start_ex(service, spec, extras);
+}
+
+bool managed_service_restart(ManagedService *service, const ManagedServiceSpec *spec) {
+    return managed_service_restart_ex(service, spec, 0);
 }
 
 bool managed_service_last_exit_info(const ManagedService *service, ProcessExitInfo *out) {

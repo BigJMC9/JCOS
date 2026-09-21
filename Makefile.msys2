@@ -6,6 +6,11 @@ ROOTFS := $(BUILD)/ROOTFS.TAR
 USER_ELF_TEST := $(ROOTFS_DIR)/bin/elftest.elf
 USER_SUPERVISOR := $(ROOTFS_DIR)/bin/supervisor.elf
 USER_WORKER_SERVICE := $(ROOTFS_DIR)/bin/workerservice.elf
+USER_ORDINARY_SERVICE := $(ROOTFS_DIR)/bin/ordinaryservice.elf
+USER_ORDINARY_SERVICE_REPLACEMENT := $(ROOTFS_DIR)/bin/ordinaryservice-v2.elf
+USER_CONSOLE_SERVICE := $(ROOTFS_DIR)/bin/consoleservice.elf
+USER_HELLO := $(ROOTFS_DIR)/bin/hello.elf
+USER_INPUT_ECHO := $(ROOTFS_DIR)/bin/inputecho.elf
 USER_LAUNCH_PROBE := $(ROOTFS_DIR)/bin/launchprobe.elf
 USER_RUNTIME_TEST := $(ROOTFS_DIR)/bin/runtimetest.elf
 USER_RUNTIME_CANCEL_TEST := $(ROOTFS_DIR)/bin/runtimecanceltest.elf
@@ -13,7 +18,7 @@ USER_RUNTIME_BLOCK_TEST := $(ROOTFS_DIR)/bin/runtimeblocktest.elf
 .DEFAULT_GOAL := all
 .DELETE_ON_ERROR:
 
-USER_PROGRAMS := $(USER_ELF_TEST) $(USER_SUPERVISOR) $(USER_WORKER_SERVICE) $(USER_LAUNCH_PROBE) $(USER_RUNTIME_TEST) $(USER_RUNTIME_BLOCK_TEST) $(USER_RUNTIME_CANCEL_TEST)
+USER_PROGRAMS := $(USER_ELF_TEST) $(USER_SUPERVISOR) $(USER_WORKER_SERVICE) $(USER_ORDINARY_SERVICE) $(USER_ORDINARY_SERVICE_REPLACEMENT) $(USER_CONSOLE_SERVICE) $(USER_HELLO) $(USER_INPUT_ECHO) $(USER_LAUNCH_PROBE) $(USER_RUNTIME_TEST) $(USER_RUNTIME_BLOCK_TEST) $(USER_RUNTIME_CANCEL_TEST)
 ROOTFS_FILES := $(shell test -d $(ROOTFS_DIR) && find $(ROOTFS_DIR) -type f)
 IMAGE := $(BUILD)/JA-os.img
 
@@ -103,6 +108,145 @@ $(USER_WORKER_SERVICE): $(BUILD)/user_crt0_startup.o \
 	      $(BUILD)/user_crt0_startup.o \
 	      $(BUILD)/user_syscall.o \
 	      $(BUILD)/user_worker_service.o
+	$(CHECK_ELF_RELOCATIONS)
+
+$(BUILD)/user_ordinary_service.o: user/ordinary_service.c \
+                                  user/lib/syscall.h \
+                                  include/user_abi.h \
+                                  include/program_startup.h \
+                                  include/service_protocol.h \
+                                  include/ordinary_service_protocol.h | $(BUILD)
+	$(CLANG) $(USER_CFLAGS) -c $< -o $@
+
+$(USER_ORDINARY_SERVICE): $(BUILD)/user_crt0_startup.o \
+                          $(BUILD)/user_syscall.o \
+                          $(BUILD)/user_ordinary_service.o \
+                          user/ordinary_service.ld Makefile.msys2
+	mkdir -p $(dir $@)
+	$(LD) -m elf_x86_64 -nostdlib -static \
+	      -T user/ordinary_service.ld \
+	      -o $@ \
+	      $(BUILD)/user_crt0_startup.o \
+	      $(BUILD)/user_syscall.o \
+	      $(BUILD)/user_ordinary_service.o
+	$(CHECK_ELF_RELOCATIONS)
+
+$(BUILD)/user_ordinary_service_replacement.o: user/ordinary_service.c \
+                                              user/lib/syscall.h \
+                                              include/user_abi.h \
+                                              include/program_startup.h \
+                                              include/service_protocol.h \
+                                              include/ordinary_service_protocol.h | $(BUILD)
+	$(CLANG) $(USER_CFLAGS) \
+	      -DJCOS_ORDINARY_SERVICE_IMAGE_ID=JCOS_ORDINARY_SERVICE_IMAGE_REPLACEMENT \
+	      -c $< -o $@
+
+$(USER_ORDINARY_SERVICE_REPLACEMENT): $(BUILD)/user_crt0_startup.o \
+                                      $(BUILD)/user_syscall.o \
+                                      $(BUILD)/user_ordinary_service_replacement.o \
+                                      user/ordinary_service.ld Makefile.msys2
+	mkdir -p $(dir $@)
+	$(LD) -m elf_x86_64 -nostdlib -static \
+	      -T user/ordinary_service.ld \
+	      -o $@ \
+	      $(BUILD)/user_crt0_startup.o \
+	      $(BUILD)/user_syscall.o \
+	      $(BUILD)/user_ordinary_service_replacement.o
+	$(CHECK_ELF_RELOCATIONS)
+
+$(BUILD)/user_boot_archive.o: user/lib/boot_archive.c \
+                                user/lib/boot_archive.h \
+                                user/lib/syscall.h \
+                                include/user_abi.h \
+                                include/boot_archive_portal_abi.h | $(BUILD)
+	$(CLANG) $(USER_CFLAGS) -c $< -o $@
+
+$(BUILD)/user_console_service.o: user/console_service.c \
+                                 user/lib/boot_archive.h \
+                                 user/lib/syscall.h \
+                                 include/user_abi.h \
+                                 include/program_startup.h \
+                                 include/service_protocol.h \
+                                 include/console_portal_abi.h \
+                                 include/console_client_protocol.h \
+                                 include/console_input_protocol.h \
+                                 include/console_service_protocol.h \
+                                 include/boot_archive_portal_abi.h \
+                                 include/program_broker_protocol.h \
+                                 include/service_broker_protocol.h | $(BUILD)
+	$(CLANG) $(USER_CFLAGS) -c $< -o $@
+
+$(USER_CONSOLE_SERVICE): $(BUILD)/user_crt0_startup.o \
+                         $(BUILD)/user_syscall.o \
+                         $(BUILD)/user_boot_archive.o \
+                         $(BUILD)/user_console_service.o \
+                         user/console_service.ld Makefile.msys2
+	mkdir -p $(dir $@)
+	$(LD) -m elf_x86_64 -nostdlib -static \
+	      -T user/console_service.ld \
+	      -o $@ \
+	      $(BUILD)/user_crt0_startup.o \
+	      $(BUILD)/user_syscall.o \
+	      $(BUILD)/user_boot_archive.o \
+	      $(BUILD)/user_console_service.o
+	$(CHECK_ELF_RELOCATIONS)
+
+$(BUILD)/user_console_client.o: user/lib/console.c \
+                                user/lib/console.h \
+                                user/lib/syscall.h \
+                                include/user_abi.h \
+                                include/console_client_protocol.h \
+                                include/console_input_protocol.h | $(BUILD)
+	$(CLANG) $(USER_CFLAGS) -c $< -o $@
+
+$(BUILD)/user_hello.o: user/hello.c \
+                        user/lib/console.h \
+                        user/lib/syscall.h \
+                        include/user_abi.h \
+                        include/program_startup.h \
+                        include/console_client_protocol.h \
+                        include/console_input_protocol.h \
+                        include/hello_app_abi.h | $(BUILD)
+	$(CLANG) $(USER_CFLAGS) -c $< -o $@
+
+$(USER_HELLO): $(BUILD)/user_crt0_startup.o \
+               $(BUILD)/user_syscall.o \
+               $(BUILD)/user_console_client.o \
+               $(BUILD)/user_hello.o \
+               user/hello.ld Makefile.msys2
+	mkdir -p $(dir $@)
+	$(LD) -m elf_x86_64 -nostdlib -static \
+	      -T user/hello.ld \
+	      -o $@ \
+	      $(BUILD)/user_crt0_startup.o \
+	      $(BUILD)/user_syscall.o \
+	      $(BUILD)/user_console_client.o \
+	      $(BUILD)/user_hello.o
+	$(CHECK_ELF_RELOCATIONS)
+
+$(BUILD)/user_input_echo.o: user/input_echo.c \
+                             user/lib/console.h \
+                             user/lib/syscall.h \
+                             include/user_abi.h \
+                             include/program_startup.h \
+                             include/console_client_protocol.h \
+                             include/console_input_protocol.h \
+                             include/input_echo_abi.h | $(BUILD)
+	$(CLANG) $(USER_CFLAGS) -c $< -o $@
+
+$(USER_INPUT_ECHO): $(BUILD)/user_crt0_startup.o \
+                     $(BUILD)/user_syscall.o \
+                     $(BUILD)/user_console_client.o \
+                     $(BUILD)/user_input_echo.o \
+                     user/input_echo.ld Makefile.msys2
+	mkdir -p $(dir $@)
+	$(LD) -m elf_x86_64 -nostdlib -static \
+	      -T user/input_echo.ld \
+	      -o $@ \
+	      $(BUILD)/user_crt0_startup.o \
+	      $(BUILD)/user_syscall.o \
+	      $(BUILD)/user_console_client.o \
+	      $(BUILD)/user_input_echo.o
 	$(CHECK_ELF_RELOCATIONS)
 
 $(BUILD)/user_launch_probe.o: user/launch_probe.c \

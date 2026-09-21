@@ -2,10 +2,15 @@
 
 #include "capability_test.h"
 #include "constructor_test.h"
+#include "console_service_test.h"
+#include "console_client_test.h"
+#include "console_input_test.h"
+#include "boot_archive_policy_test.h"
 #include "elf_malformed_test.h"
 #include "elf_reclaim_test.h"
 #include "execution_profile_test.h"
 #include "force_thread_test.h"
+#include "foreground_launch_policy_test.h"
 #include "ipc_timeout_order_test.h"
 #include "ipc_wait_order_test.h"
 #include "interrupt_state_test.h"
@@ -18,6 +23,7 @@
 #include "supervisor_recovery_test.h"
 #include "managed_service_test.h"
 #include "service_recovery_acceptance_test.h"
+#include "service_policy_test.h"
 #include "scheduler_idle_test.h"
 #include "scheduler_idle_exit_test.h"
 #include "process_terminate_test.h"
@@ -27,16 +33,18 @@
 #include "lifetime_stress_test.h"
 #include "permission_audit_test.h"
 #include "stack_reclaim_test.h"
+#include "system_console_test.h"
 #include "user_ipc_cancel_test.h"
 #include "user_process_cleanup_test.h"
 #include "user_protection_test.h"
 #include "user_stack_guard_test.h"
 #include "user_runtime_block_test.h"
 #include "user_runtime_test.h"
+#include "userspace_shell_test.h"
 #include "user_test_fixture.h"
 #include "vmm_reclaim_test.h"
 
-#define KERNEL_TEST_CAPACITY 40U
+#define KERNEL_TEST_CAPACITY 48U
 
 static KernelTest g_tests[KERNEL_TEST_CAPACITY];
 static u32 g_test_count;
@@ -101,6 +109,22 @@ static void kernel_test_registry_init(void) {
         KERNEL_TEST_ACCEPTANCE, managed_service_test_run, managed_service_test_cleanup_run);
     kernel_test_add_live("service-robustness", "repeated R6 service failure, reconnect and reclaim acceptance",
         KERNEL_TEST_ACCEPTANCE, service_recovery_acceptance_test_run, service_recovery_acceptance_test_cleanup_run);
+    kernel_test_add_live("console-service", "userspace console output through versioned protocol and endpoint portal",
+        KERNEL_TEST_ACCEPTANCE, console_service_test_run, console_service_test_cleanup_run);
+    kernel_test_add_live("console-persistent", "persistent R7 console crash/restart with stable privileged portal",
+        KERNEL_TEST_ACCEPTANCE, system_console_test_run, system_console_test_cleanup_run);
+    kernel_test_add_live("userspace-shell", "Ring3 normal shell parser and kernel input handoff boundary",
+        KERNEL_TEST_ACCEPTANCE, userspace_shell_test_run, userspace_shell_test_cleanup_run);
+    kernel_test_add_live("console-app", "standalone Ring3 application using versioned console output authority",
+        KERNEL_TEST_ACCEPTANCE, console_client_test_run, console_client_test_cleanup_run);
+    kernel_test_add_live("console-input", "foreground Ring3 application with explicit input focus authority",
+        KERNEL_TEST_ACCEPTANCE, console_input_test_run, console_input_test_cleanup_run);
+    kernel_test_add_live("files-userspace", "Ring3 tar namespace over raw capability-controlled boot archive",
+        KERNEL_TEST_ACCEPTANCE, boot_archive_policy_test_run, boot_archive_policy_test_cleanup_run);
+    kernel_test_add_live("launch-userspace", "Ring3 pathname policy with generic foreground extent launch",
+        KERNEL_TEST_ACCEPTANCE, foreground_launch_policy_test_run, foreground_launch_policy_test_cleanup_run);
+    kernel_test_add_live("service-policy", "Ring3 service naming/executable replacement over generic extent broker",
+        KERNEL_TEST_ACCEPTANCE, service_policy_test_run, service_policy_test_cleanup_run);
     kernel_test_add("user-ipc-cancel", "Ring3 IPC cancellation and close", KERNEL_TEST_USERSPACE, user_ipc_cancel_test_run, user_fixture_cleanup_retry_run);
     kernel_test_add("user-process-cleanup", "shared user-process cleanup", KERNEL_TEST_USERSPACE, user_process_cleanup_test_run, user_fixture_cleanup_retry_run);
     kernel_test_add("user-protection", "hardware NX and W^X enforcement", KERNEL_TEST_USERSPACE, user_protection_test_run, user_fixture_cleanup_retry_run);
