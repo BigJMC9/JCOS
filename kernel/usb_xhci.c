@@ -443,8 +443,8 @@ static bool wait_completion(u32 type, u32 *slot_out) {
     return false;
 }
 
-static bool command(u32 type, u64 parameter, u32 *slot) {
-    ring_command(parameter, TRB_TYPE(type));
+static bool command(u32 type, u64 parameter, u32 slot_id, u32 *slot) {
+    ring_command(parameter, TRB_TYPE(type) | TRB_SLOT_ID(slot_id));
     return wait_completion(TRB_COMMAND_COMPLETION, slot);
 }
 
@@ -509,7 +509,8 @@ static bool configure_keyboard(u8 endpoint_address, u8 interval, u16 max_packet,
     ep[2] = (u32)g_xhci.endpoint_ring_phys | 1U;
     ep[3] = (u32)(g_xhci.endpoint_ring_phys >> 32);
     ep[4] = (u32)max_packet | ((u32)max_packet * transactions << 16);
-    return command(TRB_CONFIGURE_ENDPOINT, g_xhci.input_context_phys, 0);
+    return command(TRB_CONFIGURE_ENDPOINT, g_xhci.input_context_phys,
+        g_xhci.slot, 0);
 }
 
 static void submit_keyboard_report(void) {
@@ -551,7 +552,8 @@ static bool update_ep0_context(void) {
     ep0[2] = (u32)g_xhci.ep0_ring_phys | 1U;
     ep0[3] = (u32)(g_xhci.ep0_ring_phys >> 32);
     ep0[4] = 8U;
-    return command(TRB_EVALUATE_CONTEXT, g_xhci.input_context_phys, 0);
+    return command(TRB_EVALUATE_CONTEXT, g_xhci.input_context_phys,
+        g_xhci.slot, 0);
 }
 
 static bool find_keyboard_endpoint(const u8 *descriptor, u16 length, u8 *interface_number,
@@ -691,13 +693,14 @@ bool xhci_init(VmPageMap *kernel_map) {
         }
         g_xhci.port = port;
         u32 slot = 0;
-        if (!command(TRB_ENABLE_SLOT, 0, &slot) || !slot) {
+        if (!command(TRB_ENABLE_SLOT, 0, 0, &slot) || !slot) {
             xhci_report_failure("enable slot");
             continue;
         }
         g_xhci.slot = slot; g_xhci.packet_size = 8U;
         prepare_address_context((u8)((*portsc >> 10) & 0x0FU));
-        if (!command(TRB_ADDRESS_DEVICE, g_xhci.input_context_phys, 0)) {
+        if (!command(TRB_ADDRESS_DEVICE, g_xhci.input_context_phys,
+                g_xhci.slot, 0)) {
             xhci_report_failure("address device");
             continue;
         }
