@@ -888,11 +888,16 @@ void kernel_main(BootInfo *boot) {
     system_console_write("ROOTFS: ");
     system_console_writeln(rootfs_ok ? "READY" : "FAILED");
     system_console_write("GPT: ");
-    system_console_writeln(gpt_ok ? "READY" : "FAILED");
+    if (gpt_ok && gpt_disk) {
+        system_console_write("READY ON ");
+        system_console_writeln(gpt_disk->name);
+    } else {
+        system_console_writeln("NOT FOUND ON REGISTERED BLOCK DEVICES");
+    }
     system_console_write("  PARTITIONS: ");
-    system_console_writeln(partitions_ok ? "READY" : "FAILED");
-    system_console_write("FAT32: ");
-    system_console_writeln(fat32_ok ? "READY" : "FAILED");
+    system_console_writeln(partitions_ok ? "READY" : "NOT AVAILABLE");
+    system_console_write("FAT32 ESP: ");
+    system_console_writeln(fat32_ok ? "READY" : "NOT FOUND");
     system_console_writeln("DEFAULT SHELL: RING3 USERSPACE.");
     system_console_writeln("TYPE help AT THE USER SHELL PROMPT; TYPE monitor OR PRESS ESC FOR THE KERNEL MONITOR.");
     system_console_putchar('\n');
