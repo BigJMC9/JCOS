@@ -631,9 +631,19 @@ static void queue_event(KeyCode key, char character, u8 modifiers) {
 
 static KeyCode usage_key(u8 usage, char *character) {
     *character = 0;
-    if (usage >= 4U && usage <= 29U) { *character = (char)('a' + usage - 4U); return KEY_CHARACTER; }
-    if (usage >= 30U && usage <= 38U) { *character = (char)('1' + usage - 30U); return KEY_CHARACTER; }
-    if (usage == 39U) { *character = '0'; return KEY_CHARACTER; }
+    if (usage >= 4U && usage <= 29U) {
+        *character = (char)('a' + usage - 4U);
+        return KEY_CHARACTER;
+    }
+    if (usage >= 30U && usage <= 38U) {
+        *character = (char)('1' + usage - 30U);
+        return KEY_CHARACTER;
+    }
+    if (usage == 39U) {
+        *character = '0';
+        return KEY_CHARACTER;
+    }
+
     switch (usage) {
         case 40U: return KEY_ENTER;
         case 41U: return KEY_ESCAPE;
@@ -644,6 +654,10 @@ static KeyCode usage_key(u8 usage, char *character) {
         case 46U: *character = '='; return KEY_CHARACTER;
         case 47U: *character = '['; return KEY_CHARACTER;
         case 48U: *character = ']'; return KEY_CHARACTER;
+        case 49U: *character = '\\'; return KEY_CHARACTER;
+        case 51U: *character = ';'; return KEY_CHARACTER;
+        case 52U: *character = '\''; return KEY_CHARACTER;
+        case 53U: *character = '`'; return KEY_CHARACTER;
         case 54U: *character = ','; return KEY_CHARACTER;
         case 55U: *character = '.'; return KEY_CHARACTER;
         case 56U: *character = '/'; return KEY_CHARACTER;
@@ -660,24 +674,70 @@ static KeyCode usage_key(u8 usage, char *character) {
     }
 }
 
+static char shifted_character(char value) {
+    switch (value) {
+        case '1': return '!';
+        case '2': return '@';
+        case '3': return '#';
+        case '4': return '$';
+        case '5': return '%';
+        case '6': return '^';
+        case '7': return '&';
+        case '8': return '*';
+        case '9': return '(';
+        case '0': return ')';
+        case '-': return '_';
+        case '=': return '+';
+        case '[': return '{';
+        case ']': return '}';
+        case '\\': return '|';
+        case ';': return ':';
+        case '\'': return '"';
+        case '`': return '~';
+        case ',': return '<';
+        case '.': return '>';
+        case '/': return '?';
+        default: return value;
+    }
+}
+
 static void decode_report(void) {
     u8 modifiers = g_xhci.report[0];
+    bool shift = (modifiers & 0x22U) != 0;
+
     for (u32 i = 2; i < 8U; ++i) {
         u8 usage = g_xhci.report[i];
         if (!usage) continue;
+
         bool was_down = false;
-        for (u32 j = 0; j < 6U; ++j) if (g_xhci.previous[j] == usage) was_down = true;
+        for (u32 j = 0; j < 6U; ++j) {
+            if (g_xhci.previous[j] == usage) was_down = true;
+        }
         if (was_down) continue;
+
+        if (usage == 57U) {
+            g_xhci.caps_lock = !g_xhci.caps_lock;
+            continue;
+        }
+
         char character = 0;
         KeyCode key = usage_key(usage, &character);
+
         if (key != KEY_NONE) {
-            if ((modifiers & 0x22U) && character >= 'a' && character <= 'z') character = (char)(character - 'a' + 'A');
+            if (character >= 'a' && character <= 'z') {
+                if (shift != g_xhci.caps_lock) {
+                    character = (char)(character - 'a' + 'A');
+                }
+            } else if (shift) {
+                character = shifted_character(character);
+            }
+
             queue_event(key, character, modifiers);
         }
     }
+
     k_memcpy(g_xhci.previous, &g_xhci.report[2], 6U);
 }
-
 bool xhci_init(VmPageMap *kernel_map) {
     clear_state();
     if (!kernel_map) return xhci_fail("no kernel map");
