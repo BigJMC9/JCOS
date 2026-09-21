@@ -13,6 +13,8 @@
 #define XHCI_MAX_TRBS 256U
 #define XHCI_QUEUE_SIZE 32U
 #define XHCI_WAIT_LIMIT 200000U
+#define XHCI_MFINDEX_WAIT_SPINS 50000000U
+#define XHCI_POWER_SETTLE_SPINS 2000000U
 #define XHCI_MMIO_SIZE 0x10000ULL
 #define XHCI_MAX_PORTS 255U
 #define XHCI_FAILURE_CAPACITY 64U
@@ -352,24 +354,8 @@ static u32 mf_elapsed(u32 start) {
     return (mfindex() - start) & 0x3FFFU;
 }
 
-static void wait_microframes(u32 count) {
-    u32 start = mfindex();
-    while (mf_elapsed(start) < count) arch_pause();
-}
-
-static bool wait_for_any_connection(u32 ports) {
-    u32 start = mfindex();
-
-    do {
-        for (u32 port = 0; port < ports; ++port) {
-            volatile u32 *portsc =
-                reg32((u64)g_xhci.op, 0x400U + port * 0x10U);
-            if (*portsc & XHCI_PORTSC_CCS) return true;
-        }
-        arch_pause();
-    } while (mf_elapsed(start) < 2000U);
-
-    return false;
+static void bounded_spin_delay(u32 spins) {
+    for (u32 i = 0; i < spins; ++i) arch_pause();
 }
 
 static bool reset_port(volatile u32 *portsc, bool superspeed) {
@@ -386,7 +372,7 @@ static bool reset_port(volatile u32 *portsc, bool superspeed) {
     portsc_set_bits(portsc, reset_bit);
 
     u32 start = mfindex();
-    do {
+    for (u32 spins = 0; spins < XHCI_MFINDEX_WAIT_SPINS; ++spins) {
         u32 status = *portsc;
 
         if ((status & completion_bits) && !(status & reset_bit)) {
@@ -394,8 +380,9 @@ static bool reset_port(volatile u32 *portsc, bool superspeed) {
             return (status & XHCI_PORTSC_PED) != 0;
         }
 
+        if (mf_elapsed(start) >= 1600U) break;
         arch_pause();
-    } while (mf_elapsed(start) < 1600U);
+    }
 
     return false;
 }
@@ -858,10 +845,13 @@ bool xhci_init(VmPageMap *kernel_map) {
         }
     }
 
-    /* Give newly powered root ports 20 ms before connection/reset probing. */
-    if (port_power_changed) wait_microframes(160U);
+    /*
+     * MFINDEX is permitted to stop while every port is disconnected, so do
+     * not use it as the sole timer for initial port-power settling.
+     */
+    if (port_power_changed) bounded_spin_delay(XHCI_POWER_SETTLE_SPINS);
 
-    bool connected_port = wait_for_any_connection(ports);
+    bool connected_port = false;
 
     for (u32 port = 0; port < ports; ++port) {
         volatile u32 *portsc =
