@@ -96,6 +96,7 @@ typedef struct {
     u32 max_ports;
     u32 scratchpad_count;
     bool addr64;
+    bool caps_lock;
     u8 port_protocol[XHCI_MAX_PORTS];
     u32 port;
     u32 slot;
@@ -350,6 +351,11 @@ static u32 mfindex(void) {
 
 static u32 mf_elapsed(u32 start) {
     return (mfindex() - start) & 0x3FFFU;
+}
+
+static void wait_microframes(u32 count) {
+    u32 start = mfindex();
+    while (mf_elapsed(start) < count) arch_pause();
 }
 
 static bool wait_for_any_connection(u32 ports) {
@@ -683,7 +689,12 @@ bool xhci_init(VmPageMap *kernel_map) {
     if (!device) return xhci_fail("no controller");
     PciBar bar;
     if (!pci_read_bar(device, 0, &bar) || (bar.type != PCI_BAR_MMIO32 && bar.type != PCI_BAR_MMIO64) || !bar.base) return xhci_fail("invalid BAR0");
-    u64 base = bar.base & ~(VM_PAGE_SIZE - 1ULL);
+    /*
+     * BARs are not required to be page-aligned. vmm_identity_map_range()
+     * aligns the mapping internally, while register offsets remain relative
+     * to the exact BAR base reported by PCI.
+     */
+    u64 base = bar.base;
     if (!vmm_identity_map_range(kernel_map, base, XHCI_MMIO_SIZE,
             VM_WRITE | VM_UNCACHED)) return xhci_fail("MMIO map");
     pci_enable_memory_space(device); pci_enable_bus_master(device);
@@ -772,15 +783,20 @@ bool xhci_init(VmPageMap *kernel_map) {
     g_xhci.initialized = true;
     u32 ports = g_xhci.max_ports;
 
+    bool port_power_changed = false;
     if (hcc & XHCI_HCC_PPC) {
         for (u32 port = 0; port < ports; ++port) {
             volatile u32 *portsc =
                 reg32((u64)g_xhci.op, 0x400U + port * 0x10U);
             if (!(*portsc & XHCI_PORTSC_PP)) {
                 portsc_set_bits(portsc, XHCI_PORTSC_PP);
+                port_power_changed = true;
             }
         }
     }
+
+    /* Give newly powered root ports 20 ms before connection/reset probing. */
+    if (port_power_changed) wait_microframes(160U);
 
     bool connected_port = wait_for_any_connection(ports);
 
