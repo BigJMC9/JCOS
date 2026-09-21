@@ -755,9 +755,16 @@ bool xhci_init(VmPageMap *kernel_map) {
     *(volatile u32 *)(interrupter0() + 0x1CU) =
         (u32)(event_ring_phys >> 32);
     __asm__ volatile ("mfence" ::: "memory");
-    g_xhci.command_cycle = 1U; g_xhci.event_cycle = 1U; g_xhci.transfer_cycle = 1U; g_xhci.initialized = true;
+    g_xhci.command_cycle = 1U;
+    g_xhci.event_cycle = 1U;
+    g_xhci.transfer_cycle = 1U;
+
     *usbcmd |= XHCI_USBCMD_RUN;
-    if (!wait_condition(controller_not_ready) || controller_halted()) return xhci_fail("controller start");
+    if (!wait_condition(controller_not_ready) || controller_halted()) {
+        return xhci_fail("controller start");
+    }
+
+    g_xhci.initialized = true;
     u32 ports = g_xhci.max_ports;
 
     if (hcc & XHCI_HCC_PPC) {
@@ -906,6 +913,12 @@ void xhci_poll(void) {
            submit_keyboard_report();
     }
 }
+
+bool xhci_controller_ready(void) { return g_xhci.initialized; }
+
+u32 xhci_root_port_count(void) { return g_xhci.max_ports; }
+
+u32 xhci_scratchpad_count(void) { return g_xhci.scratchpad_count; }
 
 bool xhci_present(void) { return g_xhci.keyboard_ready; }
 
