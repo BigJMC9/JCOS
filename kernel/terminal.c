@@ -515,6 +515,13 @@ bool terminal_scrollback_active(void) {
     return g_ready && (!g_follow_output || g_view_top != live_view_top());
 }
 
+void terminal_redraw(void) {
+    bool cursor_was_visible = g_cursor_visible;
+    g_cursor_visible = false;
+    render_viewport();
+    if (cursor_was_visible) show_cursor_overlay();
+}
+
 bool terminal_scrollback_can_page_up(void) {
     return g_ready && g_view_top > g_first_line;
 }

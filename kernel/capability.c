@@ -3,6 +3,7 @@
 #include "address_space.h"
 #include "endpoint.h"
 #include "thread.h"
+#include "device_resource.h"
 #include "interrupts.h"
 #include "lib.h"
 #include "object_storage.h"
@@ -40,7 +41,8 @@ u32 capability_table_object_count(void) {
 }
 
 static bool type_valid(CapabilityType type) {
-    return type == CAPABILITY_TYPE_THREAD || type == CAPABILITY_TYPE_ADDRESS_SPACE || type == CAPABILITY_TYPE_ENDPOINT;
+    return type == CAPABILITY_TYPE_THREAD || type == CAPABILITY_TYPE_ADDRESS_SPACE ||
+        type == CAPABILITY_TYPE_ENDPOINT || type == CAPABILITY_TYPE_DEVICE_RESOURCE;
 }
 
 /* Registry membership is checked BEFORE dereferencing a supplied object address.
@@ -68,6 +70,12 @@ static u64 *object_refs(void *object, CapabilityType type, u64 *identity, bool i
         if (inserting && endpoint->closed) return 0;
         *identity = endpoint->id;
         return &endpoint->capability_refs;
+    }
+    if (type == CAPABILITY_TYPE_DEVICE_RESOURCE) {
+        DeviceResource *resource = object;
+        if (!device_resource_valid(resource)) return 0;
+        *identity = resource->id;
+        return &resource->capability_refs;
     }
     return 0;
 }

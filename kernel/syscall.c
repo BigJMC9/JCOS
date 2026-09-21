@@ -4,6 +4,10 @@
 #include "lib.h"
 #include "scheduler.h"
 #include "task.h"
+#include "audio.h"
+#include "display.h"
+#include "framebuffer.h"
+#include "timer.h"
 
 _Static_assert(IPC_MESSAGE_MAX_WORDS == JCOS_IPC_MESSAGE_MAX_WORDS, "Kernel/userspace IPC ABI mismatch");
 
@@ -193,6 +197,61 @@ InterruptFrame *syscall_dispatch(InterruptFrame *frame) {
              * records/closes the domain only on its last live thread. It then
              * hands off without freeing this active stack or return frame. */
             return task_exit_current_from_interrupt(frame);
+        }
+
+        case JCOS_SYSCALL_CLOCK_TICKS:
+            frame->rax = timer_ticks();
+            return frame;
+
+        case JCOS_SYSCALL_CLOCK_FREQUENCY:
+            frame->rax = timer_frequency();
+            return frame;
+
+        case JCOS_SYSCALL_DISPLAY_INFO: {
+            Process *process = syscall_current_process();
+            void *resource = 0;
+            CapabilityTable *caps = process ? process_capabilities(process) : 0;
+            if (!caps || !capability_lookup_rights(caps, frame->rbx,
+                    CAPABILITY_TYPE_DEVICE_RESOURCE, CAPABILITY_RIGHT_READ, &resource) ||
+                resource != display_resource()) {
+                frame->rax = SYSCALL_RESULT_FAILED;
+                return frame;
+            }
+            frame->rax = SYSCALL_RESULT_OK;
+            frame->rcx = framebuffer_width();
+            frame->rdx = framebuffer_height();
+            return frame;
+        }
+
+        case JCOS_SYSCALL_DISPLAY_PRESENT: {
+            Process *process = syscall_current_process();
+            frame->rax = display_present_user(process, frame->rbx, frame->rcx,
+                (u32)frame->rdx, (u32)frame->rsi) ?
+                SYSCALL_RESULT_OK : SYSCALL_RESULT_FAILED;
+            return frame;
+        }
+
+        case JCOS_SYSCALL_AUDIO_INFO: {
+            Process *process = syscall_current_process();
+            void *resource = 0;
+            CapabilityTable *caps = process ? process_capabilities(process) : 0;
+            if (!caps || !capability_lookup_rights(caps, frame->rbx,
+                    CAPABILITY_TYPE_DEVICE_RESOURCE, CAPABILITY_RIGHT_READ, &resource) ||
+                resource != audio_resource()) {
+                frame->rax = SYSCALL_RESULT_FAILED;
+                return frame;
+            }
+            frame->rax = SYSCALL_RESULT_OK;
+            frame->rcx = audio_sample_rate();
+            frame->rdx = audio_submit_max();
+            return frame;
+        }
+
+        case JCOS_SYSCALL_AUDIO_WRITE: {
+            Process *process = syscall_current_process();
+            frame->rax = audio_write_user(process, frame->rbx, frame->rcx,
+                (u32)frame->rdx) ? SYSCALL_RESULT_OK : SYSCALL_RESULT_FAILED;
+            return frame;
         }
 
         default:

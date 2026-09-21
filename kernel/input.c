@@ -3,6 +3,7 @@
 #include "interrupts.h"
 #include "ps2.h"
 #include "serial.h"
+#include "usb_xhci.h"
 
 typedef enum {
     SERIAL_PARSE_IDLE = 0,
@@ -123,6 +124,9 @@ bool input_poll(KeyEvent *event) {
     input_irq_restore(flags);
 
     if (have_ps2) return true;
+
+    xhci_poll();
+    if (xhci_get_event(event)) return true;
 
     for (u32 i = 0; i < 8U; ++i) {
         int value = serial_read_nonblocking();

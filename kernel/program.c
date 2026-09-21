@@ -32,6 +32,11 @@ static bool program_spec_valid(const ProgramLaunchSpec *spec) {
         spec->startup_grant_count > JCOS_PROGRAM_STARTUP_MAX_CAPABILITIES ||
         spec->startup_argument_count > JCOS_PROGRAM_STARTUP_MAX_ARGUMENTS ||
         (spec->exit_queue && !process_exit_queue_storage_in_use(spec->exit_queue))) return false;
+    if ((spec->readonly_data || spec->readonly_size || spec->readonly_virtual_base) &&
+        (!spec->readonly_data || !spec->readonly_size ||
+         (spec->readonly_virtual_base & (VM_PAGE_SIZE - 1ULL)) ||
+         spec->readonly_virtual_base < ADDRESS_SPACE_USER_BASE ||
+         spec->readonly_virtual_base >= ADDRESS_SPACE_USER_LIMIT)) return false;
 
     for (u32 i = 0; i < spec->startup_grant_count; ++i) {
         const ProgramGrantSpec *grant = &spec->startup_grants[i];
@@ -52,7 +57,8 @@ bool program_instance_needs_cleanup(const ProgramInstance *instance) {
     if (instance->process_created || instance->stack_frame_allocated || instance->stack_mapped ||
         instance->thread_created || instance->published || instance->unpublished_space ||
         instance->unpublished_stack || instance->unlinked_table || user_elf_needs_cleanup(&instance->image) ||
-        instance->process.id || instance->process.initialized || instance->thread.id) return true;
+        instance->readonly_page_count || instance->process.id ||
+        instance->process.initialized || instance->thread.id) return true;
     for (u32 i = 0; i < JCOS_PROGRAM_STARTUP_MAX_CAPABILITIES; ++i) {
         if (instance->startup_handles[i] != CAPABILITY_INVALID_HANDLE) return true;
     }
@@ -110,6 +116,17 @@ static bool program_release(ProgramInstance *instance, bool force) {
     }
 
     AddressSpace *space = process_address_space(&instance->process);
+    while (instance->readonly_page_count) {
+        u32 index = instance->readonly_page_count - 1U;
+        u64 virtual_address = instance->readonly_virtual_base + (u64)index * VM_PAGE_SIZE;
+        frame_t expected = instance->readonly_first_frame + index;
+        frame_t mapped = FRAME_INVALID;
+        frame_t old = FRAME_INVALID;
+        if (!space || !address_space_query_page(space, virtual_address, &mapped, 0) ||
+            mapped != expected || !address_space_unmap_page(space, virtual_address, &old) ||
+            old != expected) return false;
+        instance->readonly_page_count = index;
+    }
     if (instance->stack_mapped) {
         frame_t mapped = FRAME_INVALID;
         frame_t old = FRAME_INVALID;
@@ -172,6 +189,31 @@ static bool program_launch_locked(ProgramInstance *instance, const ProgramLaunch
     AddressSpace *space = process_address_space(&instance->process);
     CapabilityTable *caps = process_capabilities(&instance->process);
     if (!space || !caps) goto fail;
+
+    if (spec->readonly_size) {
+        u64 physical = 0;
+        if (!virt_to_phys(spec->readonly_data, &physical))
+            physical = (u64)spec->readonly_data;
+        u64 page_offset = physical & (VM_PAGE_SIZE - 1ULL);
+        u64 first_physical = physical - page_offset;
+        if (spec->readonly_size > ~0ULL - page_offset) goto fail;
+        u64 span = spec->readonly_size + page_offset;
+        if (span > ~0ULL - (VM_PAGE_SIZE - 1ULL)) goto fail;
+        u64 page_count = (span + VM_PAGE_SIZE - 1ULL) / VM_PAGE_SIZE;
+        if (!page_count || page_count > 0xFFFFFFFFULL ||
+            page_count > (ADDRESS_SPACE_USER_LIMIT - spec->readonly_virtual_base) / VM_PAGE_SIZE)
+            goto fail;
+        frame_t first_frame = phys_to_frame(first_physical);
+        if (first_frame == FRAME_INVALID) goto fail;
+        instance->readonly_virtual_base = spec->readonly_virtual_base;
+        instance->readonly_first_frame = first_frame;
+        for (u32 i = 0; i < (u32)page_count; ++i) {
+            if (!address_space_map_page(space,
+                    spec->readonly_virtual_base + (u64)i * VM_PAGE_SIZE,
+                    first_frame + i, 0)) goto fail;
+            ++instance->readonly_page_count;
+        }
+    }
 
     instance->stack_frame = frame_alloc();
     if (instance->stack_frame == FRAME_INVALID) goto fail;

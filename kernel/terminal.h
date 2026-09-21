@@ -5,6 +5,7 @@
 
 bool terminal_init(void);
 void terminal_clear(void);
+void terminal_redraw(void);
 
 void terminal_set_color(u32 color);
 u32 terminal_default_color(void);

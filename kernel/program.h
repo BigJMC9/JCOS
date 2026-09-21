@@ -27,6 +27,9 @@ typedef struct {
     u32 startup_grant_count;
     u64 startup_arguments[JCOS_PROGRAM_STARTUP_MAX_ARGUMENTS];
     u32 startup_argument_count;
+    const void *readonly_data;
+    u64 readonly_size;
+    u64 readonly_virtual_base;
 } ProgramLaunchSpec;
 
 typedef struct {
@@ -43,6 +46,9 @@ typedef struct {
     bool unpublished_space;
     bool unpublished_stack;
     bool unlinked_table;
+    u64 readonly_virtual_base;
+    frame_t readonly_first_frame;
+    u32 readonly_page_count;
 } ProgramInstance;
 
 /*

@@ -673,6 +673,27 @@ static int launch_request_send(JcosCapabilityHandle launch_cap, JcosU64 incarnat
     return jcos_ipc_send_blocking(launch_cap, &request);
 }
 
+static int media_launch_request_send(JcosCapabilityHandle launch_cap, JcosU64 incarnation,
+    const JcosBootArchiveEntry *executable, const JcosBootArchiveEntry *media) {
+    if (!launch_cap || !incarnation || !executable || !media ||
+        executable->type != JCOS_BOOT_ARCHIVE_ENTRY_FILE ||
+        media->type != JCOS_BOOT_ARCHIVE_ENTRY_FILE ||
+        !executable->size || !media->size ||
+        executable->data_offset > 0xFFFFFFFFULL || executable->size > 0xFFFFFFFFULL ||
+        media->data_offset > 0xFFFFFFFFULL || media->size > 0xFFFFFFFFULL) return 0;
+    JcosIpcMessage request;
+    clear_message(&request);
+    request.word_count = 4U;
+    request.words[0] = JCOS_PROGRAM_BROKER_HEADER(
+        JCOS_PROGRAM_BROKER_OP_FOREGROUND_MEDIA, JCOS_PROGRAM_BROKER_PROTOCOL_VERSION);
+    request.words[1] = incarnation;
+    request.words[2] = JCOS_PROGRAM_BROKER_PACK_EXTENT(
+        executable->data_offset, executable->size);
+    request.words[3] = JCOS_PROGRAM_BROKER_PACK_EXTENT(
+        media->data_offset, media->size);
+    return jcos_ipc_send_blocking(launch_cap, &request);
+}
+
 static int service_request_send(JcosCapabilityHandle service_cap, JcosU64 incarnation,
     JcosU64 op, const JcosBootArchiveEntry *entry) {
     if (!service_cap || !incarnation) return 0;
@@ -849,6 +870,7 @@ static int shell_execute(ShellState *shell, JcosCapabilityHandle portal_cap,
                 "cat PATH           print a bounded regular file\n"
                 "fscheck            validate Ring3 tar parsing/read policy\n"
                 "run PATH           launch a foreground ELF selected in Ring3\n"
+                "play TITLE         play badapple or caramel (Escape stops)\n"
                 "service CMD worker manage an ordinary background service\n"
                 "  CMD: start stop restart replace status fault\n"
                 "monitor            return input to the kernel emergency monitor\n"
@@ -896,6 +918,32 @@ static int shell_execute(ShellState *shell, JcosCapabilityHandle portal_cap,
         } else {
             if (!portal_write(portal_cap, "RUNNING ") || !portal_write(portal_cap, entry.path) ||
                 !portal_write_byte(portal_cap, '\n')) return 0;
+            shell->active = SHELL_STATE_SUSPENDED;
+            shell_reset_line(shell);
+            *out_action = JCOS_CONSOLE_SHELL_ACTION_RUN_FOREGROUND;
+            *out_result = JCOS_CONSOLE_SHELL_RESULT_OK;
+            return 1;
+        }
+    } else if (command_prefix(normalized, "play", &rest)) {
+        const char *media_path = 0;
+        if (text_equal(rest, "badapple")) media_path = "media/badapple.jmv";
+        else if (text_equal(rest, "caramel") || text_equal(rest, "caramelldansen"))
+            media_path = "media/caramel.jmv";
+        JcosBootArchiveEntry executable;
+        JcosBootArchiveEntry media;
+        if (!archive_available(archive) || !media_path) {
+            if (!portal_write(portal_cap, "usage: play badapple|caramel\n")) return 0;
+            *out_result = JCOS_CONSOLE_SHELL_RESULT_UNKNOWN;
+        } else if (!jcos_boot_archive_find(archive, "bin/mediaplayer.elf", &executable) ||
+            !jcos_boot_archive_find(archive, media_path, &media)) {
+            if (!portal_write(portal_cap, "play: player or media not found\n")) return 0;
+            *out_result = JCOS_CONSOLE_SHELL_RESULT_UNKNOWN;
+        } else if (!media_launch_request_send(launch_cap, incarnation, &executable, &media)) {
+            if (!portal_write(portal_cap, "play: launch request unavailable\n")) return 0;
+            *out_result = JCOS_CONSOLE_SHELL_RESULT_UNKNOWN;
+        } else {
+            if (!portal_write(portal_cap, "PLAYING ") || !portal_write(portal_cap, rest) ||
+                !portal_write(portal_cap, " - ESCAPE TO STOP\n")) return 0;
             shell->active = SHELL_STATE_SUSPENDED;
             shell_reset_line(shell);
             *out_action = JCOS_CONSOLE_SHELL_ACTION_RUN_FOREGROUND;

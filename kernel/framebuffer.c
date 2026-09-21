@@ -45,10 +45,18 @@ void framebuffer_pixel(u32 x, u32 y, u32 color) {
 
 void framebuffer_fill(u32 color) {
     if (!g_boot) return;
-    volatile u32 *fb = (volatile u32 *)(u64)g_boot->framebuffer_base;
-    for (u32 y = 0; y < g_boot->framebuffer_height; ++y)
-        for (u32 x = 0; x < g_boot->framebuffer_width; ++x)
-            fb[(u64)y * g_boot->framebuffer_pixels_per_scanline + x] = color;
+    u32 *fb = (u32 *)(u64)g_boot->framebuffer_base;
+    u32 pitch = g_boot->framebuffer_pixels_per_scanline;
+    for (u32 y = 0; y < g_boot->framebuffer_height; ++y) {
+        u32 *row = fb + (u64)y * pitch;
+        u32 x = 0;
+        if (((u64)row & 7ULL) == 0) {
+            u64 *wide = (u64 *)(void *)row;
+            u64 pair = (u64)color | ((u64)color << 32);
+            for (; x + 1U < g_boot->framebuffer_width; x += 2U) wide[x >> 1] = pair;
+        }
+        for (; x < g_boot->framebuffer_width; ++x) row[x] = color;
+    }
 }
 
 void framebuffer_fill_rect(u32 x, u32 y, u32 width, u32 height, u32 color) {
@@ -57,10 +65,18 @@ void framebuffer_fill_rect(u32 x, u32 y, u32 width, u32 height, u32 color) {
     u32 y_end = y + height;
     if (x_end < x || x_end > g_boot->framebuffer_width) x_end = g_boot->framebuffer_width;
     if (y_end < y || y_end > g_boot->framebuffer_height) y_end = g_boot->framebuffer_height;
-    volatile u32 *fb = (volatile u32 *)(u64)g_boot->framebuffer_base;
-    for (u32 row = y; row < y_end; ++row)
-        for (u32 col = x; col < x_end; ++col)
-            fb[(u64)row * g_boot->framebuffer_pixels_per_scanline + col] = color;
+    u32 *fb = (u32 *)(u64)g_boot->framebuffer_base;
+    u32 pitch = g_boot->framebuffer_pixels_per_scanline;
+    for (u32 row = y; row < y_end; ++row) {
+        u32 *line = fb + (u64)row * pitch + x;
+        u32 col = x;
+        if (((u64)line & 7ULL) == 0) {
+            u64 *wide = (u64 *)(void *)line;
+            u64 pair = (u64)color | ((u64)color << 32);
+            for (; col + 1U < x_end; col += 2U) wide[(col - x) >> 1] = pair;
+        }
+        for (; col < x_end; ++col) line[col - x] = color;
+    }
 }
 
 void framebuffer_scroll_up(u32 rows, u32 fill_color) {
@@ -79,6 +95,23 @@ void framebuffer_scroll_up(u32 rows, u32 fill_color) {
     for (u32 y = height - rows; y < height; ++y)
         for (u32 x = 0; x < width; ++x)
             fb[(u64)y * pitch + x] = fill_color;
+}
+
+void framebuffer_blit_rgb332_row(u32 x, u32 y, u32 width,
+    const u8 *source, u32 source_width) {
+    if (!g_boot || !source || !source_width || !width ||
+        x >= g_boot->framebuffer_width || y >= g_boot->framebuffer_height) return;
+    if (width > g_boot->framebuffer_width - x) width = g_boot->framebuffer_width - x;
+    volatile u32 *fb = (volatile u32 *)(u64)g_boot->framebuffer_base;
+    volatile u32 *row = fb + (u64)y * g_boot->framebuffer_pixels_per_scanline + x;
+    for (u32 column = 0; column < width; ++column) {
+        u32 source_x = (u32)(((u64)column * source_width) / width);
+        u8 pixel = source[source_x];
+        u8 r = (u8)(((pixel >> 5) & 7U) * 255U / 7U);
+        u8 g = (u8)(((pixel >> 2) & 7U) * 255U / 7U);
+        u8 b = (u8)((pixel & 3U) * 255U / 3U);
+        row[column] = framebuffer_rgb(r, g, b);
+    }
 }
 
 u32 framebuffer_width(void) { return g_boot ? g_boot->framebuffer_width : 0; }

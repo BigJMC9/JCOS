@@ -25,13 +25,7 @@ bool serial_available(void) {
 
 static void put_raw(char c) {
     if (!g_ready) return;
-    for (u32 i = 0; i < 1000000; ++i) {
-        if (arch_in8(COM1 + 5) & 0x20) {
-            arch_out8(COM1, (u8)c);
-            return;
-        }
-        arch_pause();
-    }
+    if (arch_in8(COM1 + 5) & 0x20) arch_out8(COM1, (u8)c);
 }
 
 void serial_putc(char c) {
@@ -42,6 +36,29 @@ void serial_putc(char c) {
 void serial_write(const char *s) {
     if (!s) return;
     while (*s) serial_putc(*s++);
+}
+
+void serial_write_u64(u64 value) {
+    char digits[21];
+    u32 length = 0;
+    if (!value) {
+        serial_putc('0');
+        return;
+    }
+    while (value) {
+        digits[length++] = (char)('0' + value % 10U);
+        value /= 10U;
+    }
+    while (length) serial_putc(digits[--length]);
+}
+
+void serial_write_hex(u64 value) {
+    static const char digits[] = "0123456789ABCDEF";
+    serial_write("0x");
+    for (u32 shift = 60U;; shift -= 4U) {
+        serial_putc(digits[(value >> shift) & 0x0FU]);
+        if (!shift) break;
+    }
 }
 
 void serial_clear(void) {

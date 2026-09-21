@@ -18,6 +18,7 @@ typedef u64 vm_flags_t;
 #define VM_WRITE (1ULL << 0)
 #define VM_USER  (1ULL << 1)
 #define VM_EXEC  (1ULL << 2)
+#define VM_UNCACHED (1ULL << 3)
 
 typedef struct {
     frame_t root_frame;

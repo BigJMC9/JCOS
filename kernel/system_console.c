@@ -856,9 +856,31 @@ bool system_console_launch_request_take(SystemConsoleLaunchRequest *out) {
     IpcMessage message;
     k_memset(&message, 0, sizeof(message));
     if (!ipc_try_receive(kernel, g_launch_receive_handle, &message) || message.word_count != 4U) return false;
-    if (JCOS_PROGRAM_BROKER_HEADER_OP(message.words[0]) != JCOS_PROGRAM_BROKER_OP_FOREGROUND_EXTENT ||
-        JCOS_PROGRAM_BROKER_HEADER_VERSION(message.words[0]) != JCOS_PROGRAM_BROKER_PROTOCOL_VERSION ||
-        message.words[1] != system_console_incarnation() || !message.words[3]) return false;
+    u64 operation = JCOS_PROGRAM_BROKER_HEADER_OP(message.words[0]);
+    if (JCOS_PROGRAM_BROKER_HEADER_VERSION(message.words[0]) != JCOS_PROGRAM_BROKER_PROTOCOL_VERSION ||
+        message.words[1] != system_console_incarnation()) return false;
+
+    if (operation == JCOS_PROGRAM_BROKER_OP_FOREGROUND_MEDIA) {
+        u64 executable_offset = JCOS_PROGRAM_BROKER_EXTENT_OFFSET(message.words[2]);
+        u64 executable_size = JCOS_PROGRAM_BROKER_EXTENT_SIZE(message.words[2]);
+        u64 media_offset = JCOS_PROGRAM_BROKER_EXTENT_OFFSET(message.words[3]);
+        u64 media_size = JCOS_PROGRAM_BROKER_EXTENT_SIZE(message.words[3]);
+        const u8 *executable = 0;
+        const u8 *media = 0;
+        if (!executable_size || !media_size ||
+            !boot_archive_portal_extent(&g_boot_archive_portal,
+                executable_offset, executable_size, &executable) || !executable ||
+            !boot_archive_portal_extent(&g_boot_archive_portal,
+                media_offset, media_size, &media) || !media) return false;
+        out->service_incarnation = message.words[1];
+        out->data_offset = executable_offset;
+        out->size = executable_size;
+        out->media_data_offset = media_offset;
+        out->media_size = media_size;
+        return true;
+    }
+
+    if (operation != JCOS_PROGRAM_BROKER_OP_FOREGROUND_EXTENT || !message.words[3]) return false;
 
     const u8 *data = 0;
     if (!boot_archive_portal_extent(&g_boot_archive_portal, message.words[2], message.words[3], &data) || !data)

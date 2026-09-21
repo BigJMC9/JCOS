@@ -11,6 +11,7 @@
 #define PTE_PRESENT (1ULL << 0)
 #define PTE_WRITE   (1ULL << 1)
 #define PTE_USER    (1ULL << 2)
+#define PTE_PCD     (1ULL << 4)
 #define PTE_HUGE    (1ULL << 7)
 #define PTE_NX      (1ULL << 63)
 
@@ -494,7 +495,7 @@ static bool map_page_locked(VmPageMap *map, u64 virtual_address, frame_t frame, 
     if (!valid_mapping_frame(frame)) return false;
     if (!g_nx_enabled) return false;
     /* Refuse flags we do not understand yet. */
-    if (flags & ~(VM_WRITE | VM_USER | VM_EXEC)) return false;
+    if (flags & ~(VM_WRITE | VM_USER | VM_EXEC | VM_UNCACHED)) return false;
 
     u32 i4 = pml4_index(virtual_address);
     if (!map_owns_pml4_index(map,i4)) return false;
@@ -600,6 +601,7 @@ static bool map_page_locked(VmPageMap *map, u64 virtual_address, frame_t frame, 
 
     if (flags & VM_WRITE) entry_flags |= PTE_WRITE;
     if (flags & VM_USER) entry_flags |= PTE_USER;
+    if (flags & VM_UNCACHED) entry_flags |= PTE_PCD;
     if (flags & VM_EXEC) entry_flags &= ~PTE_NX;
 
     pt[i1] = physical | entry_flags;

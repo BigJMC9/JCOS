@@ -28,6 +28,128 @@ jcos_thread_exit:
 
 .size jcos_thread_exit, .-jcos_thread_exit
 
+.global jcos_clock_ticks
+.type jcos_clock_ticks,@function
+jcos_clock_ticks:
+    mov $JCOS_SYSCALL_CLOCK_TICKS, %eax
+    int $0x80
+    ret
+.size jcos_clock_ticks, .-jcos_clock_ticks
+
+.global jcos_clock_frequency
+.type jcos_clock_frequency,@function
+jcos_clock_frequency:
+    mov $JCOS_SYSCALL_CLOCK_FREQUENCY, %eax
+    int $0x80
+    ret
+.size jcos_clock_frequency, .-jcos_clock_frequency
+
+/* RDI=cap, RSI=width*, RDX=height*. Kernel returns width in RCX, height in RDX. */
+.global jcos_display_info
+.type jcos_display_info,@function
+jcos_display_info:
+    test %rsi, %rsi
+    jz .Ldisplay_info_failed
+    test %rdx, %rdx
+    jz .Ldisplay_info_failed
+    push %rbx
+    push %rsi
+    push %rdx
+    mov %rdi, %rbx
+    mov $JCOS_SYSCALL_DISPLAY_INFO, %eax
+    int $0x80
+    cmp $JCOS_SYSCALL_RESULT_OK, %rax
+    jne .Ldisplay_info_pop_failed
+    mov 8(%rsp), %r10
+    mov %ecx, (%r10)
+    mov 0(%rsp), %r10
+    mov %edx, (%r10)
+    mov $1, %eax
+    add $16, %rsp
+    pop %rbx
+    ret
+.Ldisplay_info_pop_failed:
+    add $16, %rsp
+    pop %rbx
+.Ldisplay_info_failed:
+    xor %eax, %eax
+    ret
+.size jcos_display_info, .-jcos_display_info
+
+/* RDI=cap, RSI=pixels, RDX=width, RCX=height. */
+.global jcos_display_present
+.type jcos_display_present,@function
+jcos_display_present:
+    test %rsi, %rsi
+    jz .Ldisplay_present_failed
+    push %rbx
+    mov %rdi, %rbx
+    xchg %rcx, %rsi
+    mov $JCOS_SYSCALL_DISPLAY_PRESENT, %eax
+    int $0x80
+    cmp $JCOS_SYSCALL_RESULT_OK, %rax
+    sete %al
+    movzbl %al, %eax
+    pop %rbx
+    ret
+.Ldisplay_present_failed:
+    xor %eax, %eax
+    ret
+.size jcos_display_present, .-jcos_display_present
+
+/* RDI=cap, RSI=rate*, RDX=max*. Kernel returns values in RCX/RDX. */
+.global jcos_audio_info
+.type jcos_audio_info,@function
+jcos_audio_info:
+    test %rsi, %rsi
+    jz .Laudio_info_failed
+    test %rdx, %rdx
+    jz .Laudio_info_failed
+    push %rbx
+    push %rsi
+    push %rdx
+    mov %rdi, %rbx
+    mov $JCOS_SYSCALL_AUDIO_INFO, %eax
+    int $0x80
+    cmp $JCOS_SYSCALL_RESULT_OK, %rax
+    jne .Laudio_info_pop_failed
+    mov 8(%rsp), %r10
+    mov %ecx, (%r10)
+    mov 0(%rsp), %r10
+    mov %edx, (%r10)
+    mov $1, %eax
+    add $16, %rsp
+    pop %rbx
+    ret
+.Laudio_info_pop_failed:
+    add $16, %rsp
+    pop %rbx
+.Laudio_info_failed:
+    xor %eax, %eax
+    ret
+.size jcos_audio_info, .-jcos_audio_info
+
+/* RDI=cap, RSI=PCM pointer, RDX=byte count. */
+.global jcos_audio_write
+.type jcos_audio_write,@function
+jcos_audio_write:
+    test %rsi, %rsi
+    jz .Laudio_write_failed
+    push %rbx
+    mov %rdi, %rbx
+    mov %rsi, %rcx
+    mov $JCOS_SYSCALL_AUDIO_WRITE, %eax
+    int $0x80
+    cmp $JCOS_SYSCALL_RESULT_OK, %rax
+    sete %al
+    movzbl %al, %eax
+    pop %rbx
+    ret
+.Laudio_write_failed:
+    xor %eax, %eax
+    ret
+.size jcos_audio_write, .-jcos_audio_write
+
 
 /*
  * int jcos_ipc_try_send(

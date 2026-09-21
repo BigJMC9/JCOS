@@ -31,10 +31,13 @@
 #include "userspace_shell.h"
 #include "timer.h"
 #include "splash.h"
+#include "audio.h"
+#include "display.h"
+#include "usb_xhci.h"
 
 #define CR4_LA57 (1ULL << 12)
 #define DIRECT_MAP_MIN_PHYSICAL 0x100000ULL
-#define BOOT_STAGE_COUNT 23U
+#define BOOT_STAGE_COUNT 24U
 
 extern const u8 __kernel_text_start[] __attribute__((visibility("hidden")));
 extern const u8 __kernel_text_end[] __attribute__((visibility("hidden")));
@@ -197,7 +200,9 @@ static bool build_kernel_page_map(VmPageMap *map, const BootInfo *boot, const Ac
     if (!map_optional_range(map, boot->initrd_base, boot->initrd_size)) goto fail;
 
     /* GOP framebuffer. */
-    if (!map_optional_range(map, boot->framebuffer_base, boot->framebuffer_size)) goto fail;
+    if (!boot->framebuffer_base || !boot->framebuffer_size ||
+        !vmm_identity_map_range(map, boot->framebuffer_base, boot->framebuffer_size,
+            VM_WRITE | VM_UNCACHED)) goto fail;
 
     /* ACPI RSDP itself. */
     if (acpi && acpi->rsdp_address) {
@@ -633,6 +638,18 @@ void kernel_main(BootInfo *boot) {
     }
 
     ++boot_stage;
+    splash_update(boot_stage, BOOT_STAGE_COUNT, "Initializing display and audio resources");
+    bool display_ok = display_init();
+    bool audio_ok = audio_init();
+    if (!display_ok) {
+        serial_write("JA OS: display resource initialization failed.\n");
+        terminal_set_color(terminal_error_color());
+        terminal_writeln("DISPLAY RESOURCE INITIALIZATION FAILED.");
+        terminal_set_color(terminal_default_color());
+        cpu_halt_forever();
+    }
+
+    ++boot_stage;
     splash_update(boot_stage, BOOT_STAGE_COUNT, "Starting userspace supervisor");
     bool supervisor_ok = supervisor_start();
 
@@ -652,6 +669,9 @@ void kernel_main(BootInfo *boot) {
     ++boot_stage;
     splash_update(boot_stage, BOOT_STAGE_COUNT, "Initializing keyboard input");
     bool keyboard_ok = (!acpi->i8042_known || acpi->i8042_present) ? ps2_init() : false;
+    bool usb_keyboard_ok = xhci_init(&kernel_space->page_map);
+    (void)keyboard_ok;
+    (void)usb_keyboard_ok;
 
     ++boot_stage;
     splash_update(boot_stage, BOOT_STAGE_COUNT, "Enabling hardware interrupts");
@@ -682,6 +702,39 @@ void kernel_main(BootInfo *boot) {
     ++boot_stage;
     splash_update(boot_stage, BOOT_STAGE_COUNT, "Boot complete");
 
+    framebuffer_fill_rect(0U, 0U, 160U, 24U, framebuffer_rgb(220U, 40U, 40U));
+    serial_write("POST-SPLASH: before terminal clear\n");
+    terminal_clear();
+    terminal_writeln("POST-SPLASH: framebuffer console active");
+    if (xhci_failure_count()) {
+        terminal_writeln("XHCI DIAGNOSTICS:");
+        for (u32 i = 0; i < xhci_failure_count(); ++i) {
+            const XhciFailureRecord *failure = xhci_failure(i);
+            if (!failure) continue;
+            terminal_write("  FAIL ");
+            terminal_write(failure->stage);
+            terminal_write(" USBCMD=");
+            terminal_write_hex(failure->usbcmd);
+            terminal_write(" USBSTS=");
+            terminal_write_hex(failure->usbsts);
+            terminal_write(" DETAIL=");
+            terminal_write_hex(failure->detail);
+            terminal_putchar('\n');
+        }
+    }
+
+    serial_write("BOOT COMPLETE: framebuffer base=");
+    serial_write_hex(boot->framebuffer_base);
+    serial_write(" size=");
+    serial_write_u64(boot->framebuffer_size);
+    serial_write(" geometry=");
+    serial_write_u64(boot->framebuffer_width);
+    serial_write("x");
+    serial_write_u64(boot->framebuffer_height);
+    serial_write(" pitch=");
+    serial_write_u64(boot->framebuffer_pixels_per_scanline);
+    serial_write("\nBOOT COMPLETE: clearing terminal\n");
+
     ArchDescriptorTablePointer gdtr;
 
     gdtr.limit = 0;
@@ -689,9 +742,10 @@ void kernel_main(BootInfo *boot) {
 
     arch_store_gdt(&gdtr);
 
-    terminal_clear();
     terminal_set_color(terminal_accent_color());
+    terminal_writeln("POST-SPLASH: entering console service");
     system_console_writeln("JA OS - INTERACTIVE X86_64 KERNEL");
+    terminal_writeln("POST-SPLASH: console service returned");
     terminal_set_color(terminal_default_color());
     system_console_writeln("UEFI BOOT SERVICES EXITED. FRAMEBUFFER + SERIAL CONSOLES ONLINE.");
     system_console_write("IDT: READY  GDT/TSS: ");
@@ -778,6 +832,10 @@ void kernel_main(BootInfo *boot) {
     system_console_write("BOOT ARCHIVE: ");
     system_console_writeln(archive_portal_ok && system_console_archive_size() == boot->initrd_size
         ? "RAW PORTAL / RING3 NAMESPACE" : "FAILED");
+    system_console_write("DISPLAY: ");
+    system_console_writeln(display_ok ? "CAPABILITY RESOURCE READY" : "FAILED");
+    system_console_write("AUDIO: ");
+    system_console_writeln(audio_ok ? "AC97 48 KHZ READY" : "NOT DETECTED");
     system_console_write("TIMER: ");
     if (timer_ok) {
         system_console_write("PIT ");
@@ -791,6 +849,8 @@ void kernel_main(BootInfo *boot) {
     system_console_writeln(preemption_ok && scheduler_preemption_enabled() ? "ACTIVE" : "FAILED");
     system_console_write("PS/2: ");
     system_console_write(keyboard_ok ? "DETECTED" : "NOT DETECTED");
+    system_console_write("  USB HID: ");
+    system_console_write(xhci_present() ? "DETECTED" : "NOT DETECTED");
     system_console_write("  COM1: ");
     system_console_writeln(serial_available() ? "READY" : "NOT DETECTED");
     system_console_write("ROOTFS: ");

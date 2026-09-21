@@ -1,6 +1,8 @@
 #include "foreground_program.h"
 
 #include "arch.h"
+#include "audio.h"
+#include "display.h"
 #include "input.h"
 #include "lib.h"
 #include "process_exit_queue.h"
@@ -9,6 +11,7 @@
 #include "serial.h"
 #include "system_console.h"
 #include "thread.h"
+#include "terminal.h"
 #include "vfs.h"
 #include "../include/console_client_protocol.h"
 
@@ -18,6 +21,59 @@ static bool g_foreground_exit_queue_created;
 static ProcessExitInfo g_last_exit;
 static bool g_last_exit_valid;
 static u64 g_run_count;
+
+#define FOREGROUND_MEDIA_BASE 0x0000010000000000ULL
+
+typedef struct {
+    CapabilityHandle display_authority;
+    CapabilityHandle audio_authority;
+} MediaAuthorities;
+
+static bool media_grants_begin(ProgramLaunchSpec *spec, MediaAuthorities *authorities) {
+    if (!spec || !authorities || !display_available() || !audio_available()) return false;
+    k_memset(authorities, 0, sizeof(*authorities));
+    Process *kernel = process_kernel();
+    CapabilityTable *caps = kernel ? process_capabilities(kernel) : 0;
+    DeviceResource *display = display_resource();
+    DeviceResource *audio = audio_resource();
+    CapabilityRights authority = CAPABILITY_RIGHT_READ | CAPABILITY_RIGHT_WRITE |
+        CAPABILITY_RIGHT_TRANSFER;
+    if (!caps || !display || !audio ||
+        !capability_insert(caps, display, CAPABILITY_TYPE_DEVICE_RESOURCE,
+            authority, &authorities->display_authority)) return false;
+    if (!capability_insert(caps, audio, CAPABILITY_TYPE_DEVICE_RESOURCE,
+            authority, &authorities->audio_authority)) {
+        (void)capability_revoke(caps, authorities->display_authority);
+        k_memset(authorities, 0, sizeof(*authorities));
+        return false;
+    }
+    spec->startup_grants[2].authority_table = caps;
+    spec->startup_grants[2].authority_handle = authorities->display_authority;
+    spec->startup_grants[2].object = display;
+    spec->startup_grants[2].type = CAPABILITY_TYPE_DEVICE_RESOURCE;
+    spec->startup_grants[2].rights = CAPABILITY_RIGHT_READ | CAPABILITY_RIGHT_WRITE;
+    spec->startup_grants[3].authority_table = caps;
+    spec->startup_grants[3].authority_handle = authorities->audio_authority;
+    spec->startup_grants[3].object = audio;
+    spec->startup_grants[3].type = CAPABILITY_TYPE_DEVICE_RESOURCE;
+    spec->startup_grants[3].rights = CAPABILITY_RIGHT_READ | CAPABILITY_RIGHT_WRITE;
+    spec->startup_grant_count = 4U;
+    return true;
+}
+
+static bool media_grants_end(MediaAuthorities *authorities) {
+    if (!authorities) return false;
+    Process *kernel = process_kernel();
+    CapabilityTable *caps = kernel ? process_capabilities(kernel) : 0;
+    if (!caps) return false;
+    bool ok = true;
+    if (authorities->display_authority &&
+        !capability_revoke(caps, authorities->display_authority)) ok = false;
+    if (authorities->audio_authority &&
+        !capability_revoke(caps, authorities->audio_authority)) ok = false;
+    if (ok) k_memset(authorities, 0, sizeof(*authorities));
+    return ok;
+}
 
 static bool queue_drain(void) {
     if (!g_foreground_exit_queue_created) return true;
@@ -48,6 +104,9 @@ bool foreground_program_cleanup(void) {
     u64 session = system_console_app_session_id();
     if (session && !system_console_app_session_abort(session)) ok = false;
     if (!queue_release()) ok = false;
+    audio_session_reset();
+    display_session_reset();
+    terminal_redraw();
     return ok && !program_instance_needs_cleanup(&g_foreground_program) &&
         !g_foreground_exit_queue_created && !system_console_app_session_id();
 }
@@ -131,9 +190,29 @@ bool foreground_program_run_pending(void) {
     spec.startup_arguments[0] = JCOS_CONSOLE_CLIENT_PROTOCOL_VERSION;
     spec.startup_arguments[1] = session_id;
 
+    MediaAuthorities media_authorities;
+    k_memset(&media_authorities, 0, sizeof(media_authorities));
+    if (request.media_size) {
+        const u8 *media = 0;
+        if (!system_console_archive_extent(request.media_data_offset,
+                request.media_size, &media) || !media ||
+            !media_grants_begin(&spec, &media_authorities)) goto fail;
+        u64 physical = (u64)media;
+        u64 page_offset = physical & (VM_PAGE_SIZE - 1ULL);
+        spec.readonly_data = media;
+        spec.readonly_size = request.media_size;
+        spec.readonly_virtual_base = FOREGROUND_MEDIA_BASE;
+        spec.startup_argument_count = 4U;
+        spec.startup_arguments[2] = FOREGROUND_MEDIA_BASE + page_offset;
+        spec.startup_arguments[3] = request.media_size;
+        audio_session_reset();
+        display_session_reset();
+    }
+
     bool launched = program_launch(&g_foreground_program, &spec);
     bool grants_released = system_console_app_client_grant_end(&grants);
-    if (!launched || !grants_released) goto fail;
+    bool media_grants_released = media_grants_end(&media_authorities);
+    if (!launched || !grants_released || !media_grants_released) goto fail;
 
     u64 pid = g_foreground_program.process.id;
     bool cancelled = false;
@@ -155,6 +234,9 @@ bool foreground_program_run_pending(void) {
     g_last_exit_valid = true;
 
     if (!program_reap(&g_foreground_program) || !queue_release()) goto fail;
+    audio_session_reset();
+    display_session_reset();
+    terminal_redraw();
     if (g_run_count != ~0ULL) ++g_run_count;
     return true;
 

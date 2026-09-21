@@ -5,6 +5,15 @@ static EFI_GUID LOADED_IMAGE_GUID = {0x5B1B31A1,0x9562,0x11D2,{0x8E,0x3F,0x00,0x
 static EFI_GUID SIMPLE_FS_GUID    = {0x964E5B22,0x6459,0x11D2,{0x8E,0x39,0x00,0xA0,0xC9,0x69,0x72,0x3B}};
 static EFI_GUID FILE_INFO_GUID    = {0x09576E92,0x6D3F,0x11D2,{0x8E,0x39,0x00,0xA0,0xC9,0x69,0x72,0x3B}};
 static EFI_GUID GOP_GUID          = {0x9042A9DE,0x23DC,0x4A38,{0x96,0xFB,0x7A,0xDE,0xD0,0x80,0x51,0x6A}};
+
+#ifndef JCOS_FRAMEBUFFER_WIDTH
+#define JCOS_FRAMEBUFFER_WIDTH 0U
+#endif
+#ifndef JCOS_FRAMEBUFFER_HEIGHT
+#define JCOS_FRAMEBUFFER_HEIGHT 0U
+#endif
+#define JCOS_FRAMEBUFFER_AUTO_MAX_WIDTH 1280U
+#define JCOS_FRAMEBUFFER_AUTO_MAX_HEIGHT 800U
 static EFI_GUID ACPI_20_GUID      = {0x8868E871,0xE4F1,0x11D3,{0xBC,0x22,0x00,0x80,0xC7,0x3C,0x88,0x81}};
 static EFI_GUID ACPI_10_GUID      = {0xEB9D2D30,0x2D88,0x11D3,{0x9A,0x16,0x00,0x90,0x27,0x3F,0xC1,0x4D}};
 
@@ -288,9 +297,52 @@ static EFI_STATUS load_rootfs(EFI_HANDLE image, BootInfo *boot) {
     return EFI_SUCCESS;
 }
 
+static int framebuffer_mode_supported(const EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *info) {
+    return info && info->HorizontalResolution && info->VerticalResolution &&
+        info->PixelsPerScanLine >= info->HorizontalResolution &&
+        info->PixelFormat <= 2U &&
+        (info->PixelFormat != 2U ||
+         (info->PixelInformation.RedMask | info->PixelInformation.GreenMask |
+          info->PixelInformation.BlueMask));
+}
+
+static EFI_STATUS select_framebuffer_mode(EFI_GRAPHICS_OUTPUT_PROTOCOL *gop) {
+    if (!gop || !gop->Mode || !gop->QueryMode || !gop->SetMode) return EFI_UNSUPPORTED;
+    u32 selected = gop->Mode->Mode;
+    u64 selected_area = 0ULL;
+    int exact = 0;
+    for (u32 mode = 0; mode < gop->Mode->MaxMode; ++mode) {
+        EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *info = 0;
+        UINTN info_size = 0;
+        EFI_STATUS status = gop->QueryMode(gop, mode, &info_size, &info);
+        if (EFI_ERROR(status) || !framebuffer_mode_supported(info)) {
+            if (info) g_bs->FreePool(info);
+            continue;
+        }
+        int requested = JCOS_FRAMEBUFFER_WIDTH && JCOS_FRAMEBUFFER_HEIGHT;
+        int is_exact = requested &&
+            info->HorizontalResolution == JCOS_FRAMEBUFFER_WIDTH &&
+            info->VerticalResolution == JCOS_FRAMEBUFFER_HEIGHT;
+        u64 area = (u64)info->HorizontalResolution * info->VerticalResolution;
+        int automatic_candidate = !requested &&
+            info->HorizontalResolution <= JCOS_FRAMEBUFFER_AUTO_MAX_WIDTH &&
+            info->VerticalResolution <= JCOS_FRAMEBUFFER_AUTO_MAX_HEIGHT;
+        if (is_exact || (!exact && automatic_candidate && area > selected_area)) {
+            selected = mode;
+            selected_area = area;
+            if (is_exact) exact = 1;
+        }
+        g_bs->FreePool(info);
+    }
+    if (selected == gop->Mode->Mode) return EFI_SUCCESS;
+    return gop->SetMode(gop, selected);
+}
+
 static EFI_STATUS get_framebuffer(BootInfo *boot) {
     EFI_GRAPHICS_OUTPUT_PROTOCOL *gop = 0;
     EFI_STATUS status = g_bs->LocateProtocol(&GOP_GUID, 0, (void **)&gop);
+    if (EFI_ERROR(status)) return status;
+    status = select_framebuffer_mode(gop);
     if (EFI_ERROR(status)) return status;
     if (!gop || !gop->Mode || !gop->Mode->Info || !gop->Mode->FrameBufferBase || gop->Mode->Info->PixelFormat == 3) {
         return EFI_UNSUPPORTED;

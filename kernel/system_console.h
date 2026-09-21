@@ -61,6 +61,8 @@ typedef struct {
     u64 service_incarnation;
     u64 data_offset;
     u64 size;
+    u64 media_data_offset;
+    u64 media_size;
 } SystemConsoleLaunchRequest;
 
 /* Ring3 resolves a pathname to an immutable boot-archive extent and sends only

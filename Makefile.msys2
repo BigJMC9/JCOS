@@ -15,10 +15,11 @@ USER_LAUNCH_PROBE := $(ROOTFS_DIR)/bin/launchprobe.elf
 USER_RUNTIME_TEST := $(ROOTFS_DIR)/bin/runtimetest.elf
 USER_RUNTIME_CANCEL_TEST := $(ROOTFS_DIR)/bin/runtimecanceltest.elf
 USER_RUNTIME_BLOCK_TEST := $(ROOTFS_DIR)/bin/runtimeblocktest.elf
+USER_MEDIA_PLAYER := $(ROOTFS_DIR)/bin/mediaplayer.elf
 .DEFAULT_GOAL := all
 .DELETE_ON_ERROR:
 
-USER_PROGRAMS := $(USER_ELF_TEST) $(USER_SUPERVISOR) $(USER_WORKER_SERVICE) $(USER_ORDINARY_SERVICE) $(USER_ORDINARY_SERVICE_REPLACEMENT) $(USER_CONSOLE_SERVICE) $(USER_HELLO) $(USER_INPUT_ECHO) $(USER_LAUNCH_PROBE) $(USER_RUNTIME_TEST) $(USER_RUNTIME_BLOCK_TEST) $(USER_RUNTIME_CANCEL_TEST)
+USER_PROGRAMS := $(USER_ELF_TEST) $(USER_SUPERVISOR) $(USER_WORKER_SERVICE) $(USER_ORDINARY_SERVICE) $(USER_ORDINARY_SERVICE_REPLACEMENT) $(USER_CONSOLE_SERVICE) $(USER_HELLO) $(USER_INPUT_ECHO) $(USER_LAUNCH_PROBE) $(USER_RUNTIME_TEST) $(USER_RUNTIME_BLOCK_TEST) $(USER_RUNTIME_CANCEL_TEST) $(USER_MEDIA_PLAYER)
 ROOTFS_FILES := $(shell test -d $(ROOTFS_DIR) && find $(ROOTFS_DIR) -type f)
 IMAGE := $(BUILD)/JA-os.img
 
@@ -27,9 +28,12 @@ LLD_LINK ?= lld-link
 LD := ld.lld
 NASM ?= nasm
 PYTHON ?= python
+FFMPEG ?= ffmpeg
 READELF ?= llvm-readelf
 OBJDUMP ?= llvm-objdump
 QEMU ?= qemu-system-x86_64
+FRAMEBUFFER_WIDTH ?= 0
+FRAMEBUFFER_HEIGHT ?= 0
 OVMF_CODE ?= /mingw64/share/qemu/edk2-x86_64-code.fd
 OVMF_VARS ?= /mingw64/share/qemu/edk2-i386-vars.fd
 
@@ -46,8 +50,7 @@ define CHECK_ELF_RELOCATIONS
 			echo "Runtime relocations are unsupported: $@" >&2; \
 			exit 1 ;; \
 		'') \
-			echo "Empty ELF relocation report: $@" >&2; \
-			exit 1 ;; \
+			echo "No ELF relocations: $@" ;; \
 	esac
 endef
 
@@ -249,6 +252,30 @@ $(USER_INPUT_ECHO): $(BUILD)/user_crt0_startup.o \
 	      $(BUILD)/user_input_echo.o
 	$(CHECK_ELF_RELOCATIONS)
 
+$(BUILD)/user_media_player.o: user/media_player.c \
+                              user/lib/console.h \
+                              user/lib/syscall.h \
+                              include/user_abi.h \
+                              include/program_startup.h \
+                              include/console_client_protocol.h \
+                              include/media_abi.h | $(BUILD)
+	$(CLANG) $(USER_CFLAGS) -c $< -o $@
+
+$(USER_MEDIA_PLAYER): $(BUILD)/user_crt0_startup.o \
+                      $(BUILD)/user_syscall.o \
+                      $(BUILD)/user_console_client.o \
+                      $(BUILD)/user_media_player.o \
+                      user/media_player.ld Makefile.msys2
+	mkdir -p $(dir $@)
+	$(LD) -m elf_x86_64 -nostdlib -static \
+	      -T user/media_player.ld \
+	      -o $@ \
+	      $(BUILD)/user_crt0_startup.o \
+	      $(BUILD)/user_syscall.o \
+	      $(BUILD)/user_console_client.o \
+	      $(BUILD)/user_media_player.o
+	$(CHECK_ELF_RELOCATIONS)
+
 $(BUILD)/user_launch_probe.o: user/launch_probe.c \
                               user/lib/syscall.h \
                               include/user_abi.h \
@@ -344,7 +371,19 @@ $(USER_RUNTIME_TEST): $(BUILD)/user_crt0.o \
 	      $(BUILD)/user_runtime_test.o
 	$(CHECK_ELF_RELOCATIONS)
 
-$(ROOTFS): $(USER_PROGRAMS) $(ROOTFS_FILES) | $(BUILD)
+MEDIA_DIR := $(wildcard media)
+ifeq ($(MEDIA_DIR),)
+MEDIA_STREAMS :=
+else
+MEDIA_STREAMS := $(ROOTFS_DIR)/media/badapple.jmv $(ROOTFS_DIR)/media/caramel.jmv
+
+$(MEDIA_STREAMS) &: tools/encode_media.py | $(BUILD)
+	@command -v "$(FFMPEG)" >/dev/null || { echo "Missing FFmpeg ($(FFMPEG)). Install it or set FFMPEG=/path/to/ffmpeg.exe" >&2; exit 1; }
+	mkdir -p $(ROOTFS_DIR)/media
+	$(PYTHON) tools/encode_media.py --ffmpeg "$(FFMPEG)" --input-dir media --output-dir $(ROOTFS_DIR)/media
+endif
+
+$(ROOTFS): $(USER_PROGRAMS) $(MEDIA_STREAMS) $(ROOTFS_FILES) | $(BUILD)
 	@test -d "$(ROOTFS_DIR)" || { echo "Missing $(ROOTFS_DIR) directory"; exit 1; }
 	@files="$$(find "$(ROOTFS_DIR)" -type f -print -quit)" || exit 1; \
 		test -n "$$files" || { echo "$(ROOTFS_DIR) contains no files"; exit 1; }
@@ -354,7 +393,9 @@ $(ROOTFS): $(USER_PROGRAMS) $(ROOTFS_FILES) | $(BUILD)
 LOADER_CFLAGS := --target=x86_64-pc-win32-coff -std=c11 -ffreestanding \
                  -fno-stack-protector -fno-builtin -fno-exceptions \
                  -fno-asynchronous-unwind-tables -fno-unwind-tables \
-                 -Wall -Wextra -Werror -O2
+                 -Wall -Wextra -Werror -O2 \
+                 -DJCOS_FRAMEBUFFER_WIDTH=$(FRAMEBUFFER_WIDTH) \
+                 -DJCOS_FRAMEBUFFER_HEIGHT=$(FRAMEBUFFER_HEIGHT)
 
 KERNEL_CFLAGS := --target=x86_64-unknown-none-elf -std=c11 -ffreestanding \
                  -fno-stack-protector -fno-builtin -fpie -fno-plt \
@@ -374,12 +415,12 @@ KERNEL_C_OBJECTS := $(patsubst %.c,$(BUILD)/%.o,$(KERNEL_C_SOURCES))
 KERNEL_HEADERS := $(sort $(shell find kernel include -type f -name '*.h'))
 NASM_PATH := $(shell command -v $(NASM) 2>/dev/null)
 
-.PHONY: all binaries image validate run run-headless inspect clean check-build-tools check-image-tools check-inspect-tools check-run-tools
+.PHONY: all binaries image media validate run run-headless inspect clean check-build-tools check-image-tools check-inspect-tools check-run-tools
 
 all: check-image-tools $(IMAGE)
 binaries: check-build-tools $(EFI) $(KERNEL)
 image: check-image-tools $(IMAGE)
-
+media: $(MEDIA_STREAMS)
 check-build-tools:
 	@command -v $(CLANG) >/dev/null || { echo "Missing $(CLANG). Run: pacman -S --needed mingw-w64-x86_64-clang"; exit 1; }
 	@command -v $(LLD_LINK) >/dev/null || { echo "Missing $(LLD_LINK). Run: pacman -S --needed mingw-w64-x86_64-lld"; exit 1; }

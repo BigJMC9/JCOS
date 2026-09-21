@@ -2,5 +2,7 @@ v5/**
 build/**
 assets/**
 rootfs/bin/**
+rootfs/media/**
 docs/non-public/**
 non-public/**
+media/**

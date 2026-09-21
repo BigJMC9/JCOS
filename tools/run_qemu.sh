@@ -75,6 +75,18 @@ set -- \
     -serial stdio
 
 if [ "$HEADLESS" -eq 1 ]; then
+    AUDIO_DRIVER=${JCOS_AUDIO_BACKEND:-none}
+else
+    case "$(uname -s)" in
+        MINGW*|MSYS*) AUDIO_DRIVER=${JCOS_AUDIO_BACKEND:-dsound} ;;
+        *) AUDIO_DRIVER=${JCOS_AUDIO_BACKEND:-sdl} ;;
+    esac
+fi
+set -- "$@" \
+    -audiodev "driver=$AUDIO_DRIVER,id=jcosaudio" \
+    -device "AC97,audiodev=jcosaudio"
+
+if [ "$HEADLESS" -eq 1 ]; then
     set -- "$@" -display none
 fi
 
