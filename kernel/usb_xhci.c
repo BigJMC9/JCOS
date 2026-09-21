@@ -17,7 +17,6 @@
 #define XHCI_MAX_PORTS 255U
 #define XHCI_FAILURE_CAPACITY 64U
 #define XHCI_RUNTIME_INTERRUPTER0_OFFSET 0x20U
-#define XHCI_INPUT_CONTROL_SIZE 32U
 #define XHCI_HCC_AC64 (1U << 0)
 #define XHCI_HCC_CSZ  (1U << 2)
 #define XHCI_HCC_PPC  (1U << 3)
@@ -525,11 +524,12 @@ static bool configure_keyboard(u8 endpoint_address, u8 interval, u16 max_packet,
                                u8 transactions, u8 speed) {
     u8 *input = (u8 *)phys_to_virt(g_xhci.input_context_phys);
     u32 *control = (u32 *)(void *)input;
-    u32 *slot = (u32 *)(void *)(input + XHCI_INPUT_CONTROL_SIZE);
-    u32 *ep0 = (u32 *)(void *)(input + XHCI_INPUT_CONTROL_SIZE + g_xhci.context_size);
+    u32 *slot = (u32 *)(void *)(input + g_xhci.context_size);
+    u32 *ep0 = (u32 *)(void *)(input + g_xhci.context_size * 2U);
     u32 endpoint_id = (u32)(endpoint_address & 0x0FU) * 2U +
         ((endpoint_address & 0x80U) ? 1U : 0U);
-    u32 *ep = (u32 *)(void *)(input + XHCI_INPUT_CONTROL_SIZE + g_xhci.context_size * endpoint_id);
+    u32 *ep = (u32 *)(void *)(input +
+        g_xhci.context_size * (endpoint_id + 1U));
     g_xhci.endpoint_id = endpoint_id;
     /*
      * Configure Endpoint requires A0 (Slot) plus the endpoint being added.
@@ -570,8 +570,8 @@ static void submit_keyboard_report(void) {
 static void prepare_address_context(u8 speed) {
     u8 *input = (u8 *)phys_to_virt(g_xhci.input_context_phys);
     u32 *control = (u32 *)(void *)input;
-    u32 *slot = (u32 *)(void *)(input + XHCI_INPUT_CONTROL_SIZE);
-    u32 *ep0 = (u32 *)(void *)(input + XHCI_INPUT_CONTROL_SIZE + g_xhci.context_size);
+    u32 *slot = (u32 *)(void *)(input + g_xhci.context_size);
+    u32 *ep0 = (u32 *)(void *)(input + g_xhci.context_size * 2U);
     control[1] = (1U << 0) | (1U << 1);
     slot[0] = ((u32)speed << 20) | (1U << 27);
     slot[1] = (u32)(g_xhci.port + 1U) << 16;
@@ -584,7 +584,7 @@ static void prepare_address_context(u8 speed) {
 static bool update_ep0_context(void) {
     u8 *input = (u8 *)phys_to_virt(g_xhci.input_context_phys);
     u32 *control = (u32 *)(void *)input;
-    u32 *ep0 = (u32 *)(void *)(input + XHCI_INPUT_CONTROL_SIZE + g_xhci.context_size);
+    u32 *ep0 = (u32 *)(void *)(input + g_xhci.context_size * 2U);
     control[0] = 0;
     control[1] = 1U << 1;
     ep0[1] = ((u32)g_xhci.packet_size << 16) | (4U << 3);
