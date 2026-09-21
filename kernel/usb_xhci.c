@@ -14,22 +14,43 @@
 #define XHCI_QUEUE_SIZE 32U
 #define XHCI_WAIT_LIMIT 200000U
 #define XHCI_MMIO_SIZE 0x10000ULL
+#define XHCI_MAX_PORTS 255U
+#define XHCI_FAILURE_CAPACITY 64U
+#define XHCI_RUNTIME_INTERRUPTER0_OFFSET 0x20U
 #define XHCI_INPUT_CONTROL_SIZE 32U
+#define XHCI_HCC_AC64 (1U << 0)
+#define XHCI_HCC_CSZ  (1U << 2)
+#define XHCI_HCC_PPC  (1U << 3)
 #define XHCI_USBCMD_RUN (1U << 0)
 #define XHCI_USBCMD_HCRST (1U << 1)
 #define XHCI_USBSTS_HCH (1U << 0)
 #define XHCI_USBSTS_CNR (1U << 11)
 #define XHCI_PORTSC_CCS (1U << 0)
 #define XHCI_PORTSC_PED (1U << 1)
-#define XHCI_PORTSC_PR (1U << 4)
+#define XHCI_PORTSC_PR  (1U << 4)
+#define XHCI_PORTSC_PP  (1U << 9)
+#define XHCI_PORTSC_CSC (1U << 17)
+#define XHCI_PORTSC_PEC (1U << 18)
+#define XHCI_PORTSC_WRC (1U << 19)
+#define XHCI_PORTSC_OCC (1U << 20)
 #define XHCI_PORTSC_PRC (1U << 21)
+#define XHCI_PORTSC_PLC (1U << 22)
+#define XHCI_PORTSC_CEC (1U << 23)
+#define XHCI_PORTSC_WPR (1U << 31)
+#define XHCI_PORTSC_CHANGE_BITS \
+    (XHCI_PORTSC_CSC | XHCI_PORTSC_PEC | XHCI_PORTSC_WRC | XHCI_PORTSC_OCC | \
+     XHCI_PORTSC_PRC | XHCI_PORTSC_PLC | XHCI_PORTSC_CEC)
+#define XHCI_PORTSC_WRITE_ONE_BITS \
+    (XHCI_PORTSC_PED | XHCI_PORTSC_PR | XHCI_PORTSC_WPR | XHCI_PORTSC_CHANGE_BITS)
 #define XHCI_ERDP_EHB (1U << 3)
 #define XHCI_EXT_CAP_ID(value) ((u32)(value) & 0xFFU)
 #define XHCI_EXT_CAP_NEXT(value) (((u32)(value) >> 8) & 0xFFU)
+#define XHCI_EXT_CAP_SUPPORTED_PROTOCOL 2U
 #define XHCI_LEGACY_BIOS_OWNED (1U << 16)
 #define XHCI_LEGACY_OS_OWNED   (1U << 24)
 
 #define TRB_TYPE(value) ((u32)(value) << 10)
+#define TRB_SLOT_ID(value) ((u32)(value) << 24)
 #define TRB_CYCLE (1U << 0)
 #define TRB_ENT (1U << 1)
 #define TRB_IOC (1U << 5)
@@ -38,6 +59,7 @@
 #define TRB_CHAIN (1U << 4)
 #define TRB_SETUP_TRANSFER_TYPE(value) ((u32)(value) << 16)
 #define TRB_ENABLE_SLOT 9U
+#define TRB_DISABLE_SLOT 10U
 #define TRB_ADDRESS_DEVICE 11U
 #define TRB_CONFIGURE_ENDPOINT 12U
 #define TRB_EVALUATE_CONTEXT 13U
@@ -70,6 +92,11 @@ typedef struct {
     volatile u32 *doorbells;
     volatile u32 *runtime;
     u32 context_size;
+    u32 max_slots;
+    u32 max_ports;
+    u32 scratchpad_count;
+    bool addr64;
+    u8 port_protocol[XHCI_MAX_PORTS];
     u32 port;
     u32 slot;
     u32 endpoint_id;
@@ -77,6 +104,7 @@ typedef struct {
     u8 report[8];
     u8 previous[6];
     u64 dcbaa_phys;
+    u64 scratchpad_array_phys;
     u64 input_context_phys;
     u64 device_context_phys;
     u64 command_ring_phys;
@@ -98,7 +126,7 @@ static XhciState g_xhci;
 static KeyEvent g_queue[XHCI_QUEUE_SIZE];
 static u32 g_queue_head;
 static u32 g_queue_tail;
-static XhciFailureRecord g_failures[8];
+static XhciFailureRecord g_failures[XHCI_FAILURE_CAPACITY];
 static u32 g_failure_count;
 
 static volatile u32 *reg32(u64 base, u32 offset) {
@@ -107,7 +135,7 @@ static volatile u32 *reg32(u64 base, u32 offset) {
 
 static void xhci_report_failure_detail(const char *stage, u32 detail) {
     XhciFailureRecord *record = 0;
-    if (g_failure_count < 8U) record = &g_failures[g_failure_count++];
+    if (g_failure_count < XHCI_FAILURE_CAPACITY) record = &g_failures[g_failure_count++];
     if (record) {
         u32 i = 0;
         if (stage) {
