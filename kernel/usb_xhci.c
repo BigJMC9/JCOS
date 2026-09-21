@@ -514,7 +514,10 @@ static u8 endpoint_interval(u8 speed, u8 b_interval) {
         }
         return interval > 15U ? 15U : (u8)interval;
     }
-    if (speed >= 4U) return b_interval ? (u8)(b_interval - 1U) : 0U;
+    if (speed >= 3U) {
+        u8 value = b_interval ? (u8)(b_interval - 1U) : 0U;
+        return value > 15U ? 15U : value;
+    }
     return b_interval > 15U ? 15U : b_interval;
 }
 
