@@ -7,6 +7,25 @@
 
 struct Thread;
 struct UserElfImage;
+struct ProcessExitQueue;
+
+/* Kernel-internal terminal record; not a userspace ABI or a reap receipt. */
+typedef enum {
+    PROCESS_EXIT_NONE = 0,
+    PROCESS_EXIT_NORMAL,
+    PROCESS_EXIT_FAULT,
+    PROCESS_EXIT_TERMINATED
+} ProcessExitReason;
+
+typedef struct {
+    ProcessExitReason reason;
+    u64 process_id;
+    u64 thread_id;
+    u64 vector;
+    u64 error_code;
+    u64 rip;
+    u64 cr2;
+} ProcessExitInfo;
 
 typedef struct Process {
     u64 id;
@@ -41,6 +60,14 @@ typedef struct Process {
     /* One retained ELF ledger in the initial static-executable profile. */
     struct UserElfImage *elf_image;
 
+    /* First terminal outcome wins. Retained through thread/VM cleanup retries. */
+    ProcessExitInfo exit_info;
+
+    /* Optional R6a.2 terminal-event reservation. The queue owns exactly one
+     * reserved slot until this incarnation publishes or is unwatched. */
+    struct ProcessExitQueue *exit_queue;
+    u64 exit_queue_id;
+
     bool kernel;
     bool owns_address_space;
     bool initialized;
@@ -63,6 +90,7 @@ Process *process_kernel(void);
  * are owned by AddressSpace's bounded rollback slot. Live storage is unchanged. */
 bool process_create(Process *process);
 u32 process_object_count(void);
+bool process_storage_in_use(const Process *process);
 
 /*
  * Process destruction requires an empty
@@ -76,6 +104,17 @@ AddressSpace *process_address_space(Process *process);
 CapabilityTable *process_capabilities(Process *process);
 
 u64 process_thread_count(const Process *process);
+
+/* Snapshot for the kernel owner while Process storage is still live. false
+ * clears a separate output. Reading does not consume the record. No wakeup or
+ * userspace handle-query ABI is implied. Copy before process_destroy/reap.
+ * A terminal record also prevents new thread attachment to this incarnation. */
+bool process_exit_info(const Process *process, ProcessExitInfo *out);
+
+/* Task-layer publication only. Caller excludes IRQs, has stopped all siblings
+ * and closed owned endpoints, and will never resume the remaining current
+ * thread. Does not allocate, reap, or overwrite an existing terminal outcome. */
+bool process_exit_publish(Process *process, const ProcessExitInfo *info);
 
 bool process_thread_attach(Process *process, struct Thread *thread);
 /* Caller serializes validation and subsequent detach (UP: interrupts off). */

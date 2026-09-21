@@ -15,9 +15,14 @@
 #include "program_startup_test.h"
 #include "runtime_preemption_test.h"
 #include "service_order_test.h"
+#include "supervisor_recovery_test.h"
+#include "managed_service_test.h"
+#include "service_recovery_acceptance_test.h"
 #include "scheduler_idle_test.h"
 #include "scheduler_idle_exit_test.h"
 #include "process_terminate_test.h"
+#include "process_exit_test.h"
+#include "process_exit_queue_test.h"
 #include "lifetime_ipc_acceptance_test.h"
 #include "lifetime_stress_test.h"
 #include "permission_audit_test.h"
@@ -31,7 +36,7 @@
 #include "user_test_fixture.h"
 #include "vmm_reclaim_test.h"
 
-#define KERNEL_TEST_CAPACITY 32U
+#define KERNEL_TEST_CAPACITY 40U
 
 static KernelTest g_tests[KERNEL_TEST_CAPACITY];
 static u32 g_test_count;
@@ -71,6 +76,10 @@ static void kernel_test_registry_init(void) {
     kernel_test_add("vmm-reclaim", "page-table cleanup failure and retry", KERNEL_TEST_MEMORY, vmm_reclaim_test_run, 0);
     kernel_test_add("force-thread", "forced IPC thread termination", KERNEL_TEST_TASK, force_thread_test_run, force_thread_cleanup_run);
     kernel_test_add("published-cleanup", "published fixture cleanup and retry", KERNEL_TEST_LIFETIME, published_cleanup_test_run, force_thread_cleanup_run);
+    kernel_test_add("process-exit", "process-wide user faults and retained terminal records",
+        KERNEL_TEST_TASK, process_exit_test_run, user_fixture_cleanup_retry_run);
+    kernel_test_add("exit-notify", "durable process-exit owner notification queue",
+        KERNEL_TEST_TASK, process_exit_queue_test_run, 0);
     kernel_test_add("process-kill", "forced multi-thread process termination", KERNEL_TEST_TASK, process_terminate_test_run, user_fixture_cleanup_retry_run);
     kernel_test_add("wait-order", "bounded IPC completion ordering", KERNEL_TEST_IPC, ipc_wait_order_test_run, ipc_wait_order_cleanup_run);
     kernel_test_add("peer-death", "owned-endpoint peer-death propagation", KERNEL_TEST_IPC, peer_death_test_run, peer_death_cleanup_run);
@@ -86,6 +95,12 @@ static void kernel_test_registry_init(void) {
         KERNEL_TEST_SCHEDULING, runtime_preemption_test_run, user_fixture_cleanup_retry_run);
     kernel_test_add_live("service-order", "bounded supervisor shutdown under varied scheduling order",
         KERNEL_TEST_SCHEDULING, service_order_test_run, service_order_test_cleanup_run);
+    kernel_test_add_live("service-recovery", "supervisor lifecycle, bounded forced shutdown and fault recovery",
+        KERNEL_TEST_SCHEDULING, supervisor_recovery_test_run, supervisor_recovery_test_cleanup_run);
+    kernel_test_add_live("service-incarnation", "second C service, stale authority and explicit reconnect",
+        KERNEL_TEST_ACCEPTANCE, managed_service_test_run, managed_service_test_cleanup_run);
+    kernel_test_add_live("service-robustness", "repeated R6 service failure, reconnect and reclaim acceptance",
+        KERNEL_TEST_ACCEPTANCE, service_recovery_acceptance_test_run, service_recovery_acceptance_test_cleanup_run);
     kernel_test_add("user-ipc-cancel", "Ring3 IPC cancellation and close", KERNEL_TEST_USERSPACE, user_ipc_cancel_test_run, user_fixture_cleanup_retry_run);
     kernel_test_add("user-process-cleanup", "shared user-process cleanup", KERNEL_TEST_USERSPACE, user_process_cleanup_test_run, user_fixture_cleanup_retry_run);
     kernel_test_add("user-protection", "hardware NX and W^X enforcement", KERNEL_TEST_USERSPACE, user_protection_test_run, user_fixture_cleanup_retry_run);

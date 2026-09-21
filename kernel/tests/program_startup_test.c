@@ -7,6 +7,7 @@
 #include "lib.h"
 #include "pmm.h"
 #include "process.h"
+#include "process_exit_queue.h"
 #include "program.h"
 #include "scheduler.h"
 #include "supervisor.h"
@@ -36,6 +37,7 @@ typedef struct {
     u32 address_space_count;
     u32 thread_count;
     u32 endpoint_count;
+    u32 exit_queue_count;
     u32 kernel_cap_count;
     u64 kernel_thread_count;
     u64 scheduler_count;
@@ -59,6 +61,7 @@ static void capture_baseline(StartupBaseline *baseline) {
     baseline->address_space_count = address_space_object_count();
     baseline->thread_count = thread_object_count();
     baseline->endpoint_count = endpoint_object_count();
+    baseline->exit_queue_count = process_exit_queue_object_count();
     baseline->kernel_cap_count = caps ? capability_table_count(caps) : 0U;
     baseline->kernel_thread_count = kernel ? process_thread_count(kernel) : 0ULL;
     baseline->scheduler_count = scheduler_thread_count();
@@ -75,6 +78,7 @@ static bool baseline_counts_match(const StartupBaseline *baseline) {
         address_space_object_count() == baseline->address_space_count &&
         thread_object_count() == baseline->thread_count &&
         endpoint_object_count() == baseline->endpoint_count &&
+        process_exit_queue_object_count() == baseline->exit_queue_count &&
         capability_table_count(caps) == baseline->kernel_cap_count &&
         process_thread_count(kernel) == baseline->kernel_thread_count &&
         scheduler_thread_count() == baseline->scheduler_count;
@@ -127,6 +131,7 @@ static bool cleanup_probe(void) {
 static bool cleanup_all(void) {
     if (!cleanup_probe()) return false;
     if (!supervisor_running()) {
+        if (supervisor_state() != SUPERVISOR_STATE_STOPPED && !supervisor_recover()) return false;
         if (scheduler_thread_count() != 1ULL || !supervisor_start()) return false;
     }
     return supervisor_healthy();
@@ -197,7 +202,8 @@ void program_startup_test_run(void) {
     u64 old_tid = before_restart.supervisor_tid;
     u64 launches_before = program_launch_count();
 
-    bool stopped = supervisor_stop() && !supervisor_running();
+    bool stopped = supervisor_stop_bounded() == SUPERVISOR_STOP_GRACEFUL &&
+        !supervisor_running();
     bool restarted = stopped && supervisor_start();
     u64 new_pid = supervisor_process_id();
     u64 new_tid = supervisor_thread_id();

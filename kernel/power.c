@@ -7,6 +7,7 @@
 #include "capability.h"
 #include "endpoint.h"
 #include "interrupts.h"
+#include "process_exit_queue.h"
 #include "process.h"
 #include "scheduler.h"
 #include "serial.h"
@@ -38,6 +39,7 @@ static bool power_object_state_clean(bool supervisor_expected) {
     u32 expected_threads = supervisor_expected ? 2U : 1U;
     u32 expected_endpoints = supervisor_expected ? 2U : 0U;
     u32 expected_tables = supervisor_expected ? 2U : 1U;
+    u32 expected_exit_queues = supervisor_expected ? 1U : 0U;
     /* R5 supervisor: SEND + RECEIVE plus two TRANSFER grant authorities. */
     u32 expected_kernel_caps = supervisor_expected ? 4U : 0U;
 
@@ -45,6 +47,7 @@ static bool power_object_state_clean(bool supervisor_expected) {
         address_space_object_count() == expected_spaces &&
         thread_object_count() == expected_threads &&
         endpoint_object_count() == expected_endpoints &&
+        process_exit_queue_object_count() == expected_exit_queues &&
         capability_table_object_count() == expected_tables &&
         capability_table_count(kernel_caps) == expected_kernel_caps &&
         process_thread_count(kernel) == 1ULL;
@@ -59,7 +62,8 @@ static PowerResult power_check_common(bool require_poweroff) {
     if (!kernel || !current || current->process != kernel || current->state != THREAD_STATE_RUNNING ||
         !current->on_run_queue) return POWER_RESULT_BAD_CONTEXT;
     if (scheduler_thread_count() != 1ULL) return POWER_RESULT_RUNNABLE_STATE;
-    if (!power_object_state_clean(supervisor_running())) return POWER_RESULT_OBJECT_STATE;
+    bool supervisor_present = supervisor_state() != SUPERVISOR_STATE_STOPPED;
+    if (!power_object_state_clean(supervisor_present)) return POWER_RESULT_OBJECT_STATE;
     if (!power_storage_safe()) return POWER_RESULT_STORAGE_UNSAFE;
     return POWER_RESULT_OK;
 }
@@ -77,7 +81,7 @@ static PowerResult power_quiesce(bool require_poweroff) {
     if (check != POWER_RESULT_OK) return check;
 
     g_power_transition = true;
-    if (supervisor_running() && !supervisor_stop()) {
+    if (supervisor_state() != SUPERVISOR_STATE_STOPPED && !supervisor_stop()) {
         interrupts_disable();
         serial_write("POWER: supervisor shutdown failed after transition began; halting.\n");
         cpu_halt_forever();
@@ -85,7 +89,7 @@ static PowerResult power_quiesce(bool require_poweroff) {
 
     Thread *current = thread_current();
     if (!current || current->process != process_kernel() || current->state != THREAD_STATE_RUNNING ||
-        !current->on_run_queue || scheduler_thread_count() != 1ULL || supervisor_running() ||
+        !current->on_run_queue || scheduler_thread_count() != 1ULL || supervisor_state() != SUPERVISOR_STATE_STOPPED ||
         !power_object_state_clean(false)) {
         serial_write("POWER: post-quiesce object invariant failed; halting.\n");
         cpu_halt_forever();

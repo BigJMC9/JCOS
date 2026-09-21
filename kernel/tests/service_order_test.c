@@ -7,6 +7,7 @@
 #include "lib.h"
 #include "pmm.h"
 #include "process.h"
+#include "process_exit_queue.h"
 #include "scheduler.h"
 #include "supervisor.h"
 #include "task.h"
@@ -73,6 +74,7 @@ static bool supervisor_healthy(void) {
 
 static bool restore_supervisor(void) {
     if (supervisor_running()) return supervisor_healthy();
+    if (supervisor_state() != SUPERVISOR_STATE_STOPPED && !supervisor_recover()) return false;
     if (scheduler_thread_count() != 1ULL) return false;
     if (!supervisor_start()) return false;
     return supervisor_healthy();
@@ -109,6 +111,7 @@ void service_order_test_run(void) {
     u32 spaces_before = address_space_object_count();
     u32 threads_before = thread_object_count();
     u32 endpoints_before = endpoint_object_count();
+    u32 exit_queues_before = process_exit_queue_object_count();
     u32 caps_before = capability_table_count(kernel_caps);
     u64 kernel_threads_before = process_thread_count(kernel);
 
@@ -125,7 +128,8 @@ void service_order_test_run(void) {
 
     u64 preempt_before = scheduler_preemption_count();
     u64 ticks_before = timer_ticks();
-    bool stopped = supervisor_stop();
+    SupervisorStopResult stop_result = supervisor_stop_bounded();
+    bool stopped = stop_result == SUPERVISOR_STOP_GRACEFUL;
     u64 spin_count = g_spinner_count;
     u64 preempt_delta = scheduler_preemption_count() - preempt_before;
     u64 tick_delta = timer_ticks() - ticks_before;
@@ -152,6 +156,7 @@ void service_order_test_run(void) {
         thread_current() == main && process_object_count() == processes_before &&
         address_space_object_count() == spaces_before && thread_object_count() == threads_before &&
         endpoint_object_count() == endpoints_before && capability_table_count(kernel_caps) == caps_before &&
+        process_exit_queue_object_count() == exit_queues_before &&
         process_thread_count(kernel) == kernel_threads_before && after.free_pages == before.free_pages;
     report("RESOURCE / PREEMPTION BASELINES", baselines);
 

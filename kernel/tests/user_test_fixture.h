@@ -75,6 +75,7 @@ typedef struct {
     u32 process_count;
     u32 thread_count;
     u32 space_count;
+    u32 exit_queue_count;
     u64 kernel_thread_count;
     Thread *kernel_head;
     Thread *kernel_tail;

@@ -81,6 +81,9 @@ typedef enum {
     NON_POWER_OF_TWO_ALIGNMENT,
     ALIGNMENT_CONGRUENCE,
     USER_RANGE_OVERFLOW,
+    SEGMENT_PAGE_LIMIT,
+    TOTAL_PAGE_LIMIT,
+    HUGE_LOAD_RANGE,
     PAGE_LEVEL_LOAD_OVERLAP,
     INITIAL_STACK_RESERVATION,
     ENTRY_IN_EXECUTABLE_BSS,
@@ -199,6 +202,17 @@ static void mutate_elf(MalformedCase test_case) {
         case USER_RANGE_OVERFLOW:
             data->virtual_address = ADDRESS_SPACE_USER_LIMIT - 0x800ULL;
             data->memory_size = VM_PAGE_SIZE;
+            break;
+        case SEGMENT_PAGE_LIMIT:
+            data->memory_size = (USER_ELF_MAX_LOAD_PAGES + 1ULL) * VM_PAGE_SIZE;
+            break;
+        case TOTAL_PAGE_LIMIT:
+            text->memory_size = (USER_ELF_MAX_LOAD_PAGES / 2ULL) * VM_PAGE_SIZE;
+            data->virtual_address = TEST_TEXT + 0x80000ULL;
+            data->memory_size = (USER_ELF_MAX_LOAD_PAGES / 2ULL + 1ULL) * VM_PAGE_SIZE;
+            break;
+        case HUGE_LOAD_RANGE:
+            data->memory_size = 1ULL << 40; /* In-range 1 TiB, far over the page budget. */
             break;
         case PAGE_LEVEL_LOAD_OVERLAP:
             text->memory_size = 0x100ULL;
@@ -352,6 +366,9 @@ void elf_malformed_test_run(void) {
         !run_preflight_reject(fixture, space, "BAD ALIGNMENT REJECTED PRE-ALLOC", NON_POWER_OF_TWO_ALIGNMENT) ||
         !run_preflight_reject(fixture, space, "ALIGNMENT CONGRUENCE REJECTED PRE-ALLOC", ALIGNMENT_CONGRUENCE) ||
         !run_preflight_reject(fixture, space, "USER RANGE OVERFLOW REJECTED PRE-ALLOC", USER_RANGE_OVERFLOW) ||
+        !run_preflight_reject(fixture, space, "SEGMENT PAGE LIMIT REJECTED PRE-ALLOC", SEGMENT_PAGE_LIMIT) ||
+        !run_preflight_reject(fixture, space, "TOTAL PAGE LIMIT REJECTED PRE-ALLOC", TOTAL_PAGE_LIMIT) ||
+        !run_preflight_reject(fixture, space, "1 TIB LOAD RANGE REJECTED PRE-ALLOC", HUGE_LOAD_RANGE) ||
         !run_preflight_reject(fixture, space, "PT_LOAD PAGE OVERLAP REJECTED PRE-ALLOC", PAGE_LEVEL_LOAD_OVERLAP) ||
         !run_preflight_reject(fixture, space, "INITIAL STACK RESERVATION REJECTED PRE-ALLOC", INITIAL_STACK_RESERVATION) ||
         !run_preflight_reject(fixture, space, "EXECUTABLE BSS ENTRY REJECTED PRE-ALLOC", ENTRY_IN_EXECUTABLE_BSS) ||

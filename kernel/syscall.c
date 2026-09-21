@@ -3,6 +3,7 @@
 #include "ipc.h"
 #include "lib.h"
 #include "scheduler.h"
+#include "task.h"
 
 _Static_assert(IPC_MESSAGE_MAX_WORDS == JCOS_IPC_MESSAGE_MAX_WORDS, "Kernel/userspace IPC ABI mismatch");
 
@@ -183,18 +184,15 @@ InterruptFrame *syscall_dispatch(InterruptFrame *frame) {
              * the scheduler. The scheduler-private idle context is a valid
              * successor when this is the final ordinary runnable Thread. */
             if (!thread || !thread->id || !thread->on_run_queue || thread->state != THREAD_STATE_RUNNING ||
-                !scheduler_can_terminate_current()) {
+                !thread->process || thread->process->kernel || !scheduler_can_terminate_current()) {
                 frame->rax = SYSCALL_RESULT_FAILED;
                 return frame;
             }
 
-            /*
-             * Success never returns this user's
-             * frame. The scheduler marks the
-             * current thread DEAD and gives us
-             * the next runnable full frame.
-             */
-            return scheduler_terminate_current_from_interrupt(frame);
+            /* The task layer preserves siblings on a clean thread exit and
+             * records/closes the domain only on its last live thread. It then
+             * hands off without freeing this active stack or return frame. */
+            return task_exit_current_from_interrupt(frame);
         }
 
         default:

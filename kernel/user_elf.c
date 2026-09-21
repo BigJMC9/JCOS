@@ -315,15 +315,17 @@ static bool validate_segments(AddressSpace *space, const VfsNode *file, const El
         load_end[load_count] = page_end;
         ++load_count;
 
-        /* Reject collisions before publishing an image ledger or allocating frames. */
-        for (u64 address = page_first; address < page_end; address += VM_PAGE_SIZE) {
-            if (address_space_query_page(space, address, 0, 0)) return false;
-        }
-
+        /* Bound attacker-controlled work before walking the candidate range.
+         * Validation runs with local interrupts disabled. */
         u64 pages = (page_end - page_first) / VM_PAGE_SIZE;
         if (pages > USER_ELF_MAX_LOAD_PAGES) return false;
         if (total_pages > USER_ELF_MAX_LOAD_PAGES - (u32)pages) return false;
         total_pages += (u32)pages;
+
+        /* Reject collisions before publishing an image ledger or allocating frames. */
+        for (u64 address = page_first; address < page_end; address += VM_PAGE_SIZE) {
+            if (address_space_query_page(space, address, 0, 0)) return false;
+        }
 
         /* Entry must be real executable file bytes, never zero-fill/BSS. */
         if ((segment->flags & ELF64_PF_X) && segment->file_size) {

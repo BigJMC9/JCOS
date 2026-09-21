@@ -5,6 +5,7 @@
 #include "interrupts.h"
 #include "object_storage.h"
 #include "endpoint.h"
+#include "process_exit_queue.h"
 
 static Process g_kernel_process;
 
@@ -29,6 +30,13 @@ u32 process_object_count(void) {
     u32 count = object_storage_count(g_process_storage, PROCESS_STORAGE_CAPACITY);
     process_irq_restore(flags);
     return count;
+}
+
+bool process_storage_in_use(const Process *process) {
+    u64 flags = process_irq_save();
+    bool result = process_storage_live(process);
+    process_irq_restore(flags);
+    return result;
 }
 
 bool process_system_init(AddressSpace *kernel_space) {
@@ -115,6 +123,11 @@ static bool process_destroy_locked(Process *process) {
      * or waiter reservations retain their own storage references. */
     if (endpoint_process_has_open_owned(process->id)) return false;
     if (!address_space_destroy(&process->owned_address_space)) return false;
+    /* The only remaining fallible destructor has committed. A live watch now
+     * belongs to an unpublished/nonterminal incarnation and must be detached
+     * before this Process storage can be reused. */
+    if ((process->exit_queue || process->exit_queue_id) &&
+        !process_exit_queue_unwatch_process(process)) cpu_halt_forever();
     if (!capability_table_destroy(&process->capabilities)) cpu_halt_forever();
     g_process_storage[slot] = 0;
     k_memset(process, 0, sizeof(*process));
@@ -141,6 +154,53 @@ CapabilityTable *process_capabilities(Process *process) {
 u64 process_thread_count(const Process *process) {
     if (!g_initialized || !process_storage_live(process) || !process->initialized) return 0;
     return process->thread_count;
+}
+
+bool process_exit_info(const Process *process, ProcessExitInfo *out) {
+    if (!out) return false;
+    u64 flags = process_irq_save();
+    bool live = g_initialized && process_storage_live(process) && process->initialized;
+    /* The query must not clear the canonical record when its output aliases it. */
+    if (live && out == &process->exit_info) { process_irq_restore(flags); return false; }
+    k_memset(out, 0, sizeof(*out));
+    bool result = live && !process->kernel && process->exit_info.reason != PROCESS_EXIT_NONE;
+    if (result) k_memcpy(out, &process->exit_info, sizeof(*out));
+    process_irq_restore(flags);
+    return result;
+}
+
+bool process_exit_publish(Process *process, const ProcessExitInfo *info) {
+    if (!info) return false;
+    u64 flags = process_irq_save();
+    bool result = false;
+    if (!g_initialized || !process_storage_live(process) || !process->initialized || process->kernel ||
+        process->exit_info.reason != PROCESS_EXIT_NONE || info->process_id != process->id ||
+        !info->thread_id || (info->reason != PROCESS_EXIT_NORMAL && info->reason != PROCESS_EXIT_FAULT &&
+        info->reason != PROCESS_EXIT_TERMINATED)) goto done;
+    /* Validate the still-owned list before publishing: dead threads are retained,
+     * with at most the caller's terminal handoff thread still RUNNING. */
+    Thread *first = process_thread_first(process);
+    if (!first || !process_thread_can_detach(process, first)) goto done;
+    Thread *current = thread_current();
+    bool found = false;
+    for (Thread *t = first; t; t = t->process_next) {
+        if (thread_wait_active(t)) goto done;
+        if (t->id == info->thread_id) found = true;
+        if (t == current) {
+            if (t->id != info->thread_id || t->state != THREAD_STATE_RUNNING || !t->on_run_queue) goto done;
+        } else if (t->state != THREAD_STATE_DEAD || t->on_run_queue || t->run_next ||
+            t->interrupt_context_ready || t->interrupt_rsp) goto done;
+    }
+    if (!found || endpoint_process_has_open_owned(process->id)) goto done;
+    /* Publish into the reserved recovery slot before making the canonical
+     * Process record visible. IRQ exclusion means a woken observer cannot run
+     * until both copies are committed. */
+    if (!process_exit_queue_publish_process(process, info)) goto done;
+    k_memcpy(&process->exit_info, info, sizeof(*info));
+    result = true;
+done:
+    process_irq_restore(flags);
+    return result;
 }
 
 bool process_thread_contains(const Process *process, const Thread *thread) {
@@ -175,6 +235,7 @@ bool process_thread_attach(Process *process, Thread *thread) {
         thread->process != process || process->thread_count == ~0ULL) {
         return false;
     }
+    if (process->exit_info.reason != PROCESS_EXIT_NONE) return false;
     if (process_thread_contains(process, thread)) return false;
     if (thread->process_prev || thread->process_next) return false;
 

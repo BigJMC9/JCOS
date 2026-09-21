@@ -43,6 +43,7 @@ bool vmm_page_map_destroy(VmPageMap *map);
 bool vmm_page_map_collect(VmPageMap *map);
 /* One bounded VMM-owned quarantine slot for a never-linked allocation. */
 bool vmm_reclaim_unlinked_table(void);
+bool vmm_unlinked_table_cleanup_pending(void);
 
 bool vmm_map_page(
     VmPageMap *map, 

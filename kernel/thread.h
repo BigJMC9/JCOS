@@ -22,7 +22,8 @@ typedef enum {
     THREAD_WAIT_NONE = 0,
 
     THREAD_WAIT_IPC_RECEIVE,
-    THREAD_WAIT_IPC_SEND
+    THREAD_WAIT_IPC_SEND,
+    THREAD_WAIT_PROCESS_EXIT
 } ThreadWaitKind;
 
 typedef enum {

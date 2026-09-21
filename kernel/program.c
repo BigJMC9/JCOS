@@ -1,9 +1,11 @@
 #include "program.h"
 
+#include "arch.h"
 #include "interrupts.h"
 #include "lib.h"
 #include "physmap.h"
 #include "pmm.h"
+#include "process_exit_queue.h"
 #include "scheduler.h"
 #include "task.h"
 #include "user_stack.h"
@@ -28,7 +30,8 @@ static bool program_spec_valid(const ProgramLaunchSpec *spec) {
     if (!spec || !spec->file || spec->file->type != VFS_FILE ||
         !spec->file->data || !spec->file->size ||
         spec->startup_grant_count > JCOS_PROGRAM_STARTUP_MAX_CAPABILITIES ||
-        spec->startup_argument_count > JCOS_PROGRAM_STARTUP_MAX_ARGUMENTS) return false;
+        spec->startup_argument_count > JCOS_PROGRAM_STARTUP_MAX_ARGUMENTS ||
+        (spec->exit_queue && !process_exit_queue_storage_in_use(spec->exit_queue))) return false;
 
     for (u32 i = 0; i < spec->startup_grant_count; ++i) {
         const ProgramGrantSpec *grant = &spec->startup_grants[i];
@@ -47,7 +50,8 @@ static bool program_spec_valid(const ProgramLaunchSpec *spec) {
 bool program_instance_needs_cleanup(const ProgramInstance *instance) {
     if (!instance) return false;
     if (instance->process_created || instance->stack_frame_allocated || instance->stack_mapped ||
-        instance->thread_created || instance->published || user_elf_needs_cleanup(&instance->image) ||
+        instance->thread_created || instance->published || instance->unpublished_space ||
+        instance->unpublished_stack || instance->unlinked_table || user_elf_needs_cleanup(&instance->image) ||
         instance->process.id || instance->process.initialized || instance->thread.id) return true;
     for (u32 i = 0; i < JCOS_PROGRAM_STARTUP_MAX_CAPABILITIES; ++i) {
         if (instance->startup_handles[i] != CAPABILITY_INVALID_HANDLE) return true;
@@ -70,7 +74,26 @@ static bool program_threads_dead(const ProgramInstance *instance) {
 static bool program_release(ProgramInstance *instance, bool force) {
     if (!instance) return false;
     if (!program_instance_needs_cleanup(instance)) return true;
-    if (!instance->process_created) return false;
+
+    /* These allocations remain module-owned, but this launch owes their retry.
+     * Reclaim them even when no Process was successfully constructed. */
+    if (instance->unpublished_stack) {
+        if (!thread_reclaim_unpublished_stack()) return false;
+        instance->unpublished_stack = false;
+    }
+    if (instance->unpublished_space) {
+        if (!address_space_reclaim_unpublished()) return false;
+        instance->unpublished_space = false;
+    }
+    if (instance->unlinked_table) {
+        if (!vmm_reclaim_unlinked_table()) return false;
+        instance->unlinked_table = false;
+    }
+    if (!instance->process_created) {
+        if (program_instance_needs_cleanup(instance)) return false;
+        k_memset(instance, 0, sizeof(*instance));
+        return true;
+    }
 
     if (!force && !program_threads_dead(instance)) return false;
     if (!task_quiesce_process(&instance->process)) return false;
@@ -115,19 +138,28 @@ static bool program_release(ProgramInstance *instance, bool force) {
 }
 
 bool program_reap(ProgramInstance *instance) {
-    return program_release(instance, false);
+    u64 flags = program_irq_save();
+    bool released = program_release(instance, false);
+    program_irq_restore(flags);
+    return released;
 }
 
 bool program_terminate(ProgramInstance *instance) {
-    return program_release(instance, true);
+    u64 flags = program_irq_save();
+    bool released = program_release(instance, true);
+    program_irq_restore(flags);
+    return released;
 }
 
 u64 program_launch_count(void) {
     return g_program_launch_count;
 }
 
-bool program_launch(ProgramInstance *instance, const ProgramLaunchSpec *spec) {
+static bool program_launch_locked(ProgramInstance *instance, const ProgramLaunchSpec *spec) {
     if (!instance || program_instance_needs_cleanup(instance) || !program_spec_valid(spec)) return false;
+    /* Do not adopt another caller's retained constructor allocation. */
+    if (address_space_creation_cleanup_pending() || thread_creation_cleanup_pending() ||
+        vmm_unlinked_table_cleanup_pending()) return false;
 
     k_memset(instance, 0, sizeof(*instance));
     instance->stack_frame = FRAME_INVALID;
@@ -181,20 +213,44 @@ bool program_launch(ProgramInstance *instance, const ProgramLaunchSpec *spec) {
 
     if (!thread_prepare_user(&instance->thread, instance->image.entry, initial_rsp)) goto fail;
 
-    /* Publication commit. Keep the run queue indivisible with respect to PIT
-     * preemption; no fallible ownership operation follows a successful add. */
-    u64 flags = program_irq_save();
+    /* Reserve terminal-event storage before execution becomes observable. This
+     * is the final fallible ownership step; IRQ exclusion closes the gap between
+     * watch registration and scheduler publication. */
+    if (spec->exit_queue && !process_exit_queue_watch(spec->exit_queue, &instance->process)) goto fail;
+
+    /* Publication commit, still under the transaction's IRQ exclusion.
+     * No fallible ownership operation follows a successful add. */
     bool published = scheduler_add(&instance->thread);
     if (published) {
         instance->published = true;
         if (g_program_launch_count != ~0ULL) ++g_program_launch_count;
     }
-    program_irq_restore(flags);
     if (!published) goto fail;
 
     return true;
 
 fail:
+    /* A launch that never published is not a process-exit event. If the final
+     * scheduler publication fails after watch reservation, detach it before
+     * force-quiesce can classify the unpublished thread as TERMINATED. */
+    if (!instance->published && instance->process_created &&
+        (instance->process.exit_queue || instance->process.exit_queue_id) &&
+        !process_exit_queue_unwatch_process(&instance->process)) cpu_halt_forever();
+
+    /* Admission required empty slots and IRQ exclusion prevents an unrelated
+     * constructor from intervening before we attribute retained ownership. */
+    instance->unpublished_space = address_space_creation_cleanup_pending();
+    instance->unpublished_stack = thread_creation_cleanup_pending();
+    instance->unlinked_table = vmm_unlinked_table_cleanup_pending();
     (void)program_release(instance, true);
     return false;
+}
+
+bool program_launch(ProgramInstance *instance, const ProgramLaunchSpec *spec) {
+    /* UP-only transaction: no waits or callbacks; preserve the caller's IF.
+     * ELF validation bounds page work before walking candidate mappings. */
+    u64 flags = program_irq_save();
+    bool launched = program_launch_locked(instance, spec);
+    program_irq_restore(flags);
+    return launched;
 }

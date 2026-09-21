@@ -5,6 +5,7 @@
 #include "lib.h"
 #include "physmap.h"
 #include "pmm_test.h"
+#include "process_exit_queue.h"
 #include "scheduler.h"
 #include "supervisor.h"
 #include "task.h"
@@ -86,6 +87,7 @@ UserTestFixture *user_fixture_begin(const char *label) {
     f->process_count = process_object_count();
     f->thread_count = thread_object_count();
     f->space_count = address_space_object_count();
+    f->exit_queue_count = process_exit_queue_object_count();
     f->kernel_thread_count = process_thread_count(f->kernel_process);
     f->kernel_head = f->kernel_process->thread_head;
     f->kernel_tail = f->kernel_process->thread_tail;
@@ -379,6 +381,7 @@ bool user_fixture_baselines(const UserTestFixture *f) {
         process_kernel() != f->kernel_process || !user_fixture_hooks_idle() || !rollback_slots_idle() ||
         pmm_stats().free_pages != f->free_pages || process_object_count() != f->process_count ||
         thread_object_count() != f->thread_count || address_space_object_count() != f->space_count ||
+        process_exit_queue_object_count() != f->exit_queue_count ||
         process_thread_count(f->kernel_process) != f->kernel_thread_count ||
         f->kernel_process->thread_head != f->kernel_head || f->kernel_process->thread_tail != f->kernel_tail ||
         capability_table_count(f->kernel_caps) != f->kernel_cap_count ||

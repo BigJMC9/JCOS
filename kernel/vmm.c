@@ -115,6 +115,13 @@ void vmm_test_clear_faults(void) {
 
 frame_t vmm_test_unlinked_table(void) { return g_unlinked_table; }
 
+bool vmm_unlinked_table_cleanup_pending(void) {
+    u64 flags = vmm_irq_save();
+    bool pending = g_unlinked_table != FRAME_INVALID;
+    vmm_irq_restore(flags);
+    return pending;
+}
+
 bool vmm_reclaim_unlinked_table(void) {
     u64 flags = vmm_irq_save();
     bool result = g_unlinked_table == FRAME_INVALID || frame_free(g_unlinked_table);

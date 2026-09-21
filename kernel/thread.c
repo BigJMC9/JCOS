@@ -421,7 +421,8 @@ bool thread_create(Thread *thread, Process *process) {
 }
 
 static bool wait_kind_valid(ThreadWaitKind kind) {
-    return kind == THREAD_WAIT_IPC_RECEIVE || kind == THREAD_WAIT_IPC_SEND;
+    return kind == THREAD_WAIT_IPC_RECEIVE || kind == THREAD_WAIT_IPC_SEND ||
+        kind == THREAD_WAIT_PROCESS_EXIT;
 }
 
 static bool wait_terminal(ThreadWaitResult result) {

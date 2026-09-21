@@ -1,4 +1,5 @@
 #include "program_launch_test.h"
+#include "program_rollback_test.h"
 
 #include "address_space.h"
 #include "capability.h"
@@ -104,6 +105,7 @@ static bool baseline_matches(const ProgramTestBaseline *baseline) {
 }
 
 static bool cleanup_fixture(void) {
+    if (!program_rollback_test_cleanup()) return false;
     if (program_instance_needs_cleanup(&g_program) && !program_terminate(&g_program)) return false;
 
     Process *kernel = process_kernel();
@@ -280,6 +282,8 @@ void program_launch_test_run(void) {
     capture_baseline(&fixture);
     ProgramLaunchSpec spec;
     make_spec(&spec, file);
+
+    if (!program_rollback_test_run(&spec)) goto done;
 
     u64 launches_before = program_launch_count();
     ProgramLaunchSpec unauthorized;

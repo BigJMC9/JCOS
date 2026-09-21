@@ -9,6 +9,7 @@
 #include "scheduler.h"
 #include "timer.h"
 #include "gdt.h"
+#include "task.h"
 
 typedef struct PACKED {
     u16 offset_low;
@@ -112,17 +113,6 @@ void exception_write_name(u64 vector) {
     }
 }
 
-static bool user_exception_is_terminable(u64 vector) {
-    /*
-     * Start conservatively.
-     *
-     * #UD proves isolation now.
-     * #NM enforces the R4 no-FP/SIMD userspace profile.
-     * #PF is the next important case.
-     */
-    return vector == 6ULL || vector == 7ULL || vector == 14ULL;
-}
-
 static InterruptFrame *user_exception_terminate(InterruptFrame *frame) {
     interrupts_disable();
 
@@ -167,10 +157,10 @@ static InterruptFrame *user_exception_terminate(InterruptFrame *frame) {
         terminal_write("CR2: "); terminal_write_hex(g_last_user_fault.cr2); terminal_putchar('\n'); 
     }
 
-    terminal_writeln("ACTION: THREAD TERMINATED");
+    terminal_writeln("ACTION: PROCESS TERMINATED (RESOURCES RETAINED FOR REAP)");
     terminal_set_color(terminal_default_color());
 
-    return scheduler_terminate_current_from_interrupt(frame);
+    return task_fault_current_from_interrupt(frame, g_last_user_fault.cr2);
 }
 
 static NORETURN void exception_panic(const InterruptFrame *frame) {
@@ -250,12 +240,12 @@ InterruptFrame *interrupt_dispatch(InterruptFrame *frame) {
     ++g_counts[vector];
 
     if (frame->vector < 32) {
-        if (interrupt_from_user(frame) && user_exception_is_terminable(frame->vector)) {
+        if (interrupt_from_user(frame) && task_user_fault_supported(frame->vector)) {
             Thread *current = thread_current();
 
             /* Scheduler-managed user threads can be isolated even when the
              * scheduler-private idle context is their only successor. */
-            if (current && scheduler_can_terminate_current()) {
+            if (current && current->process && !current->process->kernel && scheduler_can_terminate_current()) {
                 return user_exception_terminate(frame);
             }
         }

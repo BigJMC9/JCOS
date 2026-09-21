@@ -2,6 +2,8 @@
 #include "../include/program_startup.h"
 #include "../include/supervisor_protocol.h"
 
+static int g_hang_on_shutdown;
+
 static void clear_message(JcosIpcMessage *message) {
     if (!message) return;
 
@@ -23,6 +25,10 @@ static int startup_valid(const JcosProgramStartup *startup) {
         startup->capabilities[1] != JCOS_CAPABILITY_INVALID_HANDLE;
 }
 
+static __attribute__((noreturn)) void hang_forever(void) {
+    for (;;) __asm__ volatile ("" : : : "memory");
+}
+
 __attribute__((noreturn))
 void jcos_main(const JcosProgramStartup *startup) {
     if (!startup_valid(startup)) jcos_thread_exit();
@@ -41,12 +47,6 @@ void jcos_main(const JcosProgramStartup *startup) {
 
         if (!request.word_count) jcos_thread_exit();
         if (request.words[0] == SUPERVISOR_MESSAGE_PING) {
-            /*
-             * PING requires:
-             *
-             * word0 = command
-             * word1 = cookie
-             */
             if (request.word_count < 2U) jcos_thread_exit();
 
             JcosIpcMessage reply;
@@ -61,7 +61,24 @@ void jcos_main(const JcosProgramStartup *startup) {
             continue;
         }
 
+        if (request.words[0] == SUPERVISOR_MESSAGE_DIAGNOSTIC_ARM_SHUTDOWN_HANG) {
+            JcosIpcMessage reply;
+            clear_message(&reply);
+            g_hang_on_shutdown = 1;
+            reply.word_count = 1U;
+            reply.words[0] = SUPERVISOR_REPLY_DIAGNOSTIC_ARMED;
+            if (!jcos_ipc_send_blocking(reply_cap, &reply)) jcos_thread_exit();
+            continue;
+        }
+
+        if (request.words[0] == SUPERVISOR_MESSAGE_DIAGNOSTIC_FAULT) {
+            __asm__ volatile ("ud2");
+            __builtin_unreachable();
+        }
+
         if (request.words[0] == SUPERVISOR_MESSAGE_SHUTDOWN) {
+            if (g_hang_on_shutdown) hang_forever();
+
             JcosIpcMessage reply;
             clear_message(&reply);
             reply.word_count = 1U;

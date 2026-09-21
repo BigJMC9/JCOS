@@ -8,6 +8,8 @@
 #include "vfs.h"
 #include "../include/program_startup.h"
 
+struct ProcessExitQueue;
+
 typedef struct {
     const CapabilityTable *authority_table;
     CapabilityHandle authority_handle;
@@ -18,6 +20,9 @@ typedef struct {
 
 typedef struct {
     const VfsNode *file;
+    /* Optional terminal observer. Registration commits inside launch after all
+     * other fallible setup and before run-queue publication. */
+    struct ProcessExitQueue *exit_queue;
     ProgramGrantSpec startup_grants[JCOS_PROGRAM_STARTUP_MAX_CAPABILITIES];
     u32 startup_grant_count;
     u64 startup_arguments[JCOS_PROGRAM_STARTUP_MAX_ARGUMENTS];
@@ -35,6 +40,9 @@ typedef struct {
     bool stack_mapped;
     bool thread_created;
     bool published;
+    bool unpublished_space;
+    bool unpublished_stack;
+    bool unlinked_table;
 } ProgramInstance;
 
 /*
@@ -52,9 +60,21 @@ typedef struct {
  * is always zero. Unsupported ELF/runtime requirements remain rejected by the
  * existing user_elf loader.
  *
+ * An optional exit_queue reserves one durable terminal-event slot before the
+ * new thread becomes runnable; failed/unpublished launches remove that watch
+ * and never masquerade as a service exit.
+ *
  * Successful launch publishes exactly one initial READY thread as the final
  * commit. false may retain owned rollback state when a lower-level cleanup
- * operation itself fails; retry with program_terminate().
+ * operation itself fails; retry with program_terminate(). Module-owned scratch
+ * allocations are part of that retry obligation, even without a live Process.
+ * Zero-initialize storage before first use; do not move/copy/reuse an instance
+ * until needs_cleanup() is false. Retry its scratch obligations through this
+ * API, not by independently reclaiming/reusing the module quarantine slots.
+ *
+ * Launch/release are serialized by local IRQ exclusion in the UP profile and
+ * never wait for a service. Pre-existing constructor quarantine blocks a new
+ * launch without adopting another caller's resources. SMP/NMI use is unsupported.
  */
 bool program_launch(ProgramInstance *instance, const ProgramLaunchSpec *spec);
 

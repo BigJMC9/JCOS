@@ -1,0 +1,7 @@
+#ifndef JA_OS_SERVICE_RECOVERY_ACCEPTANCE_TEST_H
+#define JA_OS_SERVICE_RECOVERY_ACCEPTANCE_TEST_H
+
+void service_recovery_acceptance_test_run(void);
+void service_recovery_acceptance_test_cleanup_run(void);
+
+#endif
