@@ -51,6 +51,8 @@ typedef struct {
     u64 data_end;
 } KernelImageLayout;
 
+static u8 g_storage_probe[4096];
+
 static bool map_physical_direct_map(VmPageMap *map, const BootInfo *boot) {
     if (!map ||
         !boot ||
@@ -411,20 +413,38 @@ void kernel_main(BootInfo *boot) {
     bool gpt_ok = false;
     bool partitions_ok = false;
     bool fat32_ok = false;
-    BlockDevice *boot_disk = block_find("sda");
+    BlockDevice *gpt_disk = 0;
+    BlockDevice *ahci_probe_disk = 0;
+
+    /*
+     * Discover storage by capability/type rather than assuming that the first
+     * AHCI disk is both "sda" and the disk whose GPT we want. Keep the raw
+     * device count because GPT registration adds partition BlockDevices.
+     */
+    u32 raw_block_devices = block_device_count();
+    for (u32 i = 0; i < raw_block_devices; ++i) {
+        BlockDevice *candidate = block_device(i);
+        if (!candidate || candidate->type == BLOCK_DEVICE_PARTITION) continue;
+
+        if (!ahci_probe_disk && candidate->type == BLOCK_DEVICE_AHCI) {
+            ahci_probe_disk = candidate;
+        }
+
+        if (!gpt_ok && gpt_probe(candidate)) {
+            gpt_ok = true;
+            gpt_disk = candidate;
+        }
+    }
 
     splash_update(boot_stage, BOOT_STAGE_COUNT, "Discovering GPT partitions");
-    if (boot_disk) {
-        gpt_ok = gpt_probe(boot_disk);
-        if (gpt_ok) {
-            partitions_ok = gpt_register_partitions();
-        }
+    if (gpt_disk) {
+        partitions_ok = gpt_register_partitions();
     }
     ++boot_stage;
 
-    splash_update(boot_stage, BOOT_STAGE_COUNT, "Probing FAT32 boot filesystem");
+    splash_update(boot_stage, BOOT_STAGE_COUNT, "Probing FAT32 EFI system partition");
     if (partitions_ok) {
-        BlockDevice *esp = block_find("sda1");
+        BlockDevice *esp = gpt_efi_system_partition();
         if (esp) {
             fat32_ok = fat32_probe(esp);
         }
@@ -543,17 +563,21 @@ void kernel_main(BootInfo *boot) {
                     if (paging_ok && ahci_ok) {
                         if (!ahci_enable_phys_map_access()) {
                             paging_ok = false;
-                        } else if (!boot_disk || boot_disk->block_size != 512U) {
-                            /* AHCI claimed initialization succeeded, so the expected SATA block device should already exist. */
+                        } else if (!ahci_probe_disk ||
+                            ahci_probe_disk->block_size > sizeof(g_storage_probe)) {
+                            /*
+                             * AHCI claimed initialization succeeded, so at least
+                             * one registered SATA block device should be usable.
+                             */
                             paging_ok = false;
-
                         } else {
                             /*
-                            * Switch CPU-side AHCI DMA access to physmap,
-                            * then perform a real DMA read as a runtime probe.
-                            */
-                            u8 sector_probe[512];
-                            if (!block_read(boot_disk, 0, 1, sector_probe)) {
+                             * Switch CPU-side AHCI DMA access to physmap, then
+                             * perform a real DMA read using the disk's reported
+                             * logical sector size (512 through 4096 supported).
+                             */
+                            if (!block_read(ahci_probe_disk, 0, 1,
+                                    g_storage_probe)) {
                                 paging_ok = false;
                             }
                         }
