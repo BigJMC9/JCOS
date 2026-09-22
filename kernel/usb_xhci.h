@@ -12,6 +12,10 @@ typedef struct {
 	u32 detail;
 	u32 port;
 	u32 protocol_major;
+	u32 speed_id;
+	u32 completion_code;
+	u32 event_slot;
+	u32 event_endpoint;
 } XhciFailureRecord;
 
 bool xhci_init(VmPageMap *kernel_map);
