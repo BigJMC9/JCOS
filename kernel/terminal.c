@@ -165,7 +165,7 @@ static void hide_cursor_overlay(void) {
 }
 
 static void show_cursor_overlay(void) {
-    if (!g_cursor_enabled || g_cursor_visible) return;
+    if (!g_render_enabled || !g_cursor_enabled || g_cursor_visible) return;
 
     if (g_ready && line_visible(g_cursor_line) && g_cursor_column < g_columns) {
         u32 row = visible_row(g_cursor_line);
@@ -273,7 +273,7 @@ void terminal_clear(void) {
     g_view_top = 0;
     g_follow_output = true;
 
-    if (g_ready) framebuffer_fill(g_background);
+    if (g_ready && g_render_enabled) framebuffer_fill(g_background);
     serial_clear();
 
     g_cursor_enabled = cursor_was_enabled;
