@@ -35,6 +35,9 @@ static bool g_ready;
 static bool g_cursor_enabled;
 static bool g_cursor_visible;
 
+static TerminalLineObserver g_line_observer;
+static void *g_line_observer_context;
+
 static u32 line_slot(u64 line) {
     return (u32)(line % TERMINAL_SCROLLBACK_LINES);
 }
@@ -129,13 +132,26 @@ static void render_viewport(void) {
 }
 
 static u64 live_view_top(void) {
-    u64 top = 0;
+    if (!g_rows) return g_first_line;
 
-    if (g_last_line + 1ULL > (u64)g_rows)
-        top = g_last_line + 1ULL - (u64)g_rows;
-
+    /*
+     * Live output advances one viewport at a time. This avoids copying nearly
+     * the entire framebuffer for every newline after the first screenful.
+     * Scrollback remains line-addressable in g_chars; only the live viewport
+     * presentation changes.
+     */
+    u64 top = (g_cursor_line / (u64)g_rows) * (u64)g_rows;
     if (top < g_first_line) top = g_first_line;
     return top;
+}
+
+static void notify_line_observer(u64 line) {
+    if (!g_line_observer || !line_retained(line)) return;
+
+    u32 slot = line_slot(line);
+    u32 length = g_columns;
+    while (length && !g_chars[slot][length - 1U]) --length;
+    g_line_observer(g_chars[slot], length, g_line_observer_context);
 }
 
 static void hide_cursor_overlay(void) {
@@ -189,6 +205,7 @@ static void retain_new_line(u64 line) {
 static void advance_line(void) {
     bool cursor_was_visible = g_cursor_visible;
     hide_cursor_overlay();
+    notify_line_observer(g_cursor_line);
 
     ++g_cursor_line;
     g_cursor_column = 0;
@@ -197,10 +214,7 @@ static void advance_line(void) {
     if (g_follow_output) {
         u64 new_top = live_view_top();
 
-        if (new_top == g_view_top + 1ULL && g_rows > 1U) {
-            framebuffer_scroll_up(g_cell_height, g_background);
-            g_view_top = new_top;
-        } else if (new_top != g_view_top) {
+        if (new_top != g_view_top) {
             g_view_top = new_top;
             render_viewport();
         }
@@ -457,6 +471,42 @@ bool terminal_cursor_visible(void) {
     return g_cursor_enabled && g_cursor_visible;
 }
 
+void terminal_set_line_observer(TerminalLineObserver observer, void *context) {
+    g_line_observer = observer;
+    g_line_observer_context = context;
+}
+
+void terminal_scrollback_line_up(void) {
+    if (!g_ready || g_view_top <= g_first_line) return;
+
+    hide_cursor_overlay();
+    --g_view_top;
+    g_follow_output = false;
+    render_viewport();
+}
+
+void terminal_scrollback_line_down(void) {
+    if (!g_ready) return;
+
+    u64 bottom = live_view_top();
+    if (g_view_top >= bottom) {
+        g_view_top = bottom;
+        g_follow_output = true;
+        render_viewport();
+        return;
+    }
+
+    bool cursor_should_show = g_cursor_enabled && g_cursor_visible;
+    hide_cursor_overlay();
+
+    ++g_view_top;
+    if (g_view_top > bottom) g_view_top = bottom;
+    g_follow_output = g_view_top == bottom;
+    render_viewport();
+
+    if (g_follow_output && cursor_should_show) show_cursor_overlay();
+}
+
 void terminal_scrollback_page_up(void) {
     if (!g_ready || g_view_top <= g_first_line) return;
 
@@ -481,6 +531,7 @@ void terminal_scrollback_page_down(void) {
         return;
     }
 
+    bool cursor_should_show = g_cursor_enabled && g_cursor_visible;
     hide_cursor_overlay();
 
     u64 step = g_rows > 1U ? (u64)(g_rows - 1U) : 1ULL;
@@ -490,8 +541,7 @@ void terminal_scrollback_page_down(void) {
     g_follow_output = g_view_top == bottom;
     render_viewport();
 
-    if (g_follow_output && g_cursor_enabled && g_cursor_visible)
-        show_cursor_overlay();
+    if (g_follow_output && cursor_should_show) show_cursor_overlay();
 }
 
 void terminal_scrollback_to_bottom(void) {
