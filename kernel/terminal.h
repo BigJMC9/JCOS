@@ -3,6 +3,8 @@
 
 #include "types.h"
 
+typedef void (*TerminalLineObserver)(const char *line, u32 length, void *context);
+
 bool terminal_init(void);
 void terminal_clear(void);
 void terminal_redraw(void);
@@ -25,6 +27,10 @@ void terminal_cursor_set_visible(bool visible);
 void terminal_cursor_toggle(void);
 bool terminal_cursor_visible(void);
 
+void terminal_set_line_observer(TerminalLineObserver observer, void *context);
+
+void terminal_scrollback_line_up(void);
+void terminal_scrollback_line_down(void);
 void terminal_scrollback_page_up(void);
 void terminal_scrollback_page_down(void);
 void terminal_scrollback_to_bottom(void);
