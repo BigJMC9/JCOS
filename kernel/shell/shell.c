@@ -2884,15 +2884,23 @@ static void command_processtest(void) {
     terminal_write_u64(before.free_pages);
     terminal_putchar('\n');
 
-    /* Verify the adopted kernel process. */
+    /* Verify the adopted kernel process. Persistent R7 infrastructure
+     * threads (console/archive portals) also belong to the kernel process, so
+     * the kernel thread count is a runtime baseline rather than a fixed 1. */
     Process *kernel = process_kernel();
+    Thread *main_thread = thread_current();
+    u64 kernel_threads_before = kernel ? process_thread_count(kernel) : 0ULL;
 
     bool kernel_ok = (kernel && kernel->initialized && kernel->id == 1ULL && kernel->kernel &&
         !kernel->owns_address_space && process_address_space(kernel) == address_space_kernel() &&
-        process_thread_count(kernel) == 1ULL);
+        kernel_threads_before >= 1ULL && main_thread && main_thread->process == kernel &&
+        process_thread_contains(kernel, main_thread));
 
     terminal_write("  KERNEL PROCESS: ");
     terminal_writeln(kernel_ok ? "PASS" : "FAILED");
+    terminal_write("  KERNEL THREADS BEFORE: ");
+    terminal_write_u64(kernel_threads_before);
+    terminal_putchar('\n');
 
     CapabilityTable *kernel_caps = process_capabilities(kernel);
     bool kernel_caps_ok = kernel_caps != 0;
@@ -2903,8 +2911,9 @@ static void command_processtest(void) {
     terminal_write_u64(kernel_caps_before);
     terminal_putchar('\n');
 
-    /* Kernel process may never be destroyed. */
-    bool kernel_destroy_rejected = kernel_ok && !process_destroy(kernel);
+    /* Kernel process may never be destroyed. Test that invariant
+     * independently of the descriptive preflight above. */
+    bool kernel_destroy_rejected = kernel && !process_destroy(kernel);
     terminal_write("  KERNEL DESTROY REJECTED: ");
     terminal_writeln(kernel_destroy_rejected ? "PASS" : "FAILED");
 
@@ -3018,6 +3027,14 @@ static void command_processtest(void) {
     terminal_write("  KERNEL CAPS STABLE: ");
     terminal_writeln(kernel_caps_stable ? "PASS" : "FAILED");
 
+    u64 kernel_threads_after = kernel ? process_thread_count(kernel) : 0ULL;
+    bool kernel_threads_stable = kernel_threads_after == kernel_threads_before;
+    terminal_write("  KERNEL THREADS AFTER: ");
+    terminal_write_u64(kernel_threads_after);
+    terminal_putchar('\n');
+    terminal_write("  KERNEL THREAD COUNT RESTORED: ");
+    terminal_writeln(kernel_threads_stable ? "PASS" : "FAILED");
+
     bool double_destroy_rejected = destroyed && !process_destroy(&process);
     terminal_write("  DOUBLE DESTROY REJECTED: ");
     terminal_writeln(double_destroy_rejected ? "PASS" : "FAILED");
@@ -3034,7 +3051,8 @@ static void command_processtest(void) {
         address_space_ok && caps_empty && cap_inserted && cap_lookup && live_cap_destroy_rejected &&
         preserved && revoked && stale_rejected && empty_before_destroy && destroyed && cleared &&
         double_destroy_rejected && frames_restored && owned_thread_created && thread_owner_ok &&
-        live_thread_destroy_rejected && owned_thread_destroyed && thread_count_zero && kernel_caps_stable);
+        live_thread_destroy_rejected && owned_thread_destroyed && thread_count_zero && kernel_caps_stable &&
+        kernel_threads_stable);
 
     terminal_set_color(pass ? terminal_accent_color() : terminal_error_color());
     terminal_write("PROCESS TEST: ");
