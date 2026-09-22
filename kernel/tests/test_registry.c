@@ -41,6 +41,7 @@
 #include "user_runtime_block_test.h"
 #include "user_runtime_test.h"
 #include "userspace_shell_test.h"
+#include "usb_host_test.h"
 #include "user_test_fixture.h"
 #include "vmm_reclaim_test.h"
 
@@ -123,6 +124,8 @@ static void kernel_test_registry_init(void) {
         KERNEL_TEST_ACCEPTANCE, boot_archive_policy_test_run, boot_archive_policy_test_cleanup_run);
     kernel_test_add_live("launch-userspace", "Ring3 pathname policy with generic foreground extent launch",
         KERNEL_TEST_ACCEPTANCE, foreground_launch_policy_test_run, foreground_launch_policy_test_cleanup_run);
+    kernel_test_add("usb-host", "xHCI capability model and USB Boot HID descriptor parsing",
+        KERNEL_TEST_ACCEPTANCE, usb_host_test_run, 0);
     kernel_test_add_live("service-policy", "Ring3 service naming/executable replacement over generic extent broker",
         KERNEL_TEST_ACCEPTANCE, service_policy_test_run, service_policy_test_cleanup_run);
     kernel_test_add("user-ipc-cancel", "Ring3 IPC cancellation and close", KERNEL_TEST_USERSPACE, user_ipc_cancel_test_run, user_fixture_cleanup_retry_run);
