@@ -371,12 +371,14 @@ ShellEditorResult shell_editor_handle(ShellEditor *editor, const KeyEvent *event
     if (!editor || !event || !event->pressed) return SHELL_EDITOR_CONTINUE;
 
     if (event->key == KEY_PAGE_UP) {
-        terminal_scrollback_page_up();
+        if (event->ctrl) terminal_scrollback_line_up();
+        else terminal_scrollback_page_up();
         return SHELL_EDITOR_CONTINUE;
     }
 
     if (event->key == KEY_PAGE_DOWN) {
-        terminal_scrollback_page_down();
+        if (event->ctrl) terminal_scrollback_line_down();
+        else terminal_scrollback_page_down();
         return SHELL_EDITOR_CONTINUE;
     }
 
