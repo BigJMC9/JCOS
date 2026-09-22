@@ -6613,7 +6613,8 @@ static void shell_print_help(const char *topic) {
 
     terminal_writeln("\nUSE help COMMAND FOR DETAILS.");
     terminal_writeln("USE test list FOR AVAILABLE DIAGNOSTICS.");
-    terminal_writeln("KEYS: UP/DOWN HISTORY, LEFT/RIGHT EDIT, HOME/END, PGUP/PGDN SCROLL.");
+    terminal_writeln("KEYS: UP/DOWN HISTORY, LEFT/RIGHT EDIT, HOME/END, PGUP/PGDN PAGE SCROLL.");
+    terminal_writeln("      CTRL+PGUP/PGDN SCROLL ONE LINE.");
     terminal_writeln("CLIPBOARD: SHIFT+ARROWS SELECT, CTRL+SHIFT+C/X/V COPY/CUT/PASTE.");
 }
 
