@@ -6,6 +6,8 @@
 #include "pmm.h"
 #include "physmap.h"
 #include "serial.h"
+#include "usb_core.h"
+#include "usb_xhci_model.h"
 
 #define XHCI_CLASS 0x0CU
 #define XHCI_SUBCLASS 0x03U
@@ -81,7 +83,6 @@
 #define USB_REQ_SET_CONFIGURATION 9U
 #define USB_DESC_DEVICE 1U
 #define USB_DESC_CONFIGURATION 2U
-#define USB_CLASS_HID 3U
 
 typedef struct PACKED {
     u64 parameter;
@@ -252,7 +253,7 @@ static void *dma_page(u64 *physical) {
 }
 
 static bool setup_scratchpads(u32 hcs2) {
-    u32 count = (((hcs2 >> 21) & 0x1FU) << 5) | ((hcs2 >> 27) & 0x1FU);
+    u32 count = xhci_hcs2_scratchpad_count(hcs2);
     g_xhci.scratchpad_count = count;
 
     u64 *dcbaa = (u64 *)phys_to_virt(g_xhci.dcbaa_phys);
@@ -548,7 +549,7 @@ static bool wait_completion(u32 type, u32 *slot_out) {
                     continue;
                 }
 
-                if (completion == 1U) return true;
+                if (xhci_completion_code_ok(completion, false)) return true;
 
                 /*
                  * An IN data stage can report Short Packet before the Status
@@ -628,12 +629,6 @@ static bool control_transfer(u8 request, u8 request_type, u16 value,
     return wait_completion(TRB_TRANSFER_EVENT, 0);
 }
 
-static u16 default_ep0_packet_size(u8 speed, bool superspeed) {
-    if (superspeed) return 512U;
-    if (speed == 1U || speed == 3U) return 64U; /* full/high speed */
-    return 8U; /* low speed */
-}
-
 static u8 endpoint_interval(u8 speed, u8 b_interval) {
     if (speed <= 2U) {
         u32 interval = 3U;
@@ -655,12 +650,14 @@ static bool configure_keyboard(u8 endpoint_address, u8 interval, u16 max_packet,
                                u8 transactions, u8 speed) {
     u8 *input = (u8 *)phys_to_virt(g_xhci.input_context_phys);
     u32 *control = (u32 *)(void *)input;
-    u32 *slot = (u32 *)(void *)(input + g_xhci.context_size);
-    u32 *ep0 = (u32 *)(void *)(input + g_xhci.context_size * 2U);
+    u32 *slot = (u32 *)(void *)(input +
+        xhci_context_offset(g_xhci.context_size, 1U));
+    u32 *ep0 = (u32 *)(void *)(input +
+        xhci_context_offset(g_xhci.context_size, 2U));
     u32 endpoint_id = (u32)(endpoint_address & 0x0FU) * 2U +
         ((endpoint_address & 0x80U) ? 1U : 0U);
     u32 *ep = (u32 *)(void *)(input +
-        g_xhci.context_size * (endpoint_id + 1U));
+        xhci_context_offset(g_xhci.context_size, endpoint_id + 1U));
     g_xhci.endpoint_id = endpoint_id;
     /*
      * Configure Endpoint requires A0 (Slot) plus the endpoint being added.
@@ -701,8 +698,10 @@ static void submit_keyboard_report(void) {
 static void prepare_address_context(u8 speed) {
     u8 *input = (u8 *)phys_to_virt(g_xhci.input_context_phys);
     u32 *control = (u32 *)(void *)input;
-    u32 *slot = (u32 *)(void *)(input + g_xhci.context_size);
-    u32 *ep0 = (u32 *)(void *)(input + g_xhci.context_size * 2U);
+    u32 *slot = (u32 *)(void *)(input +
+        xhci_context_offset(g_xhci.context_size, 1U));
+    u32 *ep0 = (u32 *)(void *)(input +
+        xhci_context_offset(g_xhci.context_size, 2U));
     control[1] = (1U << 0) | (1U << 1);
     slot[0] = ((u32)speed << 20) | (1U << 27);
     slot[1] = (u32)(g_xhci.port + 1U) << 16;
@@ -715,7 +714,8 @@ static void prepare_address_context(u8 speed) {
 static bool update_ep0_context(void) {
     u8 *input = (u8 *)phys_to_virt(g_xhci.input_context_phys);
     u32 *control = (u32 *)(void *)input;
-    u32 *ep0 = (u32 *)(void *)(input + g_xhci.context_size * 2U);
+    u32 *ep0 = (u32 *)(void *)(input +
+        xhci_context_offset(g_xhci.context_size, 2U));
     control[0] = 0;
     control[1] = 1U << 1;
     ep0[1] = ((u32)g_xhci.packet_size << 16) | (4U << 3);
@@ -724,34 +724,6 @@ static bool update_ep0_context(void) {
     ep0[4] = 8U;
     return command(TRB_EVALUATE_CONTEXT, g_xhci.input_context_phys,
         g_xhci.slot, 0);
-}
-
-static bool find_keyboard_endpoint(const u8 *descriptor, u16 length, u8 *interface_number,
-                                   u8 *address, u8 *interval, u16 *packet,
-                                   u8 *transactions) {
-    bool hid_interface = false;
-    u8 current_interface = 0;
-    for (u16 offset = 0; offset + 2U <= length;) {
-        u8 size = descriptor[offset];
-        if (size < 2U || offset + size > length) return false;
-        if (descriptor[offset + 1U] == 4U) {
-            hid_interface = size >= 9U && descriptor[offset + 5U] == USB_CLASS_HID &&
-                descriptor[offset + 6U] == 1U && descriptor[offset + 7U] == 1U;
-            if (hid_interface) current_interface = descriptor[offset + 2U];
-        }
-        if (hid_interface && descriptor[offset + 1U] == 5U && size >= 7U &&
-            (descriptor[offset + 2U] & 0x80U) && (descriptor[offset + 3U] & 0x03U) == 0x03U) {
-            *interface_number = current_interface;
-            *address = descriptor[offset + 2U];
-            u16 packet_encoding = descriptor[offset + 4U] | ((u16)descriptor[offset + 5U] << 8);
-            *packet = packet_encoding & 0x07FFU;
-            *transactions = (u8)(((packet_encoding >> 11) & 0x03U) + 1U);
-            *interval = descriptor[offset + 6U];
-            return true;
-        }
-        offset += size;
-    }
-    return false;
 }
 
 static void queue_event(KeyCode key, char character, u8 modifiers) {
@@ -902,8 +874,8 @@ bool xhci_init(VmPageMap *kernel_map) {
     u32 runtime_offset =
         *reg32((u64)g_xhci.mmio, 0x18U) & ~0x1FU;
 
-    g_xhci.max_slots = hcs1 & 0xFFU;
-    g_xhci.max_ports = (hcs1 >> 24) & 0xFFU;
+    g_xhci.max_slots = xhci_hcs1_max_slots(hcs1);
+    g_xhci.max_ports = xhci_hcs1_max_ports(hcs1);
     g_xhci.context_size = (hcc & XHCI_HCC_CSZ) ? 64U : 32U;
     g_xhci.addr64 = (hcc & XHCI_HCC_AC64) != 0;
 
@@ -1024,8 +996,9 @@ bool xhci_init(VmPageMap *kernel_map) {
         connected_port = true;
 
         u8 initial_speed = (u8)((*portsc >> 10) & 0x0FU);
-        bool superspeed =
-            g_xhci.port_protocol[port] >= 3U || initial_speed >= 4U;
+        UsbSpeed usb_speed =
+            xhci_port_usb_speed(initial_speed, g_xhci.port_protocol[port]);
+        bool superspeed = usb_speed == USB_SPEED_SUPER;
 
         if (!reset_port(portsc, superspeed)) {
             xhci_report_port_failure("port reset or enable", port, *portsc);
@@ -1049,7 +1022,9 @@ bool xhci_init(VmPageMap *kernel_map) {
         g_xhci.slot = slot;
 
         u8 speed = (u8)((*portsc >> 10) & 0x0FU);
-        g_xhci.packet_size = default_ep0_packet_size(speed, superspeed);
+        usb_speed = xhci_port_usb_speed(speed, g_xhci.port_protocol[port]);
+        superspeed = usb_speed == USB_SPEED_SUPER;
+        g_xhci.packet_size = usb_initial_ep0_max_packet(usb_speed);
         g_xhci.endpoint_index = 0U;
         g_xhci.transfer_index = 0U;
         g_xhci.transfer_cycle = 1U;
@@ -1116,24 +1091,28 @@ bool xhci_init(VmPageMap *kernel_map) {
             release_current_slot();
             continue;
         }
-        u8 interface_number = 0, endpoint_address = 0, interval = 0, transactions = 1U; u16 max_packet = 0;
-        if (!find_keyboard_endpoint(descriptor, configuration_length, &interface_number,
-                        &endpoint_address, &interval, &max_packet, &transactions)) {
+        UsbBootKeyboardInfo keyboard;
+        if (!usb_find_boot_keyboard(descriptor, configuration_length, &keyboard)) {
             xhci_report_failure("boot keyboard endpoint");
             release_current_slot();
             continue;
         }
-        if (!control_transfer(USB_REQ_SET_CONFIGURATION, 0x00U, descriptor[5], 0, 0, false)) {
+        if (!control_transfer(USB_REQ_SET_CONFIGURATION, 0x00U,
+                keyboard.configuration_value, 0, 0, false)) {
             xhci_report_failure("set configuration");
             release_current_slot();
             continue;
         }
-        if (!control_transfer(USB_REQ_SET_PROTOCOL, 0x21U, 0, interface_number, 0, false)) {
+        if (!control_transfer(USB_REQ_SET_PROTOCOL, 0x21U, 0,
+                keyboard.interface.number, 0, false)) {
             xhci_report_failure("set boot protocol");
             release_current_slot();
             continue;
         }
-        if (!configure_keyboard(endpoint_address, interval, max_packet, transactions,
+        if (!configure_keyboard(keyboard.endpoint.address,
+                    keyboard.endpoint.interval,
+                    keyboard.endpoint.max_packet_size,
+                    keyboard.endpoint.transactions,
                     (u8)((*portsc >> 10) & 0x0FU))) {
             xhci_report_failure("configure keyboard endpoint");
             release_current_slot();
