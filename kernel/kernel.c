@@ -750,6 +750,18 @@ void kernel_main(BootInfo *boot) {
                     terminal_write(" USB");
                     terminal_write_u64(failure->protocol_major);
                 }
+                if (failure->speed_id) {
+                    terminal_write(" SPEED=");
+                    terminal_write_u64(failure->speed_id);
+                }
+            }
+            if (failure->completion_code) {
+                terminal_write(" CC=");
+                terminal_write_u64(failure->completion_code);
+                terminal_write(" SLOT=");
+                terminal_write_u64(failure->event_slot);
+                terminal_write(" EP=");
+                terminal_write_u64(failure->event_endpoint);
             }
             terminal_putchar('\n');
         }
