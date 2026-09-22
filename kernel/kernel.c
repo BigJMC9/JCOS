@@ -743,6 +743,14 @@ void kernel_main(BootInfo *boot) {
             terminal_write_hex(failure->usbsts);
             terminal_write(" DETAIL=");
             terminal_write_hex(failure->detail);
+            if (failure->port != ~0U) {
+                terminal_write(" PORT=");
+                terminal_write_u64((u64)failure->port + 1ULL);
+                if (failure->protocol_major) {
+                    terminal_write(" USB");
+                    terminal_write_u64(failure->protocol_major);
+                }
+            }
             terminal_putchar('\n');
         }
     }
