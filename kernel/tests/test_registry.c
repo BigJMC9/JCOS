@@ -61,6 +61,7 @@ static void kernel_test_add(const char *name, const char *description, KernelTes
     test->run = run;
     test->cleanup = cleanup;
     test->live_preemption = false;
+    test->deep_runs = 1U;
 }
 
 static void kernel_test_add_live(const char *name, const char *description, KernelTestGroup group,
@@ -69,6 +70,17 @@ static void kernel_test_add_live(const char *name, const char *description, Kern
     kernel_test_add(name, description, group, run, cleanup);
     if (g_test_count == before + 1U) {
         g_tests[before].live_preemption = true;
+        g_tests[before].deep_runs = 4U;
+    }
+}
+
+static void kernel_test_set_deep_runs(const char *name, u32 runs) {
+    if (!name || !runs) return;
+    for (u32 i = 0; i < g_test_count; ++i) {
+        if (k_strieq(name, g_tests[i].name)) {
+            g_tests[i].deep_runs = runs;
+            return;
+        }
     }
 }
 
