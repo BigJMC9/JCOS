@@ -640,7 +640,12 @@ static int archive_cat(JcosBootArchive *archive, JcosCapabilityHandle portal_cap
 
 static int archive_fscheck(JcosBootArchive *archive, JcosCapabilityHandle portal_cap) {
     static const char path[] = "/etc/r7c1.txt";
-    static const char expected[] = "R7C1 USERSPACE BOOT ARCHIVE NAMESPACE\n";
+    /*
+     * Keep this marker free of a trailing line terminator. That makes the
+     * archive fixture byte-identical even when the source tree was checked out
+     * on a host with CRLF conversion enabled.
+     */
+    static const char expected[] = "R7C1 USERSPACE BOOT ARCHIVE NAMESPACE";
     if (!archive_available(archive)) return 0;
 
     JcosBootArchiveEntry entry;
@@ -648,6 +653,10 @@ static int archive_fscheck(JcosBootArchive *archive, JcosCapabilityHandle portal
     if (!jcos_boot_archive_find(archive, path, &entry) ||
         entry.type != JCOS_BOOT_ARCHIVE_ENTRY_FILE || entry.size != expected_size) {
         (void)portal_write(portal_cap, "R7C.1 USERSPACE TAR NAMESPACE: FAILED\n");
+        if (jcos_boot_archive_find(archive, path, &entry) &&
+            entry.type == JCOS_BOOT_ARCHIVE_ENTRY_FILE) {
+            (void)portal_write(portal_cap, "  FIXTURE SIZE MISMATCH\n");
+        }
         return 0;
     }
 
