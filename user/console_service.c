@@ -960,7 +960,7 @@ static int shell_execute(ShellState *shell, JcosCapabilityHandle portal_cap,
             if (!portal_write(portal_cap, "play: launch request unavailable\n")) return 0;
             *out_result = JCOS_CONSOLE_SHELL_RESULT_UNKNOWN;
         } else {
-            if (!portal_write(portal_cap, "PLAYING ") || !portal_write(portal_cap, rest) ||
+            if (!portal_write(portal_cap, "LAUNCHING ") || !portal_write(portal_cap, rest) ||
                 !portal_write(portal_cap, " - ESCAPE TO STOP\n")) return 0;
             shell->active = SHELL_STATE_SUSPENDED;
             shell_reset_line(shell);
