@@ -651,6 +651,38 @@ static void release_current_slot(void) {
     g_xhci.slot = 0;
 }
 
+static bool selected_port_connected(void) {
+    if (!g_xhci.op || !g_xhci.port_selected ||
+        g_xhci.port >= g_xhci.max_ports) return false;
+
+    volatile u32 *portsc =
+        reg32((u64)g_xhci.op, 0x400U + g_xhci.port * 0x10U);
+    return (*portsc & XHCI_PORTSC_CCS) != 0;
+}
+
+static void disconnect_current_keyboard(void) {
+    if (!g_xhci.keyboard_ready) return;
+
+    g_xhci.keyboard_ready = false;
+    g_queue_head = 0;
+    g_queue_tail = 0;
+    k_memset(g_xhci.report, 0, sizeof(g_xhci.report));
+    k_memset(g_xhci.previous, 0, sizeof(g_xhci.previous));
+
+    if (g_xhci.op && g_xhci.port_selected &&
+        g_xhci.port < g_xhci.max_ports) {
+        volatile u32 *portsc =
+            reg32((u64)g_xhci.op, 0x400U + g_xhci.port * 0x10U);
+        portsc_ack_changes(portsc, XHCI_PORTSC_CHANGE_BITS);
+    }
+
+    release_current_slot();
+    g_xhci.endpoint_id = 0U;
+    g_xhci.port_selected = false;
+    g_xhci.caps_lock = false;
+    serial_write("XHCI: USB HID keyboard disconnected\n");
+}
+
 static bool control_transfer(u8 request, u8 request_type, u16 value,
                              u16 index, u16 length, bool in) {
     u32 needed = length ? 3U : 2U;
@@ -1225,12 +1257,41 @@ bool xhci_init(VmPageMap *kernel_map) {
 
 void xhci_poll(void) {
     if (!g_xhci.keyboard_ready) return;
+
+    if (!selected_port_connected()) {
+        disconnect_current_keyboard();
+        return;
+    }
+
     XhciTrb event;
     while (next_event(&event)) {
-        if (((event.control >> 10) & 0x3FU) != TRB_TRANSFER_EVENT) continue;
-        k_memcpy(g_xhci.report, phys_to_virt(g_xhci.transfer_buffer_phys), 8U);
+        if (!selected_port_connected()) {
+            disconnect_current_keyboard();
+            return;
+        }
+
+        u32 type = (event.control >> 10) & 0x3FU;
+        if (type != TRB_TRANSFER_EVENT) continue;
+
+        u32 slot = (event.control >> 24) & 0xFFU;
+        u32 endpoint = (event.control >> 16) & 0x1FU;
+        u32 completion = (event.status >> 24) & 0xFFU;
+
+        if (slot != g_xhci.slot || endpoint != g_xhci.endpoint_id) {
+            continue;
+        }
+
+        if (!xhci_completion_code_ok(completion, true)) {
+            if (!selected_port_connected()) {
+                disconnect_current_keyboard();
+            }
+            return;
+        }
+
+        k_memcpy(g_xhci.report,
+            phys_to_virt(g_xhci.transfer_buffer_phys), 8U);
         decode_report();
-           submit_keyboard_report();
+        submit_keyboard_report();
     }
 }
 
