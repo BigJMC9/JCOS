@@ -15,6 +15,7 @@
 #define XHCI_WAIT_LIMIT 200000U
 #define XHCI_MFINDEX_WAIT_SPINS 50000000U
 #define XHCI_POWER_SETTLE_SPINS 2000000U
+#define XHCI_LEGACY_HANDOFF_SPINS 10000000U
 #define XHCI_MMIO_SIZE 0x10000ULL
 #define XHCI_MAX_PORTS 255U
 #define XHCI_FAILURE_CAPACITY 64U
@@ -292,28 +293,52 @@ static void discover_port_protocols(u64 base, u32 hcc) {
 
 static bool release_legacy_control(u64 base, u32 hcc) {
     u32 pointer = ((hcc >> 16) & 0xFFFFU) * 4U;
-    for (u32 inspected = 0; pointer && inspected < 64U; ++inspected) {
+
+    for (u32 inspected = 0; pointer && inspected < 128U; ++inspected) {
         if (pointer + 8U > XHCI_MMIO_SIZE) return false;
+
         volatile u32 *capability = reg32(base, pointer);
         u32 header = *capability;
+
         if (XHCI_EXT_CAP_ID(header) == 1U) {
+            volatile u8 *legacy_bytes = (volatile u8 *)(void *)capability;
             volatile u32 *legacy_control = capability + 1;
-            u32 control = *legacy_control;
-            control &= ~((1U << 0) | (1U << 4) |
-                (1U << 13) | (1U << 14) | (1U << 15));
-            *legacy_control = control;
-            if (!(header & XHCI_LEGACY_BIOS_OWNED)) return true;
-            *capability = header | XHCI_LEGACY_OS_OWNED;
-            for (u32 wait = 0; wait < XHCI_WAIT_LIMIT; ++wait) {
-                if (!(*capability & XHCI_LEGACY_BIOS_OWNED)) return true;
-                arch_pause();
+
+            /*
+             * Do not disable the OS-ownership SMI before requesting ownership.
+             * Firmware may rely on that SMI to run its SMM handoff path and
+             * clear HC BIOS Owned. Set HC OS Owned with the required byte
+             * access so the BIOS-owned semaphore byte is left untouched.
+             */
+            if (header & XHCI_LEGACY_BIOS_OWNED) {
+                legacy_bytes[3] = (u8)(legacy_bytes[3] | 0x01U);
+
+                for (u32 wait = 0; wait < XHCI_LEGACY_HANDOFF_SPINS; ++wait) {
+                    u32 semaphores = *capability;
+                    if (!(semaphores & XHCI_LEGACY_BIOS_OWNED)) break;
+                    arch_pause();
+                }
+
+                if (*capability & XHCI_LEGACY_BIOS_OWNED) return false;
+            } else {
+                legacy_bytes[3] = (u8)(legacy_bytes[3] | 0x01U);
             }
-            return false;
+
+            /*
+             * Ownership is ours now. Disable all legacy xHCI SMI enables.
+             * Writing zero also avoids accidentally writing ones back into the
+             * RW1C status bits in the upper half of USBLEGCTLSTS.
+             */
+            *legacy_control = 0U;
+            return true;
         }
+
         u32 next = XHCI_EXT_CAP_NEXT(header);
         if (!next) break;
         pointer += next * 4U;
     }
+
+    /* A controller is allowed to omit the USB Legacy Support capability. */
     return true;
 }
 
@@ -768,19 +793,32 @@ bool xhci_init(VmPageMap *kernel_map) {
     u64 doorbell_end =
         (u64)doorbell_offset + ((u64)g_xhci.max_slots + 1ULL) * sizeof(u32);
 
-    if (!cap_length || cap_length >= XHCI_MMIO_SIZE ||
-        !g_xhci.max_slots || !g_xhci.max_ports ||
-        g_xhci.max_ports > XHCI_MAX_PORTS ||
-        port_register_end > XHCI_MMIO_SIZE ||
-        doorbell_end > XHCI_MMIO_SIZE ||
-        runtime_offset > XHCI_MMIO_SIZE - 0x40U ||
-        !release_legacy_control(base, hcc)) {
-        return xhci_fail("capability or legacy handoff");
+    if (!cap_length || cap_length >= XHCI_MMIO_SIZE) {
+        return xhci_report_failure_detail("invalid CAPLENGTH", cap_length), false;
+    }
+
+    g_xhci.op = (volatile u32 *)(u64)(base + cap_length);
+
+    if (!g_xhci.max_slots) {
+        return xhci_report_failure_detail("no device slots", hcs1), false;
+    }
+    if (!g_xhci.max_ports || g_xhci.max_ports > XHCI_MAX_PORTS) {
+        return xhci_report_failure_detail("invalid root port count", hcs1), false;
+    }
+    if (port_register_end > XHCI_MMIO_SIZE) {
+        return xhci_report_failure_detail("port register range", (u32)port_register_end), false;
+    }
+    if (doorbell_end > XHCI_MMIO_SIZE) {
+        return xhci_report_failure_detail("doorbell register range", (u32)doorbell_end), false;
+    }
+    if (runtime_offset > XHCI_MMIO_SIZE - 0x40U) {
+        return xhci_report_failure_detail("runtime register range", runtime_offset), false;
+    }
+    if (!release_legacy_control(base, hcc)) {
+        return xhci_report_failure_detail("legacy ownership timeout", hcc), false;
     }
 
     discover_port_protocols(base, hcc);
-
-    g_xhci.op = (volatile u32 *)(u64)(base + cap_length);
     g_xhci.doorbells =
         (volatile u32 *)(u64)(base + doorbell_offset);
     g_xhci.runtime =
