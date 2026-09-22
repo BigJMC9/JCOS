@@ -6408,6 +6408,35 @@ static ShellLocalTest g_shell_tests[SHELL_LOCAL_TEST_CAPACITY];
 static u32 g_shell_test_count;
 static bool g_shell_registry_initialized;
 
+typedef struct {
+    const char *test_name;
+    u32 iteration;
+    char step[SHELL_SUITE_FAILURE_TEXT_CAPACITY];
+} ShellSuiteFailure;
+
+typedef struct {
+    const char *current_test;
+    u32 current_iteration;
+    bool current_failed;
+    bool current_saw_final_result;
+    bool current_unsafe;
+    u32 failure_count;
+    u32 omitted_failures;
+    ShellSuiteFailure failures[SHELL_SUITE_FAILURE_CAPACITY];
+} ShellSuiteCapture;
+
+typedef struct {
+    u32 tests_total;
+    u32 tests_run;
+    u32 tests_passed;
+    u32 tests_failed;
+    u32 run_iterations;
+    bool aborted;
+    const char *abort_reason;
+} ShellSuiteStats;
+
+static ShellSuiteCapture g_suite_capture;
+
 static void shell_add_command(const char *name, const char *usage, const char *description,
     ShellCommandGroup group, ShellCommandNoArgs no_args, ShellCommandArgs with_args, bool visible) {
     if (g_command_count >= SHELL_COMMAND_CAPACITY) return;
@@ -6632,7 +6661,9 @@ static void shell_print_help(const char *topic) {
 
         if (k_strieq(command->name, "test")) {
             terminal_writeln("  test list [GROUP]       list available diagnostics");
-            terminal_writeln("  test NAME               run one diagnostic");
+            terminal_writeln("  test all                run every diagnostic once");
+            terminal_writeln("  test all deep           repeat stress-sensitive diagnostics");
+            terminal_writeln("  test NAME               run one diagnostic with a failure summary");
             terminal_writeln("  test NAME cleanup       retry that diagnostic's retained cleanup");
         }
         return;
@@ -6751,6 +6782,336 @@ static bool shell_run_test_mode(void (*run)(void), bool live_preemption) {
     return restored;
 }
 
+
+static bool shell_suite_line_ends_with(const char *line, u32 length, const char *suffix) {
+    if (!line || !suffix) return false;
+    u32 suffix_length = (u32)k_strlen(suffix);
+    if (suffix_length > length) return false;
+    u32 offset = length - suffix_length;
+    for (u32 i = 0; i < suffix_length; ++i) {
+        if (line[offset + i] != suffix[i]) return false;
+    }
+    return true;
+}
+
+static bool shell_suite_line_contains(const char *line, u32 length, const char *needle) {
+    if (!line || !needle) return false;
+    u32 needle_length = (u32)k_strlen(needle);
+    if (!needle_length || needle_length > length) return false;
+    for (u32 i = 0; i + needle_length <= length; ++i) {
+        bool match = true;
+        for (u32 j = 0; j < needle_length; ++j) {
+            if (line[i + j] != needle[j]) {
+                match = false;
+                break;
+            }
+        }
+        if (match) return true;
+    }
+    return false;
+}
+
+static bool shell_suite_step_equal(const char *a, const char *b) {
+    if (!a || !b) return false;
+    while (*a && *b) {
+        if (*a != *b) return false;
+        ++a;
+        ++b;
+    }
+    return *a == 0 && *b == 0;
+}
+
+static void shell_suite_record_failure_text(const char *text, u32 length) {
+    if (!g_suite_capture.current_test || !text) return;
+
+    while (length && k_ascii_space(*text)) {
+        ++text;
+        --length;
+    }
+    while (length && k_ascii_space(text[length - 1U])) --length;
+    if (!length) return;
+
+    char step[SHELL_SUITE_FAILURE_TEXT_CAPACITY];
+    u32 copy = length;
+    if (copy + 1U > sizeof(step)) copy = sizeof(step) - 1U;
+    for (u32 i = 0; i < copy; ++i) step[i] = text[i];
+    step[copy] = 0;
+
+    for (u32 i = 0; i < g_suite_capture.failure_count; ++i) {
+        ShellSuiteFailure *failure = &g_suite_capture.failures[i];
+        if (failure->test_name == g_suite_capture.current_test &&
+            failure->iteration == g_suite_capture.current_iteration &&
+            shell_suite_step_equal(failure->step, step)) return;
+    }
+
+    if (g_suite_capture.failure_count >= SHELL_SUITE_FAILURE_CAPACITY) {
+        ++g_suite_capture.omitted_failures;
+        return;
+    }
+
+    ShellSuiteFailure *failure =
+        &g_suite_capture.failures[g_suite_capture.failure_count++];
+    failure->test_name = g_suite_capture.current_test;
+    failure->iteration = g_suite_capture.current_iteration;
+    for (u32 i = 0; i <= copy; ++i) failure->step[i] = step[i];
+}
+
+static void shell_suite_record_failure(const char *text) {
+    if (!text) return;
+    shell_suite_record_failure_text(text, (u32)k_strlen(text));
+    g_suite_capture.current_failed = true;
+}
+
+static void shell_suite_observe_line(const char *line, u32 length, void *context) {
+    (void)context;
+    if (!line || !g_suite_capture.current_test) return;
+
+    u32 start = 0U;
+    while (start < length && k_ascii_space(line[start])) ++start;
+    while (length > start && k_ascii_space(line[length - 1U])) --length;
+    if (length <= start) return;
+
+    const char *trimmed = line + start;
+    u32 trimmed_length = length - start;
+
+    if (shell_suite_line_contains(trimmed, trimmed_length, "REBOOT") ||
+        shell_suite_line_contains(trimmed, trimmed_length, "FIXTURE RETAINED")) {
+        g_suite_capture.current_unsafe = true;
+    }
+
+    if (shell_suite_line_ends_with(trimmed, trimmed_length, ": FAILED")) {
+        g_suite_capture.current_failed = true;
+        if (start == 0U) g_suite_capture.current_saw_final_result = true;
+        shell_suite_record_failure_text(trimmed, trimmed_length - 8U);
+        return;
+    }
+
+    if (shell_suite_line_ends_with(trimmed, trimmed_length, ": PASS") &&
+        start == 0U) {
+        g_suite_capture.current_saw_final_result = true;
+    }
+}
+
+static bool shell_suite_run_captured(const char *name, u32 iteration,
+    void (*run)(void), bool live_preemption, bool require_final_result,
+    bool *unsafe) {
+    g_suite_capture.current_test = name;
+    g_suite_capture.current_iteration = iteration;
+    g_suite_capture.current_failed = false;
+    g_suite_capture.current_saw_final_result = false;
+    g_suite_capture.current_unsafe = false;
+
+    terminal_set_line_observer(shell_suite_observe_line, 0);
+    bool harness_ok = shell_run_test_mode(run, live_preemption);
+    terminal_set_line_observer(0, 0);
+
+    if (!harness_ok)
+        shell_suite_record_failure("TEST HARNESS / PREEMPTION POLICY RESTORE");
+
+    if (require_final_result && !g_suite_capture.current_saw_final_result)
+        shell_suite_record_failure("NO FINAL PASS/FAIL RESULT EMITTED");
+
+    if (unsafe) *unsafe = g_suite_capture.current_unsafe;
+    return harness_ok && !g_suite_capture.current_failed &&
+        (!require_final_result || g_suite_capture.current_saw_final_result);
+}
+
+static void shell_suite_print_progress(const char *name, bool pass,
+    u32 completed_runs, u32 planned_runs, bool quiet_render) {
+    if (quiet_render) terminal_set_render_enabled(true);
+
+    terminal_set_color(pass ? terminal_accent_color() : terminal_error_color());
+    terminal_write(pass ? "[PASS] " : "[FAIL] ");
+    terminal_set_color(terminal_default_color());
+    terminal_write(name);
+
+    if (planned_runs > 1U) {
+        terminal_write("  RUNS ");
+        terminal_write_u64(completed_runs);
+        terminal_putchar('/');
+        terminal_write_u64(planned_runs);
+    }
+    terminal_putchar('\n');
+
+    if (quiet_render) terminal_set_render_enabled(false);
+}
+
+static void shell_suite_print_summary(const ShellSuiteStats *stats, bool deep) {
+    if (!stats) return;
+
+    terminal_putchar('\n');
+    terminal_writeln("TEST SUITE SUMMARY");
+    terminal_write("  MODE: ");
+    terminal_writeln(deep ? "DEEP / STRESS" : "STANDARD");
+    terminal_write("  TESTS DISCOVERED: ");
+    terminal_write_u64(stats->tests_total);
+    terminal_putchar('\n');
+    terminal_write("  TESTS RUN: ");
+    terminal_write_u64(stats->tests_run);
+    terminal_putchar('\n');
+    terminal_write("  TESTS PASSED: ");
+    terminal_write_u64(stats->tests_passed);
+    terminal_putchar('\n');
+    terminal_write("  TESTS FAILED: ");
+    terminal_write_u64(stats->tests_failed);
+    terminal_putchar('\n');
+    terminal_write("  TEST ITERATIONS: ");
+    terminal_write_u64(stats->run_iterations);
+    terminal_putchar('\n');
+
+    if (stats->aborted) {
+        terminal_write("  TESTS SKIPPED: ");
+        terminal_write_u64(stats->tests_total - stats->tests_run);
+        terminal_putchar('\n');
+        terminal_set_color(terminal_error_color());
+        terminal_write("  SUITE: ABORTED");
+        terminal_set_color(terminal_default_color());
+        if (stats->abort_reason) {
+            terminal_write(" - ");
+            terminal_write(stats->abort_reason);
+        }
+        terminal_putchar('\n');
+    } else {
+        bool pass = stats->tests_failed == 0U;
+        terminal_set_color(pass ? terminal_accent_color() : terminal_error_color());
+        terminal_write("  SUITE: ");
+        terminal_writeln(pass ? "PASS" : "FAILED");
+        terminal_set_color(terminal_default_color());
+    }
+
+    if (!g_suite_capture.failure_count && !g_suite_capture.omitted_failures) return;
+
+    terminal_writeln("\nFAILED STEPS:");
+    for (u32 i = 0; i < g_suite_capture.failure_count; ++i) {
+        const ShellSuiteFailure *failure = &g_suite_capture.failures[i];
+        terminal_set_color(terminal_error_color());
+        terminal_write("  ");
+        terminal_write(failure->test_name);
+        terminal_set_color(terminal_default_color());
+        terminal_write(" [RUN ");
+        terminal_write_u64(failure->iteration);
+        terminal_write("]: ");
+        terminal_writeln(failure->step);
+    }
+
+    if (g_suite_capture.omitted_failures) {
+        terminal_write("  ... ");
+        terminal_write_u64(g_suite_capture.omitted_failures);
+        terminal_writeln(" ADDITIONAL FAILURE LINES OMITTED.");
+    }
+}
+
+static bool shell_suite_cleanup_registered(const KernelTest *test, u32 iteration,
+    bool *unsafe) {
+    if (!test || !test->cleanup) return true;
+    return shell_suite_run_captured(test->name, iteration, test->cleanup,
+        test->live_preemption, false, unsafe);
+}
+
+static void shell_run_suite(bool deep) {
+    shell_registry_init();
+    k_memset(&g_suite_capture, 0, sizeof(g_suite_capture));
+
+    ShellSuiteStats stats;
+    k_memset(&stats, 0, sizeof(stats));
+    stats.tests_total = kernel_test_registry_count() + g_shell_test_count;
+
+    terminal_putchar('\n');
+    terminal_writeln(deep ?
+        "RUNNING ALL JCOS TESTS IN DEEP / STRESS MODE..." :
+        "RUNNING ALL JCOS TESTS...");
+    if (deep) {
+        terminal_writeln("DEEP MODE REPEATS ORDERING/LIFETIME/RECOVERY TESTS.");
+        terminal_writeln("DETAILED FRAMEBUFFER OUTPUT IS QUIET; FULL LOG STILL GOES TO COM1.");
+    }
+
+    bool quiet_render = deep && terminal_render_enabled();
+    if (quiet_render) terminal_set_render_enabled(false);
+
+    /*
+     * Registry tests run first because they carry explicit cleanup metadata.
+     * Legacy shell-local diagnostics run afterwards; if one fails, the suite
+     * stops rather than guessing that its partially constructed state is safe.
+     */
+    for (u32 i = 0; i < kernel_test_registry_count() && !stats.aborted; ++i) {
+        const KernelTest *test = kernel_test_registry_at(i);
+        if (!test || !test->run) continue;
+
+        ++stats.tests_run;
+        bool pass = true;
+        u32 planned_runs = deep ? test->deep_runs : 1U;
+        if (!planned_runs) planned_runs = 1U;
+        u32 completed_runs = 0U;
+
+        for (u32 run = 1U; run <= planned_runs; ++run) {
+            ++stats.run_iterations;
+            ++completed_runs;
+            bool unsafe = false;
+            if (shell_suite_run_captured(test->name, run, test->run,
+                    test->live_preemption, true, &unsafe)) {
+                continue;
+            }
+
+            pass = false;
+            if (test->cleanup) {
+                bool cleanup_unsafe = false;
+                if (!shell_suite_cleanup_registered(test, run, &cleanup_unsafe) ||
+                    cleanup_unsafe) {
+                    stats.aborted = true;
+                    stats.abort_reason =
+                        "FAILED TEST CLEANUP COULD NOT VERIFY A SAFE BASELINE";
+                }
+            } else if (unsafe) {
+                stats.aborted = true;
+                stats.abort_reason =
+                    "TEST REPORTED RETAINED STATE WITHOUT A CLEANUP PATH";
+            }
+            break;
+        }
+
+        if (pass) ++stats.tests_passed;
+        else ++stats.tests_failed;
+        shell_suite_print_progress(test->name, pass, completed_runs,
+            planned_runs, quiet_render);
+    }
+
+    for (u32 i = 0; i < g_shell_test_count && !stats.aborted; ++i) {
+        const ShellLocalTest *test = &g_shell_tests[i];
+        if (!test->run) continue;
+
+        ++stats.tests_run;
+        bool pass = true;
+        u32 planned_runs = deep ? test->deep_runs : 1U;
+        if (!planned_runs) planned_runs = 1U;
+        u32 completed_runs = 0U;
+
+        for (u32 run = 1U; run <= planned_runs; ++run) {
+            ++stats.run_iterations;
+            ++completed_runs;
+            bool unsafe = false;
+            if (shell_suite_run_captured(test->name, run, test->run,
+                    false, true, &unsafe)) {
+                continue;
+            }
+
+            pass = false;
+            stats.aborted = true;
+            stats.abort_reason = unsafe ?
+                "LEGACY TEST RETAINED STATE; REBOOT BEFORE CONTINUING" :
+                "LEGACY TEST FAILED WITHOUT AN AUTOMATIC CLEANUP CONTRACT";
+            break;
+        }
+
+        if (pass) ++stats.tests_passed;
+        else ++stats.tests_failed;
+        shell_suite_print_progress(test->name, pass, completed_runs,
+            planned_runs, quiet_render);
+    }
+
+    if (quiet_render) terminal_set_render_enabled(true);
+    shell_suite_print_summary(&stats, deep);
+}
+
 static void command_test(const char *args) {
     char first[64];
     char second[64];
@@ -6758,18 +7119,31 @@ static void command_test(const char *args) {
     const char *cursor = args ? args : "";
 
     if (!next_argument(&cursor, first, sizeof(first))) {
-        terminal_writeln("USAGE: test list [GROUP] | test NAME [cleanup]");
+        terminal_writeln("USAGE: test list [GROUP] | test all [deep] | test NAME [cleanup]");
         return;
     }
 
     bool has_second = next_argument(&cursor, second, sizeof(second));
     if (next_argument(&cursor, extra, sizeof(extra))) {
-        terminal_writeln("USAGE: test list [GROUP] | test NAME [cleanup]");
+        terminal_writeln("USAGE: test list [GROUP] | test all [deep] | test NAME [cleanup]");
         return;
     }
 
     if (k_strieq(first, "list")) {
         shell_list_tests(has_second ? second : "");
+        return;
+    }
+
+    if (k_strieq(first, "all") || k_strieq(first, "all-deep")) {
+        bool deep = k_strieq(first, "all-deep");
+        if (has_second) {
+            if (!k_strieq(first, "all") || !k_strieq(second, "deep")) {
+                terminal_writeln("USAGE: test all [deep]");
+                return;
+            }
+            deep = true;
+        }
+        shell_run_suite(deep);
         return;
     }
 
@@ -6781,7 +7155,23 @@ static void command_test(const char *args) {
             terminal_set_color(terminal_default_color());
             return;
         }
-        (void)shell_run_test_mode(local->run, false);
+
+        k_memset(&g_suite_capture, 0, sizeof(g_suite_capture));
+        bool unsafe = false;
+        bool pass = shell_suite_run_captured(local->name, 1U, local->run,
+            false, true, &unsafe);
+        ShellSuiteStats stats;
+        k_memset(&stats, 0, sizeof(stats));
+        stats.tests_total = 1U;
+        stats.tests_run = 1U;
+        stats.tests_passed = pass ? 1U : 0U;
+        stats.tests_failed = pass ? 0U : 1U;
+        stats.run_iterations = 1U;
+        if (!pass && unsafe) {
+            stats.aborted = true;
+            stats.abort_reason = "TEST RETAINED STATE; REBOOT BEFORE CONTINUING";
+        }
+        shell_suite_print_summary(&stats, false);
         return;
     }
 
@@ -6796,7 +7186,22 @@ static void command_test(const char *args) {
     }
 
     if (!has_second) {
-        (void)shell_run_test_mode(test->run, test->live_preemption);
+        k_memset(&g_suite_capture, 0, sizeof(g_suite_capture));
+        bool unsafe = false;
+        bool pass = shell_suite_run_captured(test->name, 1U, test->run,
+            test->live_preemption, true, &unsafe);
+        ShellSuiteStats stats;
+        k_memset(&stats, 0, sizeof(stats));
+        stats.tests_total = 1U;
+        stats.tests_run = 1U;
+        stats.tests_passed = pass ? 1U : 0U;
+        stats.tests_failed = pass ? 0U : 1U;
+        stats.run_iterations = 1U;
+        if (!pass && unsafe) {
+            stats.aborted = true;
+            stats.abort_reason = "TEST RETAINED STATE; RUN CLEANUP OR REBOOT";
+        }
+        shell_suite_print_summary(&stats, false);
         return;
     }
 
