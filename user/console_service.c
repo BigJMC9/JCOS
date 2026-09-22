@@ -108,6 +108,14 @@ static int portal_cursor_left(JcosCapabilityHandle portal_cap) {
     return portal_command(portal_cap, JCOS_CONSOLE_PORTAL_CURSOR_LEFT, 0ULL);
 }
 
+static int portal_scrollback_line_up(JcosCapabilityHandle portal_cap) {
+    return portal_command(portal_cap, JCOS_CONSOLE_PORTAL_SCROLL_LINE_UP, 0ULL);
+}
+
+static int portal_scrollback_line_down(JcosCapabilityHandle portal_cap) {
+    return portal_command(portal_cap, JCOS_CONSOLE_PORTAL_SCROLL_LINE_DOWN, 0ULL);
+}
+
 static int portal_scrollback_page_up(JcosCapabilityHandle portal_cap) {
     return portal_command(portal_cap, JCOS_CONSOLE_PORTAL_SCROLL_PAGE_UP, 0ULL);
 }
@@ -632,7 +640,12 @@ static int archive_cat(JcosBootArchive *archive, JcosCapabilityHandle portal_cap
 
 static int archive_fscheck(JcosBootArchive *archive, JcosCapabilityHandle portal_cap) {
     static const char path[] = "/etc/r7c1.txt";
-    static const char expected[] = "R7C1 USERSPACE BOOT ARCHIVE NAMESPACE\n";
+    /*
+     * Keep this marker free of a trailing line terminator. That makes the
+     * archive fixture byte-identical even when the source tree was checked out
+     * on a host with CRLF conversion enabled.
+     */
+    static const char expected[] = "R7C1 USERSPACE BOOT ARCHIVE NAMESPACE";
     if (!archive_available(archive)) return 0;
 
     JcosBootArchiveEntry entry;
@@ -640,6 +653,10 @@ static int archive_fscheck(JcosBootArchive *archive, JcosCapabilityHandle portal
     if (!jcos_boot_archive_find(archive, path, &entry) ||
         entry.type != JCOS_BOOT_ARCHIVE_ENTRY_FILE || entry.size != expected_size) {
         (void)portal_write(portal_cap, "R7C.1 USERSPACE TAR NAMESPACE: FAILED\n");
+        if (jcos_boot_archive_find(archive, path, &entry) &&
+            entry.type == JCOS_BOOT_ARCHIVE_ENTRY_FILE) {
+            (void)portal_write(portal_cap, "  FIXTURE SIZE MISMATCH\n");
+        }
         return 0;
     }
 
@@ -874,7 +891,8 @@ static int shell_execute(ShellState *shell, JcosCapabilityHandle portal_cap,
                 "service CMD worker manage an ordinary background service\n"
                 "  CMD: start stop restart replace status fault\n"
                 "monitor            return input to the kernel emergency monitor\n"
-                "KEYS: UP/DOWN HISTORY, LEFT/RIGHT EDIT, HOME/END, PGUP/PGDN SCROLL.\n"
+                "KEYS: UP/DOWN HISTORY, LEFT/RIGHT EDIT, HOME/END, PGUP/PGDN PAGE SCROLL.\n"
+                "      CTRL+PGUP/PGDN SCROLL ONE LINE.\n"
                 "CLIPBOARD: SHIFT+ARROWS SELECT, CTRL+SHIFT+C/X/V COPY/CUT/PASTE.\n")) return 0;
         *out_result = JCOS_CONSOLE_SHELL_RESULT_OK;
     } else if (command_prefix(normalized, "echo", &rest)) {
@@ -942,7 +960,7 @@ static int shell_execute(ShellState *shell, JcosCapabilityHandle portal_cap,
             if (!portal_write(portal_cap, "play: launch request unavailable\n")) return 0;
             *out_result = JCOS_CONSOLE_SHELL_RESULT_UNKNOWN;
         } else {
-            if (!portal_write(portal_cap, "PLAYING ") || !portal_write(portal_cap, rest) ||
+            if (!portal_write(portal_cap, "LAUNCHING ") || !portal_write(portal_cap, rest) ||
                 !portal_write(portal_cap, " - ESCAPE TO STOP\n")) return 0;
             shell->active = SHELL_STATE_SUSPENDED;
             shell_reset_line(shell);
@@ -977,16 +995,18 @@ static int shell_handle_key(ShellState *shell, JcosCapabilityHandle portal_cap,
     *out_result = JCOS_CONSOLE_SHELL_RESULT_NONE;
     if (shell->active != SHELL_STATE_ACTIVE) return 1;
 
+    int shift = (event & JCOS_CONSOLE_INPUT_EVENT_SHIFT) != 0ULL;
+    int ctrl = (event & JCOS_CONSOLE_INPUT_EVENT_CTRL) != 0ULL;
+
     if (key == JCOS_CONSOLE_INPUT_KEY_PAGE_UP)
-        return portal_scrollback_page_up(portal_cap);
+        return ctrl ? portal_scrollback_line_up(portal_cap) :
+            portal_scrollback_page_up(portal_cap);
     if (key == JCOS_CONSOLE_INPUT_KEY_PAGE_DOWN)
-        return portal_scrollback_page_down(portal_cap);
+        return ctrl ? portal_scrollback_line_down(portal_cap) :
+            portal_scrollback_page_down(portal_cap);
 
     /* Any ordinary editing/navigation action returns to the live viewport. */
     if (!portal_scrollback_to_bottom(portal_cap)) return 0;
-
-    int shift = (event & JCOS_CONSOLE_INPUT_EVENT_SHIFT) != 0ULL;
-    int ctrl = (event & JCOS_CONSOLE_INPUT_EVENT_CTRL) != 0ULL;
 
     if (key == JCOS_CONSOLE_INPUT_KEY_CHARACTER && ctrl && shift) {
         char lower = shell_ascii_lower((char)(event & JCOS_CONSOLE_INPUT_EVENT_CHARACTER_MASK));

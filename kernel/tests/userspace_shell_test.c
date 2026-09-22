@@ -206,6 +206,16 @@ void userspace_shell_test_run(void) {
     report("RING3 PAGE-UP / PAGE-DOWN SCROLLBACK", page_up && page_down);
     if (!page_up || !page_down) goto fail;
 
+    bool line_up = send_key(KEY_PAGE_UP, 0, false, true, false,
+        JCOS_CONSOLE_SHELL_ACTION_NONE, JCOS_CONSOLE_SHELL_RESULT_NONE) &&
+        system_console_idle() &&
+        (scrollback_available ? terminal_scrollback_active() : !terminal_scrollback_active());
+    bool line_down = line_up && send_key(KEY_PAGE_DOWN, 0, false, true, false,
+        JCOS_CONSOLE_SHELL_ACTION_NONE, JCOS_CONSOLE_SHELL_RESULT_NONE) &&
+        system_console_idle() && !terminal_scrollback_active();
+    report("RING3 CTRL+PAGE-UP / PAGE-DOWN LINE SCROLLBACK", line_up && line_down);
+    if (!line_up || !line_down) goto fail;
+
     bool history = send_key(KEY_UP, 0, false, false, false,
             JCOS_CONSOLE_SHELL_ACTION_NONE, JCOS_CONSOLE_SHELL_RESULT_NONE) &&
         send_key(KEY_DOWN, 0, false, false, false,

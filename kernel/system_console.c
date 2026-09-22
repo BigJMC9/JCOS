@@ -8,6 +8,7 @@
 #include "serial.h"
 #include "timer.h"
 #include "../include/console_service_protocol.h"
+#include "../include/console_client_protocol.h"
 #include "../include/boot_archive_portal_abi.h"
 #include "../include/program_broker_protocol.h"
 #include "../include/service_broker_protocol.h"
@@ -830,7 +831,46 @@ bool system_console_app_session_wait_end(u64 session_id) {
 
 bool system_console_app_session_abort(u64 session_id) {
     if (!session_id || session_id != g_app_session_id) return false;
+
+    /*
+     * The Ring3 console service switches from its management endpoint to the
+     * application-output endpoint while an app session is active. Restarting it
+     * immediately would try to stop a service that is blocked on the other
+     * endpoint, which can leave foreground-launch recovery stuck.
+     *
+     * First inject the same END message a well-behaved application would send.
+     * This wakes the console service, lets it leave app mode, and restores its
+     * ordinary command receive loop without reincarnating the service.
+     */
+    Process *kernel = process_kernel();
+    CapabilityTable *caps = kernel ? process_capabilities(kernel) : 0;
+    CapabilityHandle abort_send = CAPABILITY_INVALID_HANDLE;
+    bool graceful = false;
+
+    if (caps && g_app_endpoint_created &&
+        capability_insert(caps, &g_app_endpoint, CAPABILITY_TYPE_ENDPOINT,
+            CAPABILITY_RIGHT_SEND, &abort_send)) {
+        IpcMessage end;
+        k_memset(&end, 0, sizeof(end));
+        end.word_count = 2U;
+        end.words[0] = JCOS_CONSOLE_CLIENT_HEADER(
+            JCOS_CONSOLE_CLIENT_OP_END, JCOS_CONSOLE_CLIENT_PROTOCOL_VERSION, 0U);
+        end.words[1] = session_id;
+
+        bool sent = ipc_try_send(kernel, abort_send, &end);
+        bool revoked = capability_revoke(caps, abort_send);
+        graceful = sent && revoked && system_console_app_session_wait_end(session_id);
+    }
+
+    if (graceful) return true;
+
+    /*
+     * Last-resort recovery: break a blocked app receive before restarting the
+     * console service. The endpoint is recreated by system_console_restart().
+     */
     g_app_session_id = 0ULL;
+    if (g_app_endpoint_created && !endpoint_closed(&g_app_endpoint))
+        (void)ipc_endpoint_close(&g_app_endpoint);
     return system_console_restart();
 }
 

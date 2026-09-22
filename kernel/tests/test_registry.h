@@ -21,6 +21,7 @@ typedef struct {
     void (*run)(void);
     void (*cleanup)(void);
     bool live_preemption;
+    u32 deep_runs;
 } KernelTest;
 
 u32 kernel_test_registry_count(void);

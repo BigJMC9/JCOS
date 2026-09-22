@@ -61,6 +61,7 @@ static void kernel_test_add(const char *name, const char *description, KernelTes
     test->run = run;
     test->cleanup = cleanup;
     test->live_preemption = false;
+    test->deep_runs = 1U;
 }
 
 static void kernel_test_add_live(const char *name, const char *description, KernelTestGroup group,
@@ -69,6 +70,17 @@ static void kernel_test_add_live(const char *name, const char *description, Kern
     kernel_test_add(name, description, group, run, cleanup);
     if (g_test_count == before + 1U) {
         g_tests[before].live_preemption = true;
+        g_tests[before].deep_runs = 4U;
+    }
+}
+
+static void kernel_test_set_deep_runs(const char *name, u32 runs) {
+    if (!name || !runs) return;
+    for (u32 i = 0; i < g_test_count; ++i) {
+        if (k_strieq(name, g_tests[i].name)) {
+            g_tests[i].deep_runs = runs;
+            return;
+        }
     }
 }
 
@@ -136,6 +148,47 @@ static void kernel_test_registry_init(void) {
     kernel_test_add("user-runtime-block", "blocking Ring3 C runtime", KERNEL_TEST_USERSPACE, user_runtime_block_test_run, user_fixture_cleanup_retry_run);
     kernel_test_add("lifetime-stress", "IPC/process lifetime recovery stress", KERNEL_TEST_ACCEPTANCE, lifetime_stress_test_run, user_fixture_cleanup_retry_run);
     kernel_test_add("lifetime-ipc-acceptance", "integrated lifetime and IPC robustness gate", KERNEL_TEST_ACCEPTANCE, lifetime_ipc_acceptance_test_run, lifetime_ipc_acceptance_cleanup_run);
+
+    /*
+     * Deep mode is deliberately uneven: deterministic model checks stay at one
+     * run while lifetime, ordering, scheduling and recovery paths get repeated.
+     */
+    kernel_test_set_deep_runs("capability-lifetime", 8U);
+    kernel_test_set_deep_runs("constructor", 8U);
+    kernel_test_set_deep_runs("stack-reclaim", 8U);
+    kernel_test_set_deep_runs("elf-reclaim", 8U);
+    kernel_test_set_deep_runs("vmm-reclaim", 8U);
+    kernel_test_set_deep_runs("force-thread", 8U);
+    kernel_test_set_deep_runs("process-exit", 8U);
+    kernel_test_set_deep_runs("process-kill", 8U);
+    kernel_test_set_deep_runs("wait-order", 16U);
+    kernel_test_set_deep_runs("peer-death", 16U);
+    kernel_test_set_deep_runs("timeout", 16U);
+    kernel_test_set_deep_runs("program-launch", 8U);
+    kernel_test_set_deep_runs("program-startup", 8U);
+    kernel_test_set_deep_runs("scheduler-idle", 8U);
+    kernel_test_set_deep_runs("scheduler-idle-exit", 8U);
+    kernel_test_set_deep_runs("runtime-preemption", 16U);
+    kernel_test_set_deep_runs("service-order", 16U);
+    kernel_test_set_deep_runs("service-recovery", 8U);
+    kernel_test_set_deep_runs("service-incarnation", 8U);
+    kernel_test_set_deep_runs("service-robustness", 4U);
+    kernel_test_set_deep_runs("console-service", 4U);
+    kernel_test_set_deep_runs("console-persistent", 4U);
+    kernel_test_set_deep_runs("userspace-shell", 4U);
+    kernel_test_set_deep_runs("console-app", 4U);
+    kernel_test_set_deep_runs("console-input", 4U);
+    kernel_test_set_deep_runs("files-userspace", 4U);
+    kernel_test_set_deep_runs("launch-userspace", 4U);
+    kernel_test_set_deep_runs("service-policy", 4U);
+    kernel_test_set_deep_runs("user-ipc-cancel", 8U);
+    kernel_test_set_deep_runs("user-process-cleanup", 8U);
+    kernel_test_set_deep_runs("user-protection", 4U);
+    kernel_test_set_deep_runs("user-stack-guard", 4U);
+    kernel_test_set_deep_runs("user-runtime", 8U);
+    kernel_test_set_deep_runs("user-runtime-block", 8U);
+    kernel_test_set_deep_runs("lifetime-stress", 4U);
+    kernel_test_set_deep_runs("lifetime-ipc-acceptance", 4U);
 }
 
 u32 kernel_test_registry_count(void) {

@@ -376,12 +376,13 @@ baseline before firmware transition.
 
 The normal Ring3 shell owns its complete interactive line-editor state. The
 console portal exposes only minimal terminal mechanisms: byte emission, cursor
-left, page-up/page-down/to-bottom scrollback control, and one-shot accent-byte
-emission for selection rendering. No history, clipboard, command buffer, or
+left, line-up/line-down/page-up/page-down/to-bottom scrollback control, and
+one-shot accent-byte emission for selection rendering. No history, clipboard, command buffer, or
 service-name policy moves back into the kernel.
 
 The Ring3 editor now supports Up/Down history, Left/Right, Home/End, Delete,
-Backspace, Page Up/Page Down, Shift+arrow selection, and Ctrl+Shift+C/X/V.
+Backspace, Page Up/Page Down, Ctrl+Page Up/Page Down one-line scrollback,
+Shift+arrow selection, and Ctrl+Shift+C/X/V.
 Editor history/clipboard storage is static userspace BSS rather than the one-page
 initial user stack.
 
