@@ -108,6 +108,14 @@ static int portal_cursor_left(JcosCapabilityHandle portal_cap) {
     return portal_command(portal_cap, JCOS_CONSOLE_PORTAL_CURSOR_LEFT, 0ULL);
 }
 
+static int portal_scrollback_line_up(JcosCapabilityHandle portal_cap) {
+    return portal_command(portal_cap, JCOS_CONSOLE_PORTAL_SCROLL_LINE_UP, 0ULL);
+}
+
+static int portal_scrollback_line_down(JcosCapabilityHandle portal_cap) {
+    return portal_command(portal_cap, JCOS_CONSOLE_PORTAL_SCROLL_LINE_DOWN, 0ULL);
+}
+
 static int portal_scrollback_page_up(JcosCapabilityHandle portal_cap) {
     return portal_command(portal_cap, JCOS_CONSOLE_PORTAL_SCROLL_PAGE_UP, 0ULL);
 }
@@ -874,7 +882,8 @@ static int shell_execute(ShellState *shell, JcosCapabilityHandle portal_cap,
                 "service CMD worker manage an ordinary background service\n"
                 "  CMD: start stop restart replace status fault\n"
                 "monitor            return input to the kernel emergency monitor\n"
-                "KEYS: UP/DOWN HISTORY, LEFT/RIGHT EDIT, HOME/END, PGUP/PGDN SCROLL.\n"
+                "KEYS: UP/DOWN HISTORY, LEFT/RIGHT EDIT, HOME/END, PGUP/PGDN PAGE SCROLL.\n"
+                "      CTRL+PGUP/PGDN SCROLL ONE LINE.\n"
                 "CLIPBOARD: SHIFT+ARROWS SELECT, CTRL+SHIFT+C/X/V COPY/CUT/PASTE.\n")) return 0;
         *out_result = JCOS_CONSOLE_SHELL_RESULT_OK;
     } else if (command_prefix(normalized, "echo", &rest)) {
@@ -977,16 +986,18 @@ static int shell_handle_key(ShellState *shell, JcosCapabilityHandle portal_cap,
     *out_result = JCOS_CONSOLE_SHELL_RESULT_NONE;
     if (shell->active != SHELL_STATE_ACTIVE) return 1;
 
+    int shift = (event & JCOS_CONSOLE_INPUT_EVENT_SHIFT) != 0ULL;
+    int ctrl = (event & JCOS_CONSOLE_INPUT_EVENT_CTRL) != 0ULL;
+
     if (key == JCOS_CONSOLE_INPUT_KEY_PAGE_UP)
-        return portal_scrollback_page_up(portal_cap);
+        return ctrl ? portal_scrollback_line_up(portal_cap) :
+            portal_scrollback_page_up(portal_cap);
     if (key == JCOS_CONSOLE_INPUT_KEY_PAGE_DOWN)
-        return portal_scrollback_page_down(portal_cap);
+        return ctrl ? portal_scrollback_line_down(portal_cap) :
+            portal_scrollback_page_down(portal_cap);
 
     /* Any ordinary editing/navigation action returns to the live viewport. */
     if (!portal_scrollback_to_bottom(portal_cap)) return 0;
-
-    int shift = (event & JCOS_CONSOLE_INPUT_EVENT_SHIFT) != 0ULL;
-    int ctrl = (event & JCOS_CONSOLE_INPUT_EVENT_CTRL) != 0ULL;
 
     if (key == JCOS_CONSOLE_INPUT_KEY_CHARACTER && ctrl && shift) {
         char lower = shell_ascii_lower((char)(event & JCOS_CONSOLE_INPUT_EVENT_CHARACTER_MASK));
