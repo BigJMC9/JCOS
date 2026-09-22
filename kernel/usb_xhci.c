@@ -15,6 +15,8 @@
 #define XHCI_WAIT_LIMIT 200000U
 #define XHCI_MFINDEX_WAIT_SPINS 50000000U
 #define XHCI_POWER_SETTLE_SPINS 2000000U
+#define XHCI_POST_RESET_SETTLE_SPINS 12000000U
+#define XHCI_CONNECT_DEBOUNCE_SPINS 2000000U
 #define XHCI_LEGACY_HANDOFF_SPINS 10000000U
 #define XHCI_MMIO_SIZE 0x10000ULL
 #define XHCI_MAX_PORTS 255U
@@ -153,6 +155,8 @@ static void xhci_report_failure_detail(const char *stage, u32 detail) {
             record->usbsts = *reg32((u64)g_xhci.op, 0x04U);
         }
         record->detail = detail;
+        record->port = ~0U;
+        record->protocol_major = 0U;
     }
     serial_write("XHCI: FAIL ");
     serial_write(stage);
@@ -163,6 +167,18 @@ static void xhci_report_failure_detail(const char *stage, u32 detail) {
         serial_write_hex(*reg32((u64)g_xhci.op, 0x04U));
     }
     serial_write("\n");
+}
+
+static void xhci_report_port_failure(const char *stage, u32 port, u32 detail) {
+    u32 before = g_failure_count;
+    xhci_report_failure_detail(stage, detail);
+
+    if (g_failure_count > before) {
+        XhciFailureRecord *record = &g_failures[g_failure_count - 1U];
+        record->port = port;
+        record->protocol_major =
+            port < g_xhci.max_ports ? g_xhci.port_protocol[port] : 0U;
+    }
 }
 
 static void xhci_report_failure(const char *stage) {
@@ -381,6 +397,30 @@ static u32 mf_elapsed(u32 start) {
 
 static void bounded_spin_delay(u32 spins) {
     for (u32 i = 0; i < spins; ++i) arch_pause();
+}
+
+static bool any_root_port_connected(u32 ports) {
+    for (u32 port = 0; port < ports; ++port) {
+        volatile u32 *portsc =
+            reg32((u64)g_xhci.op, 0x400U + port * 0x10U);
+        if (*portsc & XHCI_PORTSC_CCS) return true;
+    }
+    return false;
+}
+
+static bool wait_for_root_port_connection(u32 ports) {
+    /*
+     * HCRST completion is not gated by completion of Root Hub recovery.
+     * Give the physical links time to return from their reset/detect states.
+     */
+    for (u32 spins = 0; spins < XHCI_POST_RESET_SETTLE_SPINS; ++spins) {
+        if ((spins & 0x3FFU) == 0U && any_root_port_connected(ports)) {
+            bounded_spin_delay(XHCI_CONNECT_DEBOUNCE_SPINS);
+            return any_root_port_connected(ports);
+        }
+        arch_pause();
+    }
+    return any_root_port_connected(ports);
 }
 
 static bool reset_port(volatile u32 *portsc, bool superspeed) {
@@ -889,7 +929,13 @@ bool xhci_init(VmPageMap *kernel_map) {
      */
     if (port_power_changed) bounded_spin_delay(XHCI_POWER_SETTLE_SPINS);
 
-    bool connected_port = false;
+    /*
+     * HCRST resets the Root Hub port state machines, and the specification
+     * explicitly does not require those port resets/recovery operations to
+     * have completed when HCRST itself clears. Wait for an attached device
+     * to become visible before concluding that every root port is empty.
+     */
+    bool connected_port = wait_for_root_port_connection(ports);
 
     for (u32 port = 0; port < ports; ++port) {
         volatile u32 *portsc =
@@ -903,7 +949,7 @@ bool xhci_init(VmPageMap *kernel_map) {
             g_xhci.port_protocol[port] >= 3U || initial_speed >= 4U;
 
         if (!reset_port(portsc, superspeed)) {
-            xhci_report_failure_detail("port reset or enable", *portsc);
+            xhci_report_port_failure("port reset or enable", port, *portsc);
             continue;
         }
 
@@ -1015,7 +1061,7 @@ bool xhci_init(VmPageMap *kernel_map) {
             xhci_report_failure_detail("no connected USB port", ports);
             for (u32 port = 0; port < ports; ++port) {
                 volatile u32 *portsc = reg32((u64)g_xhci.op, 0x400U + port * 0x10U);
-                xhci_report_failure_detail("port status", *portsc);
+                xhci_report_port_failure("port status", port, *portsc);
             }
         }
     }
