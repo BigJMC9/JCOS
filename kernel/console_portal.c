@@ -30,6 +30,10 @@ static void portal_deliver(ConsolePortal *portal, const IpcMessage *message) {
     if (argument) return;
     if (operation == JCOS_CONSOLE_PORTAL_CURSOR_LEFT) {
         (void)terminal_cursor_left();
+    } else if (operation == JCOS_CONSOLE_PORTAL_SCROLL_LINE_UP) {
+        terminal_scrollback_line_up();
+    } else if (operation == JCOS_CONSOLE_PORTAL_SCROLL_LINE_DOWN) {
+        terminal_scrollback_line_down();
     } else if (operation == JCOS_CONSOLE_PORTAL_SCROLL_PAGE_UP) {
         terminal_scrollback_page_up();
     } else if (operation == JCOS_CONSOLE_PORTAL_SCROLL_PAGE_DOWN) {
