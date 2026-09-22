@@ -57,6 +57,7 @@
 #define TRB_SLOT_ID(value) ((u32)(value) << 24)
 #define TRB_CYCLE (1U << 0)
 #define TRB_ENT (1U << 1)
+#define TRB_ISP (1U << 2)
 #define TRB_IOC (1U << 5)
 #define TRB_IDT (1U << 6)
 #define TRB_DIR (1U << 16)
@@ -125,6 +126,11 @@ typedef struct {
     u32 transfer_cycle;
     u32 event_index;
     u32 event_cycle;
+    bool port_selected;
+    u32 last_completion_code;
+    u32 last_event_type;
+    u32 last_event_slot;
+    u32 last_event_endpoint;
 } XhciState;
 
 static XhciState g_xhci;
@@ -157,6 +163,20 @@ static void xhci_report_failure_detail(const char *stage, u32 detail) {
         record->detail = detail;
         record->port = ~0U;
         record->protocol_major = 0U;
+        record->speed_id = 0U;
+        record->completion_code = g_xhci.last_completion_code;
+        record->event_slot = g_xhci.last_event_slot;
+        record->event_endpoint = g_xhci.last_event_endpoint;
+
+        if (g_xhci.port_selected && g_xhci.port < g_xhci.max_ports) {
+            record->port = g_xhci.port;
+            record->protocol_major = g_xhci.port_protocol[g_xhci.port];
+            if (g_xhci.op) {
+                u32 portsc = *reg32((u64)g_xhci.op,
+                    0x400U + g_xhci.port * 0x10U);
+                record->speed_id = (portsc >> 10) & 0x0FU;
+            }
+        }
     }
     serial_write("XHCI: FAIL ");
     serial_write(stage);
@@ -178,6 +198,11 @@ static void xhci_report_port_failure(const char *stage, u32 port, u32 detail) {
         record->port = port;
         record->protocol_major =
             port < g_xhci.max_ports ? g_xhci.port_protocol[port] : 0U;
+        if (g_xhci.op && port < g_xhci.max_ports) {
+            u32 portsc = *reg32((u64)g_xhci.op,
+                0x400U + port * 0x10U);
+            record->speed_id = (portsc >> 10) & 0x0FU;
+        }
     }
 }
 
@@ -399,6 +424,14 @@ static void bounded_spin_delay(u32 spins) {
     for (u32 i = 0; i < spins; ++i) arch_pause();
 }
 
+static void wait_microframes_bounded(u32 microframes) {
+    u32 start = mfindex();
+    for (u32 spins = 0; spins < XHCI_MFINDEX_WAIT_SPINS; ++spins) {
+        if (mf_elapsed(start) >= microframes) return;
+        arch_pause();
+    }
+}
+
 static bool any_root_port_connected(u32 ports) {
     for (u32 port = 0; port < ports; ++port) {
         volatile u32 *portsc =
@@ -490,17 +523,32 @@ static bool next_event(XhciTrb *event) {
 }
 
 static bool wait_completion(u32 type, u32 *slot_out) {
+    g_xhci.last_completion_code = 0U;
+    g_xhci.last_event_type = 0U;
+    g_xhci.last_event_slot = 0U;
+    g_xhci.last_event_endpoint = 0U;
+
     for (u32 i = 0; i < XHCI_WAIT_LIMIT; ++i) {
         XhciTrb event;
         if (next_event(&event)) {
             u32 event_type = (event.control >> 10) & 0x3FU;
+
             if (event_type == type) {
-                if (slot_out) *slot_out = (event.control >> 24) & 0xFFU;
-                return ((event.status >> 24) & 0xFFU) == 1U;
+                u32 completion = (event.status >> 24) & 0xFFU;
+                g_xhci.last_completion_code = completion;
+                g_xhci.last_event_type = event_type;
+                g_xhci.last_event_slot = (event.control >> 24) & 0xFFU;
+                g_xhci.last_event_endpoint = (event.control >> 16) & 0x1FU;
+
+                if (slot_out) *slot_out = g_xhci.last_event_slot;
+
+                /* Short Packet is a normal completion for descriptor reads. */
+                return completion == 1U || completion == 13U;
             }
         }
         arch_pause();
     }
+
     return false;
 }
 
@@ -524,27 +572,43 @@ static void release_current_slot(void) {
     g_xhci.slot = 0;
 }
 
-static bool control_transfer(u8 request, u8 request_type, u16 value, u16 index, u16 length, bool in) {
-    u64 setup = (u64)request_type | ((u64)request << 8) | ((u64)value << 16) |
-        ((u64)index << 32) | ((u64)length << 48);
+static bool control_transfer(u8 request, u8 request_type, u16 value,
+                             u16 index, u16 length, bool in) {
+    u32 needed = length ? 3U : 2U;
+    if (g_xhci.endpoint_index + needed >= XHCI_MAX_TRBS) return false;
+
+    u64 setup = (u64)request_type | ((u64)request << 8) |
+        ((u64)value << 16) | ((u64)index << 32) | ((u64)length << 48);
+
     XhciTrb *ring = ep0_ring();
-    XhciTrb *trb = &ring[g_xhci.endpoint_index++];
-    trb->parameter = setup;
-    trb->status = 8U;
-    trb->control = TRB_TYPE(TRB_SETUP_STAGE) | TRB_IDT |
-        (length ? TRB_SETUP_TRANSFER_TYPE(in ? 3U : 2U) : 0U) | TRB_CYCLE;
-    if (length) trb->control |= TRB_CHAIN;
+    u32 first_index = g_xhci.endpoint_index;
+    XhciTrb *setup_trb = &ring[g_xhci.endpoint_index++];
+
+    setup_trb->parameter = setup;
+    setup_trb->status = 8U;
+
+    u32 setup_control = TRB_TYPE(TRB_SETUP_STAGE) | TRB_IDT |
+        (length ? TRB_SETUP_TRANSFER_TYPE(in ? 3U : 2U) : 0U);
+    setup_trb->control = setup_control; /* publish this TRB last */
+
     if (length) {
-        trb = &ring[g_xhci.endpoint_index++];
-        trb->parameter = g_xhci.transfer_buffer_phys;
-        trb->status = length;
-        trb->control = TRB_TYPE(TRB_DATA_STAGE) | TRB_CHAIN |
-            (in ? TRB_DIR : 0U) | TRB_CYCLE;
+        XhciTrb *data_trb = &ring[g_xhci.endpoint_index++];
+        data_trb->parameter = g_xhci.transfer_buffer_phys;
+        data_trb->status = length;
+        data_trb->control = TRB_TYPE(TRB_DATA_STAGE) |
+            (in ? (TRB_DIR | TRB_ISP) : 0U) | TRB_CYCLE;
     }
-    trb = &ring[g_xhci.endpoint_index++];
-    trb->parameter = 0;
-    trb->status = 0;
-    trb->control = TRB_TYPE(TRB_STATUS_STAGE) | (in ? 0U : TRB_DIR) | TRB_IOC | TRB_CYCLE;
+
+    XhciTrb *status_trb = &ring[g_xhci.endpoint_index++];
+    status_trb->parameter = 0;
+    status_trb->status = 0;
+    status_trb->control = TRB_TYPE(TRB_STATUS_STAGE) |
+        (in ? 0U : TRB_DIR) | TRB_IOC | TRB_CYCLE;
+
+    __asm__ volatile ("mfence" ::: "memory");
+    ring[first_index].control = setup_control | TRB_CYCLE;
+    __asm__ volatile ("mfence" ::: "memory");
+
     ring_endpoint_doorbell(1);
     return wait_completion(TRB_TRANSFER_EVENT, 0);
 }
@@ -954,6 +1018,11 @@ bool xhci_init(VmPageMap *kernel_map) {
         }
 
         g_xhci.port = port;
+        g_xhci.port_selected = true;
+
+        /* USB reset recovery interval before the first address transaction. */
+        wait_microframes_bounded(80U);
+
         u32 slot = 0;
 
         if (!command(TRB_ENABLE_SLOT, 0, 0, &slot) ||
@@ -992,6 +1061,10 @@ bool xhci_init(VmPageMap *kernel_map) {
             release_current_slot();
             continue;
         }
+
+        /* Give SET_ADDRESS performed by Address Device time to settle. */
+        wait_microframes_bounded(80U);
+
         u8 *descriptor = (u8 *)phys_to_virt(buffer);
         if (!control_transfer(USB_REQ_GET_DESCRIPTOR, 0x80U, USB_DESC_DEVICE << 8, 0, 8, true)) {
             xhci_report_failure("device descriptor");
