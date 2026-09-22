@@ -10,6 +10,8 @@ typedef struct {
 	u32 usbcmd;
 	u32 usbsts;
 	u32 detail;
+	u32 port;
+	u32 protocol_major;
 } XhciFailureRecord;
 
 bool xhci_init(VmPageMap *kernel_map);
