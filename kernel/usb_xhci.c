@@ -286,6 +286,53 @@ static bool setup_scratchpads(u32 hcs2) {
     return true;
 }
 
+static void free_dma_pages(u64 *physical, u64 count) {
+    if (!physical || !*physical || !count) return;
+    frame_t first = phys_to_frame(*physical);
+    if (first != FRAME_INVALID) (void)frame_free_range(first, count);
+    *physical = 0;
+}
+
+static void release_scratchpads(void) {
+    if (g_xhci.scratchpad_array_phys && g_xhci.scratchpad_count) {
+        u64 *array =
+            (u64 *)phys_to_virt(g_xhci.scratchpad_array_phys);
+
+        if (array) {
+            for (u32 i = 0; i < g_xhci.scratchpad_count; ++i) {
+                if (!array[i]) continue;
+                frame_t frame = phys_to_frame(array[i]);
+                if (frame != FRAME_INVALID) (void)frame_free(frame);
+                array[i] = 0;
+            }
+        }
+
+        u64 bytes = (u64)g_xhci.scratchpad_count * sizeof(u64);
+        u64 pages = (bytes + FRAME_SIZE - 1ULL) / FRAME_SIZE;
+        free_dma_pages(&g_xhci.scratchpad_array_phys, pages);
+    }
+
+    if (g_xhci.dcbaa_phys) {
+        u64 *dcbaa = (u64 *)phys_to_virt(g_xhci.dcbaa_phys);
+        if (dcbaa) dcbaa[0] = 0;
+    }
+
+    g_xhci.scratchpad_count = 0;
+}
+
+static void release_dma_resources(void) {
+    release_scratchpads();
+    free_dma_pages(&g_xhci.transfer_buffer_phys, 1ULL);
+    free_dma_pages(&g_xhci.endpoint_ring_phys, 1ULL);
+    free_dma_pages(&g_xhci.ep0_ring_phys, 1ULL);
+    free_dma_pages(&g_xhci.event_table_phys, 1ULL);
+    free_dma_pages(&g_xhci.event_ring_phys, 1ULL);
+    free_dma_pages(&g_xhci.command_ring_phys, 1ULL);
+    free_dma_pages(&g_xhci.device_context_phys, 1ULL);
+    free_dma_pages(&g_xhci.input_context_phys, 1ULL);
+    free_dma_pages(&g_xhci.dcbaa_phys, 1ULL);
+}
+
 static bool controller_halted(void) {
     return (*reg32((u64)g_xhci.op, 0x04U) & XHCI_USBSTS_HCH) != 0;
 }
@@ -299,6 +346,22 @@ static bool wait_condition(bool (*condition)(void)) {
         if (condition()) return true;
         arch_pause();
     }
+    return false;
+}
+
+static void stop_controller_for_cleanup(void) {
+    if (!g_xhci.op) return;
+    volatile u32 *usbcmd = reg32((u64)g_xhci.op, 0x00U);
+    *usbcmd &= ~XHCI_USBCMD_RUN;
+    (void)wait_condition(controller_halted);
+    g_xhci.initialized = false;
+    g_xhci.keyboard_ready = false;
+}
+
+static bool xhci_fail_after_dma(const char *stage) {
+    xhci_report_failure(stage);
+    stop_controller_for_cleanup();
+    release_dma_resources();
     return false;
 }
 
@@ -925,30 +988,54 @@ bool xhci_init(VmPageMap *kernel_map) {
     for (u32 wait = 0; wait < XHCI_WAIT_LIMIT && (*usbcmd & XHCI_USBCMD_HCRST); ++wait) arch_pause();
     if (*usbcmd & XHCI_USBCMD_HCRST) return xhci_fail("controller reset");
     if (!wait_condition(controller_not_ready)) return xhci_fail("controller ready");
-    u64 dcbaa = 0, input = 0, device_context = 0, command_ring_phys = 0, event_ring_phys = 0, event_table = 0, ep0_ring_phys = 0, endpoint_ring_phys = 0, buffer = 0;
-    if (!dma_page(&dcbaa) || !dma_page(&input) || !dma_page(&device_context) || !dma_page(&command_ring_phys) || !dma_page(&event_ring_phys) || !dma_page(&event_table) || !dma_page(&ep0_ring_phys) || !dma_page(&endpoint_ring_phys) || !dma_page(&buffer)) return xhci_fail("DMA allocation");
-    g_xhci.dcbaa_phys = dcbaa; g_xhci.input_context_phys = input; g_xhci.device_context_phys = device_context; g_xhci.command_ring_phys = command_ring_phys;
-    g_xhci.event_ring_phys = event_ring_phys; g_xhci.event_table_phys = event_table; g_xhci.ep0_ring_phys = ep0_ring_phys; g_xhci.endpoint_ring_phys = endpoint_ring_phys; g_xhci.transfer_buffer_phys = buffer;
-    if (!setup_scratchpads(hcs2)) return xhci_fail("scratchpad allocation");
-    ((XhciTrb *)phys_to_virt(command_ring_phys))[XHCI_MAX_TRBS - 1U].parameter = command_ring_phys;
-    ((XhciTrb *)phys_to_virt(command_ring_phys))[XHCI_MAX_TRBS - 1U].control = (6U << 10) | 2U | TRB_CYCLE;
-    *reg32((u64)g_xhci.op, 0x30U) = (u32)dcbaa; *reg32((u64)g_xhci.op, 0x34U) = (u32)(dcbaa >> 32);
-    *reg32((u64)g_xhci.op, 0x18U) = (u32)command_ring_phys | 1U; *reg32((u64)g_xhci.op, 0x1CU) = (u32)(command_ring_phys >> 32);
+    if (!dma_page(&g_xhci.dcbaa_phys) ||
+        !dma_page(&g_xhci.input_context_phys) ||
+        !dma_page(&g_xhci.device_context_phys) ||
+        !dma_page(&g_xhci.command_ring_phys) ||
+        !dma_page(&g_xhci.event_ring_phys) ||
+        !dma_page(&g_xhci.event_table_phys) ||
+        !dma_page(&g_xhci.ep0_ring_phys) ||
+        !dma_page(&g_xhci.endpoint_ring_phys) ||
+        !dma_page(&g_xhci.transfer_buffer_phys)) {
+        return xhci_fail_after_dma("DMA allocation");
+    }
+
+    if (!setup_scratchpads(hcs2)) {
+        return xhci_fail_after_dma("scratchpad allocation");
+    }
+
+    XhciTrb *command_trbs =
+        (XhciTrb *)phys_to_virt(g_xhci.command_ring_phys);
+    command_trbs[XHCI_MAX_TRBS - 1U].parameter =
+        g_xhci.command_ring_phys;
+    command_trbs[XHCI_MAX_TRBS - 1U].control =
+        (6U << 10) | 2U | TRB_CYCLE;
+
+    *reg32((u64)g_xhci.op, 0x30U) = (u32)g_xhci.dcbaa_phys;
+    *reg32((u64)g_xhci.op, 0x34U) =
+        (u32)(g_xhci.dcbaa_phys >> 32);
+    *reg32((u64)g_xhci.op, 0x18U) =
+        (u32)g_xhci.command_ring_phys | 1U;
+    *reg32((u64)g_xhci.op, 0x1CU) =
+        (u32)(g_xhci.command_ring_phys >> 32);
     *reg32((u64)g_xhci.op, 0x38U) = g_xhci.max_slots;
 
-    u32 *event_table_words = (u32 *)phys_to_virt(event_table);
-    event_table_words[0] = (u32)event_ring_phys;
-    event_table_words[1] = (u32)(event_ring_phys >> 32);
+    u32 *event_table_words =
+        (u32 *)phys_to_virt(g_xhci.event_table_phys);
+    event_table_words[0] = (u32)g_xhci.event_ring_phys;
+    event_table_words[1] = (u32)(g_xhci.event_ring_phys >> 32);
     event_table_words[2] = XHCI_MAX_TRBS;
     event_table_words[3] = 0;
 
     *(volatile u32 *)(interrupter0() + 0x08U) = 1U;
-    *(volatile u32 *)(interrupter0() + 0x10U) = (u32)event_table;
-    *(volatile u32 *)(interrupter0() + 0x14U) = (u32)(event_table >> 32);
+    *(volatile u32 *)(interrupter0() + 0x10U) =
+        (u32)g_xhci.event_table_phys;
+    *(volatile u32 *)(interrupter0() + 0x14U) =
+        (u32)(g_xhci.event_table_phys >> 32);
     *(volatile u32 *)(interrupter0() + 0x18U) =
-        (u32)event_ring_phys | XHCI_ERDP_EHB;
+        (u32)g_xhci.event_ring_phys | XHCI_ERDP_EHB;
     *(volatile u32 *)(interrupter0() + 0x1CU) =
-        (u32)(event_ring_phys >> 32);
+        (u32)(g_xhci.event_ring_phys >> 32);
     __asm__ volatile ("mfence" ::: "memory");
     g_xhci.command_cycle = 1U;
     g_xhci.event_cycle = 1U;
@@ -956,7 +1043,7 @@ bool xhci_init(VmPageMap *kernel_map) {
 
     *usbcmd |= XHCI_USBCMD_RUN;
     if (!wait_condition(controller_not_ready) || controller_halted()) {
-        return xhci_fail("controller start");
+        return xhci_fail_after_dma("controller start");
     }
 
     g_xhci.initialized = true;
@@ -1055,7 +1142,8 @@ bool xhci_init(VmPageMap *kernel_map) {
         /* Give SET_ADDRESS performed by Address Device time to settle. */
         wait_microframes_bounded(80U);
 
-        u8 *descriptor = (u8 *)phys_to_virt(buffer);
+        u8 *descriptor =
+            (u8 *)phys_to_virt(g_xhci.transfer_buffer_phys);
         if (!control_transfer(USB_REQ_GET_DESCRIPTOR, 0x80U, USB_DESC_DEVICE << 8, 0, 8, true)) {
             xhci_report_failure("device descriptor");
             release_current_slot();
