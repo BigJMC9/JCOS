@@ -30,34 +30,44 @@ typedef struct {
 } MediaAuthorities;
 
 static bool media_grants_begin(ProgramLaunchSpec *spec, MediaAuthorities *authorities) {
-    if (!spec || !authorities || !display_available() || !audio_available()) return false;
+    if (!spec || !authorities || !display_available()) return false;
     k_memset(authorities, 0, sizeof(*authorities));
     Process *kernel = process_kernel();
     CapabilityTable *caps = kernel ? process_capabilities(kernel) : 0;
     DeviceResource *display = display_resource();
-    DeviceResource *audio = audio_resource();
     CapabilityRights authority = CAPABILITY_RIGHT_READ | CAPABILITY_RIGHT_WRITE |
         CAPABILITY_RIGHT_TRANSFER;
-    if (!caps || !display || !audio ||
+    if (!caps || !display ||
         !capability_insert(caps, display, CAPABILITY_TYPE_DEVICE_RESOURCE,
             authority, &authorities->display_authority)) return false;
-    if (!capability_insert(caps, audio, CAPABILITY_TYPE_DEVICE_RESOURCE,
-            authority, &authorities->audio_authority)) {
-        (void)capability_revoke(caps, authorities->display_authority);
-        k_memset(authorities, 0, sizeof(*authorities));
-        return false;
-    }
+
     spec->startup_grants[2].authority_table = caps;
     spec->startup_grants[2].authority_handle = authorities->display_authority;
     spec->startup_grants[2].object = display;
     spec->startup_grants[2].type = CAPABILITY_TYPE_DEVICE_RESOURCE;
     spec->startup_grants[2].rights = CAPABILITY_RIGHT_READ | CAPABILITY_RIGHT_WRITE;
-    spec->startup_grants[3].authority_table = caps;
-    spec->startup_grants[3].authority_handle = authorities->audio_authority;
-    spec->startup_grants[3].object = audio;
-    spec->startup_grants[3].type = CAPABILITY_TYPE_DEVICE_RESOURCE;
-    spec->startup_grants[3].rights = CAPABILITY_RIGHT_READ | CAPABILITY_RIGHT_WRITE;
-    spec->startup_grant_count = 4U;
+    spec->startup_grant_count = 3U;
+
+    /*
+     * AC'97 is optional on real hardware. Modern PCs commonly expose HDA
+     * instead, which JCOS does not drive yet. Keep video playback available and
+     * grant audio only when the current AC'97 backend is actually present.
+     */
+    if (audio_available()) {
+        DeviceResource *audio = audio_resource();
+        if (!audio || !capability_insert(caps, audio, CAPABILITY_TYPE_DEVICE_RESOURCE,
+                authority, &authorities->audio_authority)) {
+            (void)capability_revoke(caps, authorities->display_authority);
+            k_memset(authorities, 0, sizeof(*authorities));
+            return false;
+        }
+        spec->startup_grants[3].authority_table = caps;
+        spec->startup_grants[3].authority_handle = authorities->audio_authority;
+        spec->startup_grants[3].object = audio;
+        spec->startup_grants[3].type = CAPABILITY_TYPE_DEVICE_RESOURCE;
+        spec->startup_grants[3].rights = CAPABILITY_RIGHT_READ | CAPABILITY_RIGHT_WRITE;
+        spec->startup_grant_count = 4U;
+    }
     return true;
 }
 
