@@ -6957,6 +6957,15 @@ static void shell_suite_print_progress(const char *name, bool pass,
 static void shell_suite_print_summary(const ShellSuiteStats *stats, bool deep) {
     if (!stats) return;
 
+    /*
+     * Every test that reached tests_run must finish classified as PASS or FAIL.
+     * Derive the displayed failure total from that invariant so a bookkeeping
+     * bug cannot silently under-report failures.
+     */
+    u32 derived_failed = stats->tests_run >= stats->tests_passed ?
+        stats->tests_run - stats->tests_passed : stats->tests_failed;
+    bool accounting_mismatch = derived_failed != stats->tests_failed;
+
     terminal_putchar('\n');
     terminal_writeln("TEST SUITE SUMMARY");
     terminal_write("  MODE: ");
@@ -6971,8 +6980,17 @@ static void shell_suite_print_summary(const ShellSuiteStats *stats, bool deep) {
     terminal_write_u64(stats->tests_passed);
     terminal_putchar('\n');
     terminal_write("  TESTS FAILED: ");
-    terminal_write_u64(stats->tests_failed);
+    terminal_write_u64(derived_failed);
     terminal_putchar('\n');
+    if (accounting_mismatch) {
+        terminal_set_color(terminal_error_color());
+        terminal_write("  ACCOUNTING CORRECTED: RECORDED ");
+        terminal_write_u64(stats->tests_failed);
+        terminal_write(", DERIVED ");
+        terminal_write_u64(derived_failed);
+        terminal_putchar('\n');
+        terminal_set_color(terminal_default_color());
+    }
     terminal_write("  TEST ITERATIONS: ");
     terminal_write_u64(stats->run_iterations);
     terminal_putchar('\n');
@@ -6990,7 +7008,7 @@ static void shell_suite_print_summary(const ShellSuiteStats *stats, bool deep) {
         }
         terminal_putchar('\n');
     } else {
-        bool pass = stats->tests_failed == 0U;
+        bool pass = derived_failed == 0U;
         terminal_set_color(pass ? terminal_accent_color() : terminal_error_color());
         terminal_write("  SUITE: ");
         terminal_writeln(pass ? "PASS" : "FAILED");
