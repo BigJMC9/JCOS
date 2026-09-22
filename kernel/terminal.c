@@ -34,6 +34,7 @@ static bool g_follow_output;
 static bool g_ready;
 static bool g_cursor_enabled;
 static bool g_cursor_visible;
+static bool g_render_enabled = true;
 
 static TerminalLineObserver g_line_observer;
 static void *g_line_observer_context;
@@ -89,7 +90,7 @@ static void clear_line(u64 line) {
 }
 
 static void render_cell(u64 line, u32 column) {
-    if (!line_visible(line) || column >= g_columns) return;
+    if (!g_render_enabled || !line_visible(line) || column >= g_columns) return;
 
     u32 row = visible_row(line);
     u32 x = cell_x(column);
@@ -107,7 +108,7 @@ static void render_cell(u64 line, u32 column) {
 }
 
 static void render_viewport(void) {
-    if (!g_ready) return;
+    if (!g_ready || !g_render_enabled) return;
 
     framebuffer_fill(g_background);
 
@@ -474,6 +475,24 @@ bool terminal_cursor_visible(void) {
 void terminal_set_line_observer(TerminalLineObserver observer, void *context) {
     g_line_observer = observer;
     g_line_observer_context = context;
+}
+
+void terminal_set_render_enabled(bool enabled) {
+    if (g_render_enabled == enabled) return;
+
+    if (!enabled) {
+        hide_cursor_overlay();
+        g_render_enabled = false;
+        return;
+    }
+
+    g_render_enabled = true;
+    render_viewport();
+    if (g_cursor_enabled) show_cursor_overlay();
+}
+
+bool terminal_render_enabled(void) {
+    return g_render_enabled;
 }
 
 void terminal_scrollback_line_up(void) {
