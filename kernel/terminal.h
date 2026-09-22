@@ -28,6 +28,8 @@ void terminal_cursor_toggle(void);
 bool terminal_cursor_visible(void);
 
 void terminal_set_line_observer(TerminalLineObserver observer, void *context);
+void terminal_set_render_enabled(bool enabled);
+bool terminal_render_enabled(void);
 
 void terminal_scrollback_line_up(void);
 void terminal_scrollback_line_down(void);
