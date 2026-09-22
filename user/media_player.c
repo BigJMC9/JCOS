@@ -12,10 +12,11 @@ static int startup_valid(const JcosProgramStartup *startup) {
         startup->version == JCOS_PROGRAM_STARTUP_VERSION &&
         startup->size == sizeof(JcosProgramStartup) &&
         startup->flags == JCOS_PROGRAM_STARTUP_FLAG_NONE &&
-        startup->capability_count == 4U && startup->argument_count == 4U &&
-        startup->environment_count == 0U &&
+        (startup->capability_count == 3U || startup->capability_count == 4U) &&
+        startup->argument_count == 4U && startup->environment_count == 0U &&
         startup->capabilities[0] && startup->capabilities[1] &&
-        startup->capabilities[2] && startup->capabilities[3] &&
+        startup->capabilities[2] &&
+        (startup->capability_count == 3U || startup->capabilities[3]) &&
         startup->arguments[0] == JCOS_CONSOLE_CLIENT_PROTOCOL_VERSION &&
         startup->arguments[1] && startup->arguments[2] && startup->arguments[3];
 }
@@ -82,7 +83,8 @@ void jcos_main(const JcosProgramStartup *startup) {
 
     JcosCapabilityHandle output = startup->capabilities[0];
     JcosCapabilityHandle display = startup->capabilities[2];
-    JcosCapabilityHandle audio = startup->capabilities[3];
+    JcosCapabilityHandle audio = startup->capability_count >= 4U
+        ? startup->capabilities[3] : JCOS_CAPABILITY_INVALID_HANDLE;
     JcosU64 session_id = startup->arguments[1];
     const unsigned char *media = (const unsigned char *)(JcosU64)startup->arguments[2];
     JcosU64 media_size = startup->arguments[3];
@@ -113,10 +115,13 @@ void jcos_main(const JcosProgramStartup *startup) {
     JcosU32 submit_max = 0U;
     JcosU64 frequency = jcos_clock_frequency();
     if (!frequency || !jcos_display_info(display, &screen_width, &screen_height) ||
-        !screen_width || !screen_height ||
-        !jcos_audio_info(audio, &sample_rate, &submit_max) ||
-        sample_rate != header->sample_rate || submit_max < 4U) {
-        finish(output, session_id, "media: display or audio unavailable");
+        !screen_width || !screen_height) {
+        finish(output, session_id, "media: display unavailable");
+        jcos_thread_exit();
+    }
+    if (audio && (!jcos_audio_info(audio, &sample_rate, &submit_max) ||
+        sample_rate != header->sample_rate || submit_max < 4U)) {
+        finish(output, session_id, "media: audio unavailable");
         jcos_thread_exit();
     }
 
@@ -136,8 +141,11 @@ void jcos_main(const JcosProgramStartup *startup) {
             jcos_thread_exit();
         }
         offset += chunk->video_size;
-        if (!range_valid(offset, chunk->audio_samples, media_size) ||
-            !submit_audio(audio, media + offset, chunk->audio_samples, frequency)) {
+        if (!range_valid(offset, chunk->audio_samples, media_size)) {
+            finish(output, session_id, "media: truncated audio payload");
+            jcos_thread_exit();
+        }
+        if (audio && !submit_audio(audio, media + offset, chunk->audio_samples, frequency)) {
             finish(output, session_id, "media: audio device stalled");
             jcos_thread_exit();
         }
