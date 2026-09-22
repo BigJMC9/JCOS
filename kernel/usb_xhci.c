@@ -542,8 +542,23 @@ static bool wait_completion(u32 type, u32 *slot_out) {
 
                 if (slot_out) *slot_out = g_xhci.last_event_slot;
 
-                /* Short Packet is a normal completion for descriptor reads. */
-                return completion == 1U || completion == 13U;
+                if (type == TRB_TRANSFER_EVENT &&
+                    (g_xhci.last_event_slot != g_xhci.slot ||
+                     g_xhci.last_event_endpoint != 1U)) {
+                    continue;
+                }
+
+                if (completion == 1U) return true;
+
+                /*
+                 * An IN data stage can report Short Packet before the Status
+                 * Stage IOC event. Keep consuming until the Status Stage
+                 * completes instead of treating the intermediate event as the
+                 * end of the control transfer.
+                 */
+                if (type == TRB_TRANSFER_EVENT && completion == 13U) continue;
+
+                return false;
             }
         }
         arch_pause();
