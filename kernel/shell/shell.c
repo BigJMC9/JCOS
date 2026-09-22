@@ -6383,6 +6383,7 @@ typedef struct {
     const char *description;
     KernelTestGroup group;
     void (*run)(void);
+    u32 deep_runs;
 } ShellLocalTest;
 
 static void command_clear(void) { terminal_clear(); }
@@ -6398,6 +6399,8 @@ static void command_fault(void) { __asm__ volatile ("ud2"); }
 
 #define SHELL_COMMAND_CAPACITY 96U
 #define SHELL_LOCAL_TEST_CAPACITY 32U
+#define SHELL_SUITE_FAILURE_CAPACITY 128U
+#define SHELL_SUITE_FAILURE_TEXT_CAPACITY 96U
 
 static ShellCommand g_commands[SHELL_COMMAND_CAPACITY];
 static u32 g_command_count;
@@ -6426,6 +6429,17 @@ static void shell_add_local_test(const char *name, const char *description,
     test->description = description;
     test->group = group;
     test->run = run;
+    test->deep_runs = 1U;
+}
+
+static void shell_set_local_test_deep_runs(const char *name, u32 runs) {
+    if (!name || !runs) return;
+    for (u32 i = 0; i < g_shell_test_count; ++i) {
+        if (k_strieq(name, g_shell_tests[i].name)) {
+            g_shell_tests[i].deep_runs = runs;
+            return;
+        }
+    }
 }
 
 static void shell_registry_init(void) {
@@ -6457,6 +6471,30 @@ static void shell_registry_init(void) {
     shell_add_local_test("user-elf", "filesystem ELF Ring3 loader", KERNEL_TEST_USERSPACE, command_userelftest);
     shell_add_local_test("reschedule", "INT 0x81 full-frame scheduling", KERNEL_TEST_SCHEDULING, command_reschedtest);
 
+    shell_set_local_test_deep_runs("frame", 4U);
+    shell_set_local_test_deep_runs("vmm-basic", 4U);
+    shell_set_local_test_deep_runs("address-space", 4U);
+    shell_set_local_test_deep_runs("endpoint", 8U);
+    shell_set_local_test_deep_runs("ipc", 16U);
+    shell_set_local_test_deep_runs("ipc-receive-block", 16U);
+    shell_set_local_test_deep_runs("ipc-send-block", 16U);
+    shell_set_local_test_deep_runs("user-ipc", 8U);
+    shell_set_local_test_deep_runs("user-ipc-receive-block", 8U);
+    shell_set_local_test_deep_runs("user-ipc-send-block", 8U);
+    shell_set_local_test_deep_runs("process", 8U);
+    shell_set_local_test_deep_runs("thread", 8U);
+    shell_set_local_test_deep_runs("scheduler", 16U);
+    shell_set_local_test_deep_runs("block", 16U);
+    shell_set_local_test_deep_runs("exit", 8U);
+    shell_set_local_test_deep_runs("syscall", 8U);
+    shell_set_local_test_deep_runs("user-isolation", 8U);
+    shell_set_local_test_deep_runs("user-page-fault", 8U);
+    shell_set_local_test_deep_runs("timer-irq", 8U);
+    shell_set_local_test_deep_runs("preemption", 16U);
+    shell_set_local_test_deep_runs("user-preemption", 16U);
+    shell_set_local_test_deep_runs("user-elf", 4U);
+    shell_set_local_test_deep_runs("reschedule", 16U);
+
     shell_add_command("help", "help [COMMAND]", "show command help", SHELL_GROUP_GENERAL, 0, command_help, true);
     shell_add_command("about", "about", "describe this kernel", SHELL_GROUP_GENERAL, command_about, 0, true);
     shell_add_command("usershell", "usershell", "return to the normal Ring3 shell; monitor/Escape returns",
@@ -6482,7 +6520,7 @@ static void shell_registry_init(void) {
     shell_add_command("fat32", "fat32", "show FAT32 filesystem information", SHELL_GROUP_STORAGE, command_fat32, 0, true);
     shell_add_command("fatls", "fatls", "list the FAT32 root directory", SHELL_GROUP_STORAGE, command_fatls, 0, true);
     shell_add_command("fatread", "fatread FILE [OFFSET] [COUNT]", "read/test a FAT32 root file", SHELL_GROUP_STORAGE, 0, command_fatread, true);
-    shell_add_command("test", "test list [GROUP] | test NAME [cleanup]", "list or run kernel diagnostics", SHELL_GROUP_DEVELOPMENT, 0, command_test, true);
+    shell_add_command("test", "test list [GROUP] | test all [deep] | test NAME [cleanup]", "list or run kernel diagnostics", SHELL_GROUP_DEVELOPMENT, 0, command_test, true);
     shell_add_command("alloc", "alloc", "allocate one physical 4 KiB frame", SHELL_GROUP_DEVELOPMENT, command_alloc, 0, true);
     shell_add_command("fault", "fault", "deliberately execute UD2 in the kernel", SHELL_GROUP_DEVELOPMENT, command_fault, 0, true);
     shell_add_command("userfault", "userfault", "enter Ring3 and deliberately execute UD2", SHELL_GROUP_DEVELOPMENT, command_userfault, 0, true);
