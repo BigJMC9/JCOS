@@ -630,8 +630,8 @@ static bool control_transfer(u8 request, u8 request_type, u16 value,
 
 static u16 default_ep0_packet_size(u8 speed, bool superspeed) {
     if (superspeed) return 512U;
-    if (speed == 3U) return 64U;
-    return 8U;
+    if (speed == 1U || speed == 3U) return 64U; /* full/high speed */
+    return 8U; /* low speed */
 }
 
 static u8 endpoint_interval(u8 speed, u8 b_interval) {
