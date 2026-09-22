@@ -801,6 +801,8 @@ static void command_ipcblocktest(void) {
 
     Thread *main_thread = thread_current();
     Process *kernel_process = process_kernel();
+    u64 kernel_threads_before =
+        kernel_process ? process_thread_count(kernel_process) : 0ULL;
 
     bool main_ok = main_thread && kernel_process && main_thread->process == kernel_process &&
         main_thread->state == THREAD_STATE_RUNNING && main_thread->on_run_queue &&
@@ -1009,9 +1011,16 @@ static void command_ipcblocktest(void) {
     terminal_writeln(queue_restored ? "PASS" : "FAILED");
 
     bool reaped = receiver_dead && thread_destroy(&receiver);
-    bool thread_count_restored = process_thread_count(kernel_process) == 1ULL;
+    u64 kernel_threads_after = process_thread_count(kernel_process);
+    bool thread_count_restored = kernel_threads_after == kernel_threads_before;
     terminal_write("  RECEIVER REAP: ");
     terminal_writeln(reaped ? "PASS" : "FAILED");
+    terminal_write("  KERNEL THREADS BEFORE: ");
+    terminal_write_u64(kernel_threads_before);
+    terminal_putchar('\n');
+    terminal_write("  KERNEL THREADS AFTER: ");
+    terminal_write_u64(kernel_threads_after);
+    terminal_putchar('\n');
     terminal_write("  KERNEL THREAD COUNT RESTORED: ");
     terminal_writeln(thread_count_restored ? "PASS" : "FAILED");
 
@@ -1082,6 +1091,8 @@ static void command_ipcsendblocktest(void) {
 
     Thread *main_thread = thread_current();
     Process *kernel_process = process_kernel();
+    u64 kernel_threads_before =
+        kernel_process ? process_thread_count(kernel_process) : 0ULL;
 
     bool main_ok = main_thread && kernel_process && main_thread->process == kernel_process &&
         main_thread->state == THREAD_STATE_RUNNING && main_thread->on_run_queue &&
@@ -1308,9 +1319,16 @@ static void command_ipcsendblocktest(void) {
     terminal_writeln(endpoint_empty ? "PASS" : "FAILED");
 
     bool reaped = sender_dead && thread_destroy(&sender);
-    bool thread_count_restored = process_thread_count(kernel_process) == 1ULL;
+    u64 kernel_threads_after = process_thread_count(kernel_process);
+    bool thread_count_restored = kernel_threads_after == kernel_threads_before;
     terminal_write("  SENDER REAP: ");
     terminal_writeln(reaped ? "PASS" : "FAILED");
+    terminal_write("  KERNEL THREADS BEFORE: ");
+    terminal_write_u64(kernel_threads_before);
+    terminal_putchar('\n');
+    terminal_write("  KERNEL THREADS AFTER: ");
+    terminal_write_u64(kernel_threads_after);
+    terminal_putchar('\n');
     terminal_write("  KERNEL THREAD COUNT RESTORED: ");
     terminal_writeln(thread_count_restored ? "PASS" : "FAILED");
 
