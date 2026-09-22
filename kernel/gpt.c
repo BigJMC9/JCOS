@@ -47,6 +47,13 @@ _Static_assert(sizeof(GptEntry) == 128, "GPT partition entry must be 128 bytes")
 
 static GptInfo g_info;
 
+static const u8 g_efi_system_partition_guid[16] = {
+    0x28U, 0x73U, 0x2AU, 0xC1U,
+    0x1FU, 0xF8U, 0xD2U, 0x11U,
+    0xBAU, 0x4BU, 0x00U, 0xA0U,
+    0xC9U, 0x3EU, 0xC9U, 0x3BU
+};
+
 static u8 g_header_sector[4096];
 static u8 g_entry_buffer[
     GPT_MAX_PARTITIONS * sizeof(GptEntry)
@@ -251,4 +258,25 @@ bool gpt_register_partitions(void) {
 
 const GptInfo *gpt_get(void) {
     return &g_info;
+}
+
+BlockDevice *gpt_efi_system_partition(void) {
+    if (!g_info.valid) return 0;
+
+    for (u32 i = 0; i < g_info.partition_count; ++i) {
+        GptPartition *partition = &g_info.partitions[i];
+        if (!partition->valid || !partition->block_device) continue;
+
+        bool match = true;
+        for (u32 byte = 0; byte < 16U; ++byte) {
+            if (partition->type_guid[byte] != g_efi_system_partition_guid[byte]) {
+                match = false;
+                break;
+            }
+        }
+
+        if (match) return partition->block_device;
+    }
+
+    return 0;
 }

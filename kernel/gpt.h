@@ -55,4 +55,7 @@ const GptInfo *gpt_get(void);
 
 bool gpt_register_partitions(void);
 
+/* Return the registered EFI System Partition for the active GPT, if any. */
+BlockDevice *gpt_efi_system_partition(void);
+
 #endif

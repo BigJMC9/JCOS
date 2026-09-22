@@ -10,10 +10,22 @@ typedef struct {
 	u32 usbcmd;
 	u32 usbsts;
 	u32 detail;
+	u32 port;
+	u32 protocol_major;
+	u32 speed_id;
+	u32 completion_code;
+	u32 event_slot;
+	u32 event_endpoint;
 } XhciFailureRecord;
 
 bool xhci_init(VmPageMap *kernel_map);
 void xhci_poll(void);
+
+/* Controller readiness is distinct from finding a supported HID keyboard. */
+bool xhci_controller_ready(void);
+u32 xhci_root_port_count(void);
+u32 xhci_scratchpad_count(void);
+
 bool xhci_present(void);
 bool xhci_get_event(KeyEvent *event);
 u32 xhci_failure_count(void);
