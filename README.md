@@ -297,4 +297,8 @@ Current work is focused on the next stage of the userspace/application environme
 
 ## License
 
-JCOS is released under the [MIT License](LICENSE).
+Copyright (C) 2026 Jacob Crosbie.
+
+JCOS is free software licensed under the **GNU General Public License v3.0 only** (`GPL-3.0-only`). You may redistribute and/or modify it under the terms of version 3 of the GNU General Public License as published by the Free Software Foundation.
+
+See the full [GNU GPL v3.0 license text](LICENSE) for details.
