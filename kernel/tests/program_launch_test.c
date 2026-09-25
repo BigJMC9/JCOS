@@ -23,6 +23,9 @@
 
 #define PROGRAM_TEST_PATH "/bin/supervisor.elf"
 #define PROGRAM_TEST_TIMEOUT_SECONDS 2ULL
+#define PROGRAM_TEST_BORROWED_BASE   0x0000020000000000ULL
+#define PROGRAM_TEST_BORROWED_OFFSET 0x80ULL
+#define PROGRAM_TEST_BORROWED_SIZE   0x400ULL
 
 static ProgramInstance g_program;
 static Endpoint g_command;
@@ -37,6 +40,7 @@ static bool g_kernel_send_cap;
 static bool g_kernel_receive_cap;
 static bool g_command_grant_cap;
 static bool g_reply_grant_cap;
+static frame_t g_borrowed_frame = FRAME_INVALID;
 
 typedef struct {
     u64 free_pages;
@@ -107,6 +111,15 @@ static bool baseline_matches(const ProgramTestBaseline *baseline) {
 static bool cleanup_fixture(void) {
     if (!program_rollback_test_cleanup()) return false;
     if (program_instance_needs_cleanup(&g_program) && !program_terminate(&g_program)) return false;
+    if (g_borrowed_frame != FRAME_INVALID) {
+        /*
+        * Only free the test-owned backing frame after ProgramInstance has
+        * relinquished every borrowed mapping of it.
+        */
+        if (!frame_free(g_borrowed_frame)) return false;
+
+        g_borrowed_frame = FRAME_INVALID;
+    }
 
     Process *kernel = process_kernel();
     CapabilityTable *caps = kernel ? process_capabilities(kernel) : 0;
@@ -254,6 +267,114 @@ static bool patch_entry_ud2(void) {
     return false;
 }
 
+static bool borrowed_mapping_case(const ProgramLaunchSpec *base_spec, const ProgramTestBaseline *fixture) {
+    if (!base_spec || !fixture || g_borrowed_frame != FRAME_INVALID || program_instance_needs_cleanup(&g_program))
+        return false;
+
+    u64 free_before = pmm_stats().free_pages;
+    g_borrowed_frame = frame_alloc();
+
+    bool allocated = g_borrowed_frame != FRAME_INVALID && free_before && pmm_stats().free_pages == free_before - 1ULL;
+    report("BORROWED TEST FRAME ALLOCATED", allocated);
+
+    if (!allocated) return false;
+
+    /*
+     * While this frame is deliberately retained by the test, the correct
+     * resource baseline is one page below the surrounding fixture.
+     */
+    ProgramTestBaseline borrowed_baseline = *fixture;
+    borrowed_baseline.free_pages = free_before - 1ULL;
+
+    u64 physical = frame_to_phys(g_borrowed_frame);
+    if (!physical) return false;
+
+    ProgramLaunchSpec mapped;
+    k_memcpy(&mapped, base_spec, sizeof(mapped));
+
+    /*
+     * Deliberately begin inside the frame rather than on its boundary.
+     * The launcher should map the minimum page span containing this range.
+     */
+    mapped.borrowed_mapping.physical_base = physical + PROGRAM_TEST_BORROWED_OFFSET;
+    mapped.borrowed_mapping.size = PROGRAM_TEST_BORROWED_SIZE;
+    mapped.borrowed_mapping.virtual_base = PROGRAM_TEST_BORROWED_BASE;
+    mapped.borrowed_mapping.flags = VM_WRITE | VM_UNCACHED;
+
+    /* Device/firmware mappings must never acquire executable authority. */
+    ProgramLaunchSpec executable;
+    k_memcpy(&executable, &mapped, sizeof(executable));
+    executable.borrowed_mapping.flags |= VM_EXEC;
+
+    u64 launches_before = program_launch_count();
+
+    bool executable_rejected = !program_launch(&g_program, &executable) &&
+        !program_instance_needs_cleanup(&g_program) && baseline_matches(&borrowed_baseline) &&
+        program_launch_count() == launches_before;
+
+    report("EXECUTABLE BORROWED MAP REJECTED", executable_rejected);
+
+    if (!executable_rejected) goto fail;
+    if (!program_launch(&g_program, &mapped)) goto fail;
+
+    AddressSpace *space = process_address_space(&g_program.process);
+    frame_t mapped_frame = FRAME_INVALID;
+    vm_flags_t flags = 0ULL;
+    bool queried = space && address_space_query_page(space, PROGRAM_TEST_BORROWED_BASE, &mapped_frame, &flags);
+
+    bool physical_ok = queried && mapped_frame == g_borrowed_frame &&
+        g_program.borrowed_first_frame == g_borrowed_frame &&
+        g_program.borrowed_virtual_base == PROGRAM_TEST_BORROWED_BASE && g_program.borrowed_page_count == 1U;
+
+    report("BORROWED PHYSICAL MAP / PAGE GEOMETRY", physical_ok);
+
+    bool permissions_ok = queried &&
+        (flags & (VM_USER | VM_WRITE | VM_EXEC | VM_UNCACHED)) == (VM_USER | VM_WRITE | VM_UNCACHED);
+
+    report("BORROWED PHYSICAL MAP / USER RW-NX", permissions_ok);
+    bool uncached = queried && (flags & VM_UNCACHED) != 0ULL;
+    report("BORROWED PHYSICAL MAP / UNCACHED", uncached);
+
+    if (!physical_ok || !permissions_ok || !uncached) goto fail;
+
+    /* Program teardown owns the mapping, but explicitly does NOT own its backing physical frame. */
+    bool terminated = program_terminate(&g_program) && !program_instance_needs_cleanup(&g_program);
+    report("BORROWED MAP TEARDOWN", terminated);
+
+    if (!terminated) return false;
+
+    /*
+     * Every ordinary program allocation should now be gone, while the one
+     * test-owned borrowed frame must remain allocated.
+     */
+    bool retained = baseline_matches(&borrowed_baseline) && pmm_stats().free_pages == free_before - 1ULL;
+    report("BORROWED FRAME NOT FREED BY PROGRAM", retained);
+
+    if (!retained) goto fail;
+    if (!frame_free(g_borrowed_frame)) return false;
+
+    g_borrowed_frame = FRAME_INVALID;
+    bool restored = baseline_matches(fixture);
+
+    report("BORROWED FRAME OWNER RELEASE / BASELINE", restored);
+    return restored;
+
+fail:
+    /*
+     * Preserve ordering: remove any userspace mapping before freeing its
+     * backing test frame. If termination itself fails, leave the frame retained
+     * for program_launch_test_cleanup_run().
+     */
+    if (program_instance_needs_cleanup(&g_program) && !program_terminate(&g_program)) return false;
+    if (g_borrowed_frame != FRAME_INVALID) {
+        if (!frame_free(g_borrowed_frame)) return false;
+
+        g_borrowed_frame = FRAME_INVALID;
+    }
+
+    return false;
+}
+
 void program_launch_test_run(void) {
     terminal_writeln("PROGRAM LAUNCH TRANSACTION TEST:");
 
@@ -284,6 +405,7 @@ void program_launch_test_run(void) {
     make_spec(&spec, file);
 
     if (!program_rollback_test_run(&spec)) goto done;
+    if (!borrowed_mapping_case(&spec, &fixture)) goto done;
 
     u64 launches_before = program_launch_count();
     ProgramLaunchSpec unauthorized;

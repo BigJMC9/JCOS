@@ -888,6 +888,7 @@ static int shell_execute(ShellState *shell, JcosCapabilityHandle portal_cap,
                 "fscheck            validate Ring3 tar parsing/read policy\n"
                 "run PATH           launch a foreground ELF selected in Ring3\n"
                 "play TITLE         play badapple or caramel (Escape stops)\n"
+                "gui                start the R8 graphical session (Escape returns)\n"
                 "service CMD worker manage an ordinary background service\n"
                 "  CMD: start stop restart replace status fault\n"
                 "monitor            return input to the kernel emergency monitor\n"
@@ -968,6 +969,13 @@ static int shell_execute(ShellState *shell, JcosCapabilityHandle portal_cap,
             *out_result = JCOS_CONSOLE_SHELL_RESULT_OK;
             return 1;
         }
+    } else if (text_equal(normalized, "gui")) {
+        if (!portal_write(portal_cap, "STARTING R8 GRAPHICAL SESSION - ESCAPE TO RETURN\n")) return 0;
+        shell->active = SHELL_STATE_SUSPENDED;
+        shell_reset_line(shell);
+        *out_action = JCOS_CONSOLE_SHELL_ACTION_RUN_GRAPHICS;
+        *out_result = JCOS_CONSOLE_SHELL_RESULT_OK;
+        return 1;
     } else if (text_equal(normalized, "monitor")) {
         if (!portal_write(portal_cap, "RETURNING INPUT TO KERNEL MONITOR.\n")) return 0;
         shell->active = SHELL_STATE_INACTIVE;

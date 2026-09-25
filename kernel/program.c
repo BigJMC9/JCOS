@@ -13,6 +13,8 @@
 
 #define PROGRAM_RFLAGS_IF (1ULL << 9)
 
+#define PROGRAM_BORROWED_ALLOWED_FLAGS (VM_WRITE | VM_UNCACHED)
+
 static u64 g_program_launch_count;
 
 static u64 program_irq_save(void) {
@@ -26,29 +28,113 @@ static void program_irq_restore(u64 flags) {
     if (flags & PROGRAM_RFLAGS_IF) interrupts_enable();
 }
 
+static bool program_borrowed_geometry(const ProgramBorrowedMappingSpec *mapping, u64 *out_first_physical, u32 *out_page_count) {
+    if (!mapping || !out_first_physical || !out_page_count)
+        return false;
+
+    *out_first_physical = 0ULL;
+    *out_page_count = 0U;
+
+    bool present =
+        mapping->physical_base ||
+        mapping->size ||
+        mapping->virtual_base ||
+        mapping->flags;
+
+    if (!present)
+        return true;
+
+    if (!mapping->physical_base ||
+        !mapping->size ||
+        (mapping->virtual_base & (VM_PAGE_SIZE - 1ULL)) ||
+        mapping->virtual_base < ADDRESS_SPACE_USER_BASE ||
+        mapping->virtual_base >= ADDRESS_SPACE_USER_LIMIT ||
+        (mapping->flags & ~PROGRAM_BORROWED_ALLOWED_FLAGS))
+        return false;
+
+    u64 offset = mapping->physical_base & (VM_PAGE_SIZE - 1ULL);
+    u64 first_physical = mapping->physical_base - offset;
+
+    /* Keep physical page zero unavailable to this interface. */
+    if (!first_physical) return false;
+    if (mapping->size > ~0ULL - offset) return false;
+
+    u64 bytes = mapping->size + offset;
+    if (bytes > ~0ULL - (VM_PAGE_SIZE - 1ULL)) return false;
+
+    u64 page_count = (bytes + VM_PAGE_SIZE - 1ULL) / VM_PAGE_SIZE;
+
+    if (!page_count ||
+        page_count > 0xFFFFFFFFULL ||
+        page_count > (ADDRESS_SPACE_USER_LIMIT - mapping->virtual_base) / VM_PAGE_SIZE)
+        return false;
+
+    u64 span = page_count * VM_PAGE_SIZE;
+
+    if (first_physical > ~0ULL - (span - 1ULL))
+        return false;
+
+    *out_first_physical = first_physical;
+    *out_page_count = (u32)page_count;
+
+    return true;
+}
+
 static bool program_spec_valid(const ProgramLaunchSpec *spec) {
     if (!spec || !spec->file || spec->file->type != VFS_FILE ||
         !spec->file->data || !spec->file->size ||
         spec->startup_grant_count > JCOS_PROGRAM_STARTUP_MAX_CAPABILITIES ||
         spec->startup_argument_count > JCOS_PROGRAM_STARTUP_MAX_ARGUMENTS ||
-        (spec->exit_queue && !process_exit_queue_storage_in_use(spec->exit_queue))) return false;
-    if ((spec->readonly_data || spec->readonly_size || spec->readonly_virtual_base) &&
-        (!spec->readonly_data || !spec->readonly_size ||
+        (spec->exit_queue &&
+         !process_exit_queue_storage_in_use(spec->exit_queue)))
+        return false;
+
+    if ((spec->readonly_data ||
+         spec->readonly_size ||
+         spec->readonly_virtual_base) &&
+        (!spec->readonly_data ||
+         !spec->readonly_size ||
          (spec->readonly_virtual_base & (VM_PAGE_SIZE - 1ULL)) ||
          spec->readonly_virtual_base < ADDRESS_SPACE_USER_BASE ||
-         spec->readonly_virtual_base >= ADDRESS_SPACE_USER_LIMIT)) return false;
+         spec->readonly_virtual_base >= ADDRESS_SPACE_USER_LIMIT))
+        return false;
+
+    u64 borrowed_first = 0ULL;
+    u32 borrowed_pages = 0U;
+
+    if (!program_borrowed_geometry(
+            &spec->borrowed_mapping,
+            &borrowed_first,
+            &borrowed_pages))
+        return false;
 
     for (u32 i = 0; i < spec->startup_grant_count; ++i) {
-        const ProgramGrantSpec *grant = &spec->startup_grants[i];
-        if (!grant->authority_table || grant->authority_handle == CAPABILITY_INVALID_HANDLE ||
-            !grant->object || grant->type == CAPABILITY_TYPE_NONE || !grant->rights ||
-            (grant->rights & ~CAPABILITY_RIGHT_ALL)) return false;
+        const ProgramGrantSpec *grant =
+            &spec->startup_grants[i];
+
+        if (!grant->authority_table ||
+            grant->authority_handle == CAPABILITY_INVALID_HANDLE ||
+            !grant->object ||
+            grant->type == CAPABILITY_TYPE_NONE ||
+            !grant->rights ||
+            (grant->rights & ~CAPABILITY_RIGHT_ALL))
+            return false;
 
         void *authorized = 0;
-        CapabilityRights required = grant->rights | CAPABILITY_RIGHT_TRANSFER;
-        if (!capability_lookup_rights(grant->authority_table, grant->authority_handle,
-                grant->type, required, &authorized) || authorized != grant->object) return false;
+
+        CapabilityRights required =
+            grant->rights | CAPABILITY_RIGHT_TRANSFER;
+
+        if (!capability_lookup_rights(
+                grant->authority_table,
+                grant->authority_handle,
+                grant->type,
+                required,
+                &authorized) ||
+            authorized != grant->object)
+            return false;
     }
+
     return true;
 }
 
@@ -57,7 +143,7 @@ bool program_instance_needs_cleanup(const ProgramInstance *instance) {
     if (instance->process_created || instance->stack_frame_allocated || instance->stack_mapped ||
         instance->thread_created || instance->published || instance->unpublished_space ||
         instance->unpublished_stack || instance->unlinked_table || user_elf_needs_cleanup(&instance->image) ||
-        instance->readonly_page_count || instance->process.id ||
+        instance->readonly_page_count || instance->borrowed_page_count || instance->process.id ||
         instance->process.initialized || instance->thread.id) return true;
     for (u32 i = 0; i < JCOS_PROGRAM_STARTUP_MAX_CAPABILITIES; ++i) {
         if (instance->startup_handles[i] != CAPABILITY_INVALID_HANDLE) return true;
@@ -127,6 +213,37 @@ static bool program_release(ProgramInstance *instance, bool force) {
             old != expected) return false;
         instance->readonly_page_count = index;
     }
+
+    while (instance->borrowed_page_count) {
+        u32 index = instance->borrowed_page_count - 1U;
+
+        u64 virtual_address = instance->borrowed_virtual_base + (u64)index * VM_PAGE_SIZE;
+
+        frame_t expected = instance->borrowed_first_frame + index;
+
+        frame_t mapped = FRAME_INVALID;
+        frame_t old = FRAME_INVALID;
+
+        if (!space ||
+            !address_space_query_page(
+                space,
+                virtual_address,
+                &mapped,
+                0) ||
+            mapped != expected ||
+            !address_space_unmap_page(
+                space,
+                virtual_address,
+                &old) ||
+            old != expected)
+            return false;
+
+        /*
+        * Borrowed storage is not ProgramInstance-owned.
+        * Do NOT frame_free(old).
+        */
+        instance->borrowed_page_count = index;
+    }
     if (instance->stack_mapped) {
         frame_t mapped = FRAME_INVALID;
         frame_t old = FRAME_INVALID;
@@ -175,8 +292,7 @@ u64 program_launch_count(void) {
 static bool program_launch_locked(ProgramInstance *instance, const ProgramLaunchSpec *spec) {
     if (!instance || program_instance_needs_cleanup(instance) || !program_spec_valid(spec)) return false;
     /* Do not adopt another caller's retained constructor allocation. */
-    if (address_space_creation_cleanup_pending() || thread_creation_cleanup_pending() ||
-        vmm_unlinked_table_cleanup_pending()) return false;
+    if (address_space_creation_cleanup_pending() || thread_creation_cleanup_pending() || vmm_unlinked_table_cleanup_pending()) return false;
 
     k_memset(instance, 0, sizeof(*instance));
     instance->stack_frame = FRAME_INVALID;
@@ -192,12 +308,15 @@ static bool program_launch_locked(ProgramInstance *instance, const ProgramLaunch
 
     if (spec->readonly_size) {
         u64 physical = 0;
-        if (!virt_to_phys(spec->readonly_data, &physical))
-            physical = (u64)spec->readonly_data;
+
+        if (!virt_to_phys(spec->readonly_data, &physical)) physical = (u64)spec->readonly_data;
+
         u64 page_offset = physical & (VM_PAGE_SIZE - 1ULL);
         u64 first_physical = physical - page_offset;
+        
         if (spec->readonly_size > ~0ULL - page_offset) goto fail;
         u64 span = spec->readonly_size + page_offset;
+
         if (span > ~0ULL - (VM_PAGE_SIZE - 1ULL)) goto fail;
         u64 page_count = (span + VM_PAGE_SIZE - 1ULL) / VM_PAGE_SIZE;
         if (!page_count || page_count > 0xFFFFFFFFULL ||
@@ -208,10 +327,49 @@ static bool program_launch_locked(ProgramInstance *instance, const ProgramLaunch
         instance->readonly_virtual_base = spec->readonly_virtual_base;
         instance->readonly_first_frame = first_frame;
         for (u32 i = 0; i < (u32)page_count; ++i) {
-            if (!address_space_map_page(space,
-                    spec->readonly_virtual_base + (u64)i * VM_PAGE_SIZE,
-                    first_frame + i, 0)) goto fail;
+            if (!address_space_map_page(space, spec->readonly_virtual_base + (u64)i * VM_PAGE_SIZE, first_frame + i, 0)) goto fail;
             ++instance->readonly_page_count;
+        }
+    }
+
+    if (spec->borrowed_mapping.size) {
+        u64 first_physical = 0ULL;
+        u32 page_count = 0U;
+
+        if (!program_borrowed_geometry(
+                &spec->borrowed_mapping,
+                &first_physical,
+                &page_count))
+            goto fail;
+
+        frame_t first_frame =
+            phys_to_frame(first_physical);
+
+        if (first_frame == FRAME_INVALID)
+            goto fail;
+
+        instance->borrowed_virtual_base =
+            spec->borrowed_mapping.virtual_base;
+
+        instance->borrowed_first_frame =
+            first_frame;
+
+        vm_flags_t mapping_flags =
+            VM_USER | spec->borrowed_mapping.flags;
+
+        for (u32 i = 0U; i < page_count; ++i) {
+            u64 virtual_address =
+                instance->borrowed_virtual_base +
+                (u64)i * VM_PAGE_SIZE;
+
+            if (!address_space_map_page(
+                    space,
+                    virtual_address,
+                    first_frame + i,
+                    mapping_flags))
+                goto fail;
+
+            ++instance->borrowed_page_count;
         }
     }
 

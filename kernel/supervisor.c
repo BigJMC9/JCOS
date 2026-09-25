@@ -172,6 +172,33 @@ static bool supervisor_wait_thread_dead(u64 timeout_ticks) {
     return true;
 }
 
+static bool supervisor_wait_fault_exit(u64 expected_pid, u64 expected_tid) {
+    if (!expected_pid || !expected_tid) return false;
+
+    /* The fault path commits the watched exit event before terminating the
+     * faulting thread. Wait for that terminal handoff first; once the thread is
+     * DEAD the event must already be durable and can be consumed exactly once. */
+    u64 timeout = supervisor_call_timeout_ticks();
+    if (!timeout || !supervisor_wait_thread_dead(timeout)) {
+        if (g_supervisor.state == SUPERVISOR_STATE_RUNNING)
+            g_supervisor.state = SUPERVISOR_STATE_FAILED;
+        return false;
+    }
+
+    bool recorded = supervisor_record_pending_exit(expected_pid, true);
+    bool matched = recorded && g_last_exit_valid &&
+        g_last_exit.reason == PROCESS_EXIT_FAULT &&
+        g_last_exit.process_id == expected_pid &&
+        g_last_exit.thread_id == expected_tid &&
+        g_last_exit.vector == 6ULL;
+
+    /* A dead managed incarnation is never left advertised as RUNNING, even if
+     * its diagnostic exit record violates the expected contract. Recovery can
+     * then force-reap the retained incarnation through the normal path. */
+    g_supervisor.state = SUPERVISOR_STATE_FAILED;
+    return matched;
+}
+
 static bool supervisor_endpoints_idle(void) {
     return g_supervisor.command_created && g_supervisor.reply_created &&
         !endpoint_message_ready(&g_supervisor.command_endpoint) &&
@@ -513,19 +540,24 @@ bool supervisor_test_arm_shutdown_hang(void) {
 
 bool supervisor_test_fault(void) {
     if (!supervisor_idle()) return false;
+
     u64 expected_pid = g_supervisor.program.process.id;
+    u64 expected_tid = g_supervisor.program.thread.id;
     Process *kernel_process = process_kernel();
+
     IpcMessage request;
     k_memset(&request, 0, sizeof(request));
     request.word_count = 1U;
     request.words[0] = SUPERVISOR_MESSAGE_DIAGNOSTIC_FAULT;
-    if (!kernel_process || !ipc_try_send(kernel_process, g_supervisor.kernel_send_handle, &request) ||
-        !supervisor_schedule_once()) return false;
 
-    supervisor_refresh_terminal();
-    return g_supervisor.state == SUPERVISOR_STATE_FAILED && g_last_exit_valid &&
-        g_last_exit.reason == PROCESS_EXIT_FAULT && g_last_exit.process_id == expected_pid &&
-        g_last_exit.vector == 6ULL;
+    if (!kernel_process ||
+        !ipc_try_send(
+            kernel_process,
+            g_supervisor.kernel_send_handle,
+            &request))
+        return false;
+
+    return supervisor_wait_fault_exit(expected_pid, expected_tid);
 }
 
 u64 supervisor_process_id(void) {

@@ -2,8 +2,9 @@
 
 #include "arch.h"
 #include "background_service.h"
-#include "input.h"
+#include "input_router.h"
 #include "foreground_program.h"
+#include "graphical_session.h"
 #include "serial.h"
 #include "system_console.h"
 #include "terminal.h"
@@ -41,7 +42,7 @@ static bool userspace_shell_run_session(bool boot_default) {
 
     for (;;) {
         KeyEvent event;
-        if (!input_poll(&event)) {
+        if (!input_poll_routed(&event)) {
             if (timer_initialized()) {
                 u32 frequency = timer_frequency();
                 u64 interval = frequency >= 2U ? (u64)(frequency / 2U) : 1ULL;
@@ -89,6 +90,19 @@ static bool userspace_shell_run_session(bool boot_default) {
             userspace_shell_cursor_end();
             if (!foreground_program_run_pending()) {
                 serial_write("R7 LAUNCH: foreground extent transaction failed; request/input not replayed.\n");
+            }
+            if (!system_console_shell_activate()) {
+                if (!userspace_shell_recover()) return false;
+            }
+            userspace_shell_cursor_begin();
+            if (timer_initialized()) blink_started = timer_ticks();
+            continue;
+        }
+
+        if (action == JCOS_CONSOLE_SHELL_ACTION_RUN_GRAPHICS) {
+            userspace_shell_cursor_end();
+            if (!graphical_session_run()) {
+                serial_write("R8 GUI: interactive graphical session failed; display was reclaimed.\n");
             }
             if (!system_console_shell_activate()) {
                 if (!userspace_shell_recover()) return false;
