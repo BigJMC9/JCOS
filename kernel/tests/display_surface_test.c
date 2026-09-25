@@ -2,6 +2,7 @@
 
 #include "address_space.h"
 #include "capability.h"
+#include "compositor_service.h"
 #include "display.h"
 #include "display_service.h"
 #include "display_surface.h"
@@ -163,7 +164,7 @@ static bool cleanup_input_clients(void) {
     }
 
     if (display_service_focus_slot() != JCOS_DISPLAY_SURFACE_FOCUS_NONE &&
-        display_service_running() && !display_service_focus_clear()) ok = false;
+        compositor_service_running() && !display_service_focus_clear()) ok = false;
 
     if (ok) {
         for (u32 i = 0U; i < DISPLAY_INPUT_CLIENT_COUNT; ++i)
@@ -186,7 +187,9 @@ static bool cleanup_all(void) {
     }
     if (!close_exit_queue()) app_clean = false;
 
-    bool service_clean = display_service_cleanup() &&
+    bool service_clean = compositor_service_cleanup() &&
+        compositor_service_state() == MANAGED_SERVICE_STOPPED &&
+        display_service_cleanup() &&
         display_service_state() == MANAGED_SERVICE_STOPPED &&
         display_service_surface_count() == 0U &&
         display_service_input_client_count() == 0U &&
@@ -525,6 +528,14 @@ static bool input_marker_absent(DisplaySurface *surface) {
         JCOS_DISPLAY_SURFACE_INPUT_MARKER;
 }
 
+static u32 masked_channel(u32 value, u32 mask) {
+    if (!mask) return 0U;
+    u32 shift = 0U;
+    while (shift < 31U && ((mask >> shift) & 1U) == 0U) ++shift;
+    u32 max = mask >> shift;
+    return (u32)((((u64)(value & 0xFFU) * (u64)max) / 255ULL << shift) & mask);
+}
+
 static u32 expected_target_pixel(const FramebufferInfo *info, unsigned char pixel) {
     if (!info) return 0U;
     u32 r = (u32)((pixel >> 5) & 0x07U);
@@ -535,7 +546,9 @@ static u32 expected_target_pixel(const FramebufferInfo *info, unsigned char pixe
     b = (b * 255U) / 3U;
     if (info->pixel_format == 0U) return r | (g << 8) | (b << 16);
     if (info->pixel_format == 1U) return b | (g << 8) | (r << 16);
-    return pixel ? 0xFFFFFFFFU : 0U;
+    return masked_channel(r, info->red_mask) |
+        masked_channel(g, info->green_mask) |
+        masked_channel(b, info->blue_mask);
 }
 
 void display_surface_test_run(void) {
@@ -620,7 +633,7 @@ void display_surface_test_run(void) {
     if (!two_created) goto fail;
 
     unsigned char back_color = JCOS_DISPLAY_SURFACE_COLOR_RED;
-    unsigned char front_color = info.pixel_format == 2U ? 0U : JCOS_DISPLAY_SURFACE_COLOR_GREEN;
+    unsigned char front_color = JCOS_DISPLAY_SURFACE_COLOR_GREEN;
     u64 first_pid = 0ULL;
     u64 second_pid = 0ULL;
     bool producers = produce_surface(&g_compositor_surfaces[0], back_color, &first_pid) &&
@@ -633,7 +646,7 @@ void display_surface_test_run(void) {
 
     service = display_service_start() && display_service_running() &&
         display_direct_state() == DISPLAY_LEASE_USER && !terminal_render_enabled();
-    report("COMPOSITOR SERVICE OWNS GOP", service);
+    report("RING3 DISPLAY SERVICE OWNS GOP", service);
     if (!service) goto fail;
 
     bool readers = display_service_surface_attach_slot(&g_compositor_surfaces[0], 0U) &&
@@ -643,6 +656,13 @@ void display_surface_test_run(void) {
         display_service_surface_slot_mapping_valid(1U);
     report("DISPLAY SERVICE RO-MAPS TWO SURFACE SLOTS", readers);
     if (!readers) goto fail;
+
+    u64 display_pid = display_service_process_id();
+    bool compositor = compositor_service_start() && compositor_service_running() &&
+        compositor_service_process_id() && compositor_service_process_id() != display_pid &&
+        display_direct_owner_process_id() == display_pid;
+    report("SEPARATE RING3 COMPOSITOR / DISPLAY LEASE RETAINED", compositor);
+    if (!compositor) goto fail;
 
     if (info.width < 4U || info.height < 4U) {
         report("GOP LARGE ENOUGH FOR PLACEMENT TEST", false);
@@ -771,10 +791,15 @@ void display_surface_test_run(void) {
     report("ALL COMPOSITOR READER MAPPINGS DETACHED", readers_detached);
     if (!readers_detached) goto fail;
 
+    bool compositor_stopped = compositor_service_stop() &&
+        compositor_service_state() == MANAGED_SERVICE_STOPPED;
+    report("COMPOSITOR STOP / DISPLAY SERVICE SURVIVES", compositor_stopped);
+    if (!compositor_stopped) goto fail;
+
     stopped = display_service_stop() && display_service_state() == MANAGED_SERVICE_STOPPED &&
         display_direct_state() == DISPLAY_LEASE_KERNEL &&
         terminal_render_enabled() == baseline.terminal_render;
-    report("COMPOSITOR STOP / GOP RECLAIM", stopped);
+    report("DISPLAY SERVICE STOP / GOP RECLAIM", stopped);
     if (!stopped) goto fail;
 
     bool final_release = display_surface_destroy(&g_compositor_surfaces[1]) &&
@@ -788,7 +813,8 @@ void display_surface_test_run(void) {
     u64 session_runs_before = graphical_session_run_count();
     bool session_started = graphical_session_start() && graphical_session_active() &&
         graphical_session_run_count() == session_runs_before + 1ULL &&
-        display_service_running() && display_service_focus_slot() == 0U &&
+        display_service_running() && compositor_service_running() &&
+        display_service_focus_slot() == 0U &&
         display_service_input_client_count() == 1U;
     report("PERSISTENT GRAPHICAL SESSION / FOCUSED CLIENT", session_started);
     if (!session_started) goto fail;
@@ -804,6 +830,7 @@ void display_surface_test_run(void) {
     if (!session_input) goto fail;
 
     bool session_stopped = graphical_session_stop() && !graphical_session_active() &&
+        compositor_service_state() == MANAGED_SERVICE_STOPPED &&
         display_service_state() == MANAGED_SERVICE_STOPPED &&
         display_direct_state() == DISPLAY_LEASE_KERNEL && baseline_matches(&baseline);
     report("SESSION EXIT / TERMINAL + RESOURCE BASELINE", session_stopped);
@@ -825,13 +852,14 @@ void display_surface_test_run(void) {
     bool client_fault_contained = graphical_session_test_fault_client(&client_fault) &&
         client_fault.reason == PROCESS_EXIT_FAULT && client_fault.vector == 6ULL &&
         client_fault.process_id != 0ULL && client_fault.thread_id != 0ULL &&
-        display_service_running() &&
+        display_service_running() && compositor_service_running() &&
         display_direct_state() == DISPLAY_LEASE_USER;
     report("RING3 GRAPHICAL CLIENT #UD CONTAINED", client_fault_contained);
     if (!client_fault_contained) goto fail;
 
     bool client_recovered = graphical_session_cleanup() &&
         !graphical_session_active() &&
+        compositor_service_state() == MANAGED_SERVICE_STOPPED &&
         display_service_state() == MANAGED_SERVICE_STOPPED &&
         display_service_focus_slot() == JCOS_DISPLAY_SURFACE_FOCUS_NONE &&
         display_service_input_client_count() == 0U &&
@@ -844,38 +872,42 @@ void display_surface_test_run(void) {
         graphical_session_active() &&
         graphical_session_run_count() == recovery_runs_before + 2ULL &&
         graphical_session_stop() && !graphical_session_active() &&
+        compositor_service_state() == MANAGED_SERVICE_STOPPED &&
         display_service_state() == MANAGED_SERVICE_STOPPED &&
         display_direct_state() == DISPLAY_LEASE_KERNEL && baseline_matches(&baseline);
     report("GUI RELAUNCH AFTER CLIENT CRASH", post_fault_relaunch);
     if (!post_fault_relaunch) goto fail;
 
-    /* R8D.2: crash the Ring3 compositor while the persistent GUI client is
-     * blocked on its private input endpoint. The dead display service retains
-     * the GOP lease until the supervisor tears down the session. Because the
-     * compositor is no longer live, the physical input router must immediately
-     * fall back instead of trusting stale focus metadata. */
+    /* The compositor is now a distinct Ring3 policy service. Its failure must
+     * leave the GOP-owning display process and graphical client alive, and a
+     * replacement compositor must reconnect to that same display incarnation. */
     u64 compositor_fault_runs_before = graphical_session_run_count();
     bool compositor_fault_session_started = graphical_session_start() &&
         graphical_session_active() &&
         graphical_session_run_count() == compositor_fault_runs_before + 1ULL &&
-        display_service_running() && display_service_focus_slot() == 0U;
-    report("R8D.2 COMPOSITOR-FAULT SESSION START", compositor_fault_session_started);
+        display_service_running() && compositor_service_running() &&
+        display_service_focus_slot() == 0U;
+    report("COMPOSITOR-FAULT SESSION START", compositor_fault_session_started);
     if (!compositor_fault_session_started) goto fail;
 
+    u64 live_display_pid = display_service_process_id();
+    u64 live_display_incarnation = display_service_incarnation();
     ProcessExitInfo compositor_fault;
     k_memset(&compositor_fault, 0, sizeof(compositor_fault));
     bool compositor_fault_contained =
-        graphical_session_test_fault_display_service(&compositor_fault) &&
+        graphical_session_test_fault_compositor(&compositor_fault) &&
         compositor_fault.reason == PROCESS_EXIT_FAULT &&
         compositor_fault.vector == 6ULL && compositor_fault.process_id != 0ULL &&
         compositor_fault.thread_id != 0ULL && graphical_session_active() &&
-        !display_service_running() &&
-        (display_service_state() == MANAGED_SERVICE_FAILED ||
-         display_service_state() == MANAGED_SERVICE_REAP_PENDING) &&
+        !compositor_service_running() &&
+        (compositor_service_state() == MANAGED_SERVICE_FAILED ||
+         compositor_service_state() == MANAGED_SERVICE_REAP_PENDING) &&
+        display_service_running() && display_service_process_id() == live_display_pid &&
+        display_service_incarnation() == live_display_incarnation &&
         display_direct_state() == DISPLAY_LEASE_USER &&
-        display_direct_owner_process_id() == compositor_fault.process_id &&
+        display_direct_owner_process_id() == live_display_pid &&
         !terminal_render_enabled();
-    report("RING3 COMPOSITOR #UD / CLIENT CONTAINED", compositor_fault_contained);
+    report("COMPOSITOR #UD / DISPLAY + CLIENT SURVIVE", compositor_fault_contained);
     if (!compositor_fault_contained) goto fail;
 
     KeyEvent compositor_fallback_event = display_input_key('R', false, true, false);
@@ -888,35 +920,88 @@ void display_surface_test_run(void) {
     report("DEAD COMPOSITOR / INPUT FALLBACK PRESERVED", compositor_input_fallback);
     if (!compositor_input_fallback) goto fail;
 
-    bool compositor_recovered = graphical_session_cleanup() &&
-        !graphical_session_active() &&
+    bool compositor_restarted = compositor_service_recover() &&
+        compositor_service_start() && compositor_service_running() &&
+        display_service_process_id() == live_display_pid &&
+        display_service_incarnation() == live_display_incarnation &&
+        display_service_surface_configure(0U, 0U, 0U, info.width, info.height, 1U) &&
+        display_service_focus_surface(0U) &&
+        display_service_compose(&composed_count, &sample) && composed_count == 1U;
+    report("COMPOSITOR RESTART / SAME DISPLAY INCARNATION", compositor_restarted);
+    if (!compositor_restarted) goto fail;
+
+    KeyEvent resumed_event = display_input_key('C', false, false, false);
+    KeyEvent resumed_observed;
+    k_memset(&resumed_observed, 0, sizeof(resumed_observed));
+    bool resumed = graphical_session_handle_event(&resumed_event) &&
+        graphical_session_last_event(&resumed_observed) &&
+        same_key_event(&resumed_event, &resumed_observed);
+    report("INPUT + COMPOSE AFTER COMPOSITOR RESTART", resumed);
+    if (!resumed) goto fail;
+
+    bool compositor_recovered = graphical_session_stop() && !graphical_session_active() &&
+        compositor_service_state() == MANAGED_SERVICE_STOPPED &&
         display_service_state() == MANAGED_SERVICE_STOPPED &&
-        display_service_focus_slot() == JCOS_DISPLAY_SURFACE_FOCUS_NONE &&
-        display_service_input_client_count() == 0U &&
-        display_service_surface_count() == 0U &&
         display_direct_state() == DISPLAY_LEASE_KERNEL &&
         display_direct_owner_process_id() == 0ULL && baseline_matches(&baseline);
-    report("COMPOSITOR CRASH / GOP + SESSION RECLAIM", compositor_recovered);
+    report("COMPOSITOR RECOVERY / SESSION BASELINE", compositor_recovered);
     if (!compositor_recovered) goto fail;
 
-    bool post_compositor_relaunch = graphical_session_start() &&
+    /* A display-service crash is a separate failure domain. The compositor and
+     * client remain contained until supervisor cleanup reclaims the GOP lease. */
+    u64 display_fault_runs_before = graphical_session_run_count();
+    bool display_fault_session_started = graphical_session_start() &&
         graphical_session_active() &&
-        graphical_session_run_count() == compositor_fault_runs_before + 2ULL &&
-        graphical_session_stop() && !graphical_session_active() &&
-        display_service_state() == MANAGED_SERVICE_STOPPED &&
-        display_direct_state() == DISPLAY_LEASE_KERNEL && baseline_matches(&baseline);
-    report("GUI RELAUNCH AFTER COMPOSITOR CRASH", post_compositor_relaunch);
-    if (!post_compositor_relaunch) goto fail;
+        graphical_session_run_count() == display_fault_runs_before + 1ULL &&
+        display_service_running() && compositor_service_running() &&
+        display_service_focus_slot() == 0U;
+    report("DISPLAY-FAULT SESSION START", display_fault_session_started);
+    if (!display_fault_session_started) goto fail;
 
-    /* R8D.3: bounded alternating recovery stress. Every cycle enters the same
+    ProcessExitInfo display_fault;
+    k_memset(&display_fault, 0, sizeof(display_fault));
+    bool display_fault_contained = graphical_session_test_fault_display_service(&display_fault) &&
+        display_fault.reason == PROCESS_EXIT_FAULT && display_fault.vector == 6ULL &&
+        display_fault.process_id != 0ULL && display_fault.thread_id != 0ULL &&
+        graphical_session_active() && !display_service_running() &&
+        compositor_service_running() &&
+        (display_service_state() == MANAGED_SERVICE_FAILED ||
+         display_service_state() == MANAGED_SERVICE_REAP_PENDING) &&
+        display_direct_state() == DISPLAY_LEASE_USER &&
+        display_direct_owner_process_id() == display_fault.process_id &&
+        !terminal_render_enabled();
+    report("DISPLAY SERVICE #UD / COMPOSITOR + CLIENT CONTAINED", display_fault_contained);
+    if (!display_fault_contained) goto fail;
+
+    KeyEvent display_fallback_event = display_input_key('D', false, false, true);
+    KeyEvent display_fallback;
+    k_memset(&display_fallback, 0, sizeof(display_fallback));
+    bool display_input_fallback =
+        input_route_event(&display_fallback_event, &display_fallback) == INPUT_ROUTE_FALLBACK &&
+        same_key_event(&display_fallback_event, &display_fallback);
+    report("DEAD DISPLAY SERVICE / INPUT FALLBACK PRESERVED", display_input_fallback);
+    if (!display_input_fallback) goto fail;
+
+    serial_write("R8 OBSERVABILITY: display-service fault contained; kernel alive; reclaim pending.\n");
+
+    bool display_recovered = graphical_session_cleanup() && !graphical_session_active() &&
+        compositor_service_state() == MANAGED_SERVICE_STOPPED &&
+        display_service_state() == MANAGED_SERVICE_STOPPED &&
+        display_direct_state() == DISPLAY_LEASE_KERNEL &&
+        display_direct_owner_process_id() == 0ULL && baseline_matches(&baseline);
+    report("DISPLAY CRASH / GOP + SESSION RECLAIM", display_recovered);
+    if (!display_recovered) goto fail;
+
+    /* Bounded alternating recovery stress. Every cycle enters the same
      * persistent graphical session used by the shell, proves input can make a
-     * round trip, then faults either the client or compositor. Each recovery
+     * round trip, then faults either the client or display service. Each recovery
      * must restore the exact pre-test resource baseline before the next start. */
     u64 stress_runs_before = graphical_session_run_count();
     bool recovery_stress = true;
     for (u32 cycle = 0U; cycle < R8D_RECOVERY_STRESS_CYCLES; ++cycle) {
         if (!graphical_session_start() || !graphical_session_active() ||
-            !display_service_running() || display_service_focus_slot() != 0U) {
+            !display_service_running() || !compositor_service_running() ||
+            display_service_focus_slot() != 0U) {
             recovery_stress = false;
             break;
         }
@@ -937,7 +1022,7 @@ void display_surface_test_run(void) {
         if ((cycle & 1U) == 0U) {
             if (!graphical_session_test_fault_client(&stress_fault) ||
                 stress_fault.reason != PROCESS_EXIT_FAULT || stress_fault.vector != 6ULL ||
-                !display_service_running() ||
+                !display_service_running() || !compositor_service_running() ||
                 display_direct_state() != DISPLAY_LEASE_USER) {
                 recovery_stress = false;
                 break;
@@ -945,6 +1030,7 @@ void display_surface_test_run(void) {
         } else {
             if (!graphical_session_test_fault_display_service(&stress_fault) ||
                 stress_fault.reason != PROCESS_EXIT_FAULT || stress_fault.vector != 6ULL ||
+                !compositor_service_running() ||
                 display_service_running() || terminal_render_enabled() ||
                 display_direct_state() != DISPLAY_LEASE_USER ||
                 display_direct_owner_process_id() != stress_fault.process_id) {
@@ -955,7 +1041,7 @@ void display_surface_test_run(void) {
             /* This marker is intentionally emitted while the framebuffer is
              * unavailable to the kernel terminal. A serial console can still
              * distinguish a live/recovering kernel from a blank or wedged GUI. */
-            serial_write("R8D.3 OBSERVABILITY: compositor fault contained; kernel alive; reclaim pending.\n");
+            serial_write("R8 STRESS: display-service fault contained; kernel alive; reclaim pending.\n");
 
             KeyEvent fallback_event = display_input_key('Z', false, false, true);
             KeyEvent fallback;
@@ -968,6 +1054,7 @@ void display_surface_test_run(void) {
         }
 
         if (!graphical_session_cleanup() || graphical_session_active() ||
+            compositor_service_state() != MANAGED_SERVICE_STOPPED ||
             display_service_state() != MANAGED_SERVICE_STOPPED ||
             display_service_running() ||
             display_service_focus_slot() != JCOS_DISPLAY_SURFACE_FOCUS_NONE ||
@@ -981,7 +1068,7 @@ void display_surface_test_run(void) {
     }
     recovery_stress = recovery_stress &&
         graphical_session_run_count() == stress_runs_before + R8D_RECOVERY_STRESS_CYCLES;
-    report("R8D.3 ALTERNATING CLIENT / COMPOSITOR RECOVERY STRESS", recovery_stress);
+    report("ALTERNATING CLIENT / DISPLAY RECOVERY STRESS", recovery_stress);
     if (!recovery_stress) goto fail;
 
     /* One final ordinary session proves that repeated fault recovery did not
@@ -996,6 +1083,7 @@ void display_surface_test_run(void) {
         graphical_session_last_event(&final_observed) &&
         same_key_event(&final_event, &final_observed) &&
         graphical_session_stop() && !graphical_session_active() &&
+        compositor_service_state() == MANAGED_SERVICE_STOPPED &&
         display_service_state() == MANAGED_SERVICE_STOPPED &&
         display_direct_state() == DISPLAY_LEASE_KERNEL &&
         display_direct_owner_process_id() == 0ULL && baseline_matches(&baseline);
@@ -1007,6 +1095,8 @@ void display_surface_test_run(void) {
      * recovery remained available while framebuffer rendering was unavailable,
      * output was reclaimed, and a fresh session worked without a reboot. */
     bool r8_exit_gate = !graphical_session_active() &&
+        compositor_service_state() == MANAGED_SERVICE_STOPPED &&
+        !compositor_service_running() &&
         display_service_state() == MANAGED_SERVICE_STOPPED &&
         !display_service_running() &&
         display_direct_state() == DISPLAY_LEASE_KERNEL &&

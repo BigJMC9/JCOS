@@ -2,6 +2,7 @@
 
 #include "arch.h"
 #include "capability.h"
+#include "compositor_service.h"
 #include "display.h"
 #include "framebuffer.h"
 #include "ipc.h"
@@ -20,11 +21,12 @@ static ManagedService g_display_service;
 static DisplaySurface *g_surfaces[JCOS_DISPLAY_SURFACE_CAPACITY];
 static DisplayServiceInputClient *g_input_clients[JCOS_DISPLAY_SURFACE_CAPACITY];
 static u64 g_next_input_client_id = 1ULL;
-static u32 g_focused_slot = JCOS_DISPLAY_SURFACE_FOCUS_NONE;
 
 static u64 service_header(u64 op) {
     return JCOS_DISPLAY_SERVICE_HEADER(op, JCOS_DISPLAY_SERVICE_PROTOCOL_VERSION);
 }
+
+static bool configure_pixel_masks(const FramebufferInfo *info);
 
 static bool surface_slot_valid(u32 slot) {
     return slot < JCOS_DISPLAY_SURFACE_CAPACITY;
@@ -53,7 +55,7 @@ u64 display_service_input_client_process_id(const DisplayServiceInputClient *cli
 }
 
 u32 display_service_focus_slot(void) {
-    return g_focused_slot;
+    return compositor_service_focus_slot();
 }
 
 static bool input_client_registered(const DisplayServiceInputClient *client) {
@@ -86,7 +88,7 @@ static bool wait_failed(void) {
 
 bool display_service_start(void) {
     if (display_service_surface_count() || display_service_input_client_count() ||
-        g_focused_slot != JCOS_DISPLAY_SURFACE_FOCUS_NONE ||
+        compositor_service_state() != MANAGED_SERVICE_STOPPED ||
         managed_service_state(&g_display_service) != MANAGED_SERVICE_STOPPED ||
         display_direct_state() != DISPLAY_LEASE_KERNEL) return false;
 
@@ -122,7 +124,16 @@ bool display_service_start(void) {
         return false;
     }
 
-    if (display_direct_commit(&g_display_service.program.process)) return true;
+    if (display_direct_commit(&g_display_service.program.process)) {
+        if (configure_pixel_masks(&info)) return true;
+
+        u64 owner_pid = g_display_service.program.process.id;
+        ManagedServiceStopResult stopped = managed_service_stop_bounded(&g_display_service);
+        if (stopped == MANAGED_SERVICE_STOP_GRACEFUL ||
+            stopped == MANAGED_SERVICE_STOP_FORCED)
+            (void)lease_release_after_service(owner_pid);
+        return false;
+    }
 
     u64 owner_pid = g_display_service.program.process.id;
     ManagedServiceStopResult stopped = managed_service_stop_bounded(&g_display_service);
@@ -200,56 +211,45 @@ static bool connect(ManagedServiceConnection *connection) {
         managed_service_connect_kernel(&g_display_service, connection);
 }
 
+static bool configure_pixel_masks(const FramebufferInfo *info) {
+    if (!info || info->pixel_format > 2U) return false;
+    if (info->pixel_format != 2U) return true;
+
+    ManagedServiceConnection connection;
+    k_memset(&connection, 0, sizeof(connection));
+    if (!connect(&connection)) return false;
+
+    IpcMessage request;
+    IpcMessage reply;
+    k_memset(&request, 0, sizeof(request));
+    k_memset(&reply, 0, sizeof(reply));
+    request.word_count = 3U;
+    request.words[0] = service_header(JCOS_DISPLAY_SERVICE_OP_SET_PIXEL_MASKS);
+    request.words[1] = JCOS_DISPLAY_MASK_PAIR(info->red_mask, info->green_mask);
+    request.words[2] = JCOS_DISPLAY_MASK_PAIR(info->blue_mask, info->reserved_mask);
+
+    return managed_service_call(&g_display_service, &connection, &request, &reply) &&
+        reply.word_count == 3U && reply.words[0] == JCOS_DISPLAY_SERVICE_REPLY_MASKS_SET &&
+        reply.words[1] == connection.incarnation &&
+        reply.words[2] == JCOS_DISPLAY_SERVICE_PROTOCOL_VERSION;
+}
+
 bool display_service_surface_configure(u32 slot, u32 x, u32 y,
     u32 width, u32 height, u32 z) {
     if (!surface_slot_valid(slot) || !width || !height ||
         !display_service_surface_slot_mapping_valid(slot)) return false;
 
-    ManagedServiceConnection connection;
-    k_memset(&connection, 0, sizeof(connection));
-    if (!connect(&connection)) return false;
+    FramebufferInfo info;
+    k_memset(&info, 0, sizeof(info));
+    if (!framebuffer_info(&info) || !info.width || !info.height ||
+        x >= info.width || y >= info.height ||
+        width > info.width - x || height > info.height - y) return false;
 
-    IpcMessage request;
-    IpcMessage reply;
-    k_memset(&request, 0, sizeof(request));
-    k_memset(&reply, 0, sizeof(reply));
-    request.word_count = 4U;
-    request.words[0] = service_header(JCOS_DISPLAY_SERVICE_OP_SURFACE_CONFIG);
-    request.words[1] = JCOS_DISPLAY_SURFACE_CONFIG(slot, z);
-    request.words[2] = JCOS_DISPLAY_SURFACE_POSITION(x, y);
-    request.words[3] = JCOS_DISPLAY_SURFACE_EXTENT(width, height);
-
-    return managed_service_call(&g_display_service, &connection, &request, &reply) &&
-        reply.word_count == 4U && reply.words[0] == JCOS_DISPLAY_SERVICE_REPLY_CONFIGURED &&
-        reply.words[1] == connection.incarnation &&
-        reply.words[2] == JCOS_DISPLAY_SERVICE_PROTOCOL_VERSION && reply.words[3] == slot;
+    return compositor_service_surface_configure(slot, x, y, width, height, z);
 }
 
 bool display_service_compose(u32 *out_count, u32 *out_sample) {
-    if (!out_count || !out_sample) return false;
-    *out_count = 0U;
-    *out_sample = 0U;
-
-    ManagedServiceConnection connection;
-    k_memset(&connection, 0, sizeof(connection));
-    if (!connect(&connection)) return false;
-
-    IpcMessage request;
-    IpcMessage reply;
-    k_memset(&request, 0, sizeof(request));
-    k_memset(&reply, 0, sizeof(reply));
-    request.word_count = 2U;
-    request.words[0] = service_header(JCOS_DISPLAY_SERVICE_OP_COMPOSE);
-    request.words[1] = 0ULL;
-
-    if (!managed_service_call(&g_display_service, &connection, &request, &reply) ||
-        reply.word_count != 4U || reply.words[0] != JCOS_DISPLAY_SERVICE_REPLY_COMPOSED ||
-        reply.words[1] != connection.incarnation ||
-        reply.words[2] != JCOS_DISPLAY_SERVICE_PROTOCOL_VERSION) return false;
-
-    *out_count = JCOS_DISPLAY_COMPOSE_COUNT(reply.words[3]);
-    *out_sample = JCOS_DISPLAY_COMPOSE_SAMPLE(reply.words[3]);
-    return true;
+    return compositor_service_compose(out_count, out_sample);
 }
 
 static bool focus_request(u32 slot) {
@@ -262,27 +262,8 @@ static bool focus_request(u32 slot) {
             return false;
     }
 
-    ManagedServiceConnection connection;
-    k_memset(&connection, 0, sizeof(connection));
-    if (!connect(&connection)) return false;
-
-    IpcMessage request;
-    IpcMessage reply;
-    k_memset(&request, 0, sizeof(request));
-    k_memset(&reply, 0, sizeof(reply));
-    request.word_count = 3U;
-    request.words[0] = service_header(JCOS_DISPLAY_SERVICE_OP_FOCUS_SURFACE);
-    request.words[1] = 0ULL;
-    request.words[2] = slot;
-
-    if (!managed_service_call(&g_display_service, &connection, &request, &reply) ||
-        reply.word_count != 4U || reply.words[0] != JCOS_DISPLAY_SERVICE_REPLY_FOCUSED ||
-        reply.words[1] != connection.incarnation ||
-        reply.words[2] != JCOS_DISPLAY_SERVICE_PROTOCOL_VERSION || reply.words[3] != slot)
-        return false;
-
-    g_focused_slot = slot;
-    return true;
+    return slot == JCOS_DISPLAY_SURFACE_FOCUS_NONE ?
+        compositor_service_focus_clear() : compositor_service_focus_surface(slot);
 }
 
 bool display_service_focus_surface(u32 slot) {
@@ -290,7 +271,6 @@ bool display_service_focus_surface(u32 slot) {
 }
 
 bool display_service_focus_clear(void) {
-    if (g_focused_slot == JCOS_DISPLAY_SURFACE_FOCUS_NONE) return true;
     return focus_request(JCOS_DISPLAY_SURFACE_FOCUS_NONE);
 }
 
@@ -315,11 +295,12 @@ static u32 input_key_code(KeyCode key) {
 }
 
 bool display_service_input_event(const KeyEvent *event) {
-    if (!event || g_focused_slot == JCOS_DISPLAY_SURFACE_FOCUS_NONE ||
-        !surface_slot_valid(g_focused_slot)) return false;
+    u32 focused_slot = display_service_focus_slot();
+    if (!event || focused_slot == JCOS_DISPLAY_SURFACE_FOCUS_NONE ||
+        !surface_slot_valid(focused_slot)) return false;
 
     u32 key = input_key_code(event->key);
-    DisplayServiceInputClient *client = g_input_clients[g_focused_slot];
+    DisplayServiceInputClient *client = g_input_clients[focused_slot];
     if (!key || !input_client_registered(client) || !client->process_id ||
         !client->kernel_send_cap || client->kernel_send_handle == CAPABILITY_INVALID_HANDLE ||
         display_surface_writer_process_id(client->surface) != client->process_id)
@@ -463,14 +444,8 @@ bool display_service_input_client_end(DisplayServiceInputClient *client) {
         (client->receive_authority_cap ? 1ULL : 0ULL);
     if (client->input_endpoint.capability_refs != expected_refs) return false;
 
-    if (g_focused_slot == client->slot) {
-        ManagedServiceState state = managed_service_state(&g_display_service);
-        if (state == MANAGED_SERVICE_RUNNING) {
-            if (!display_service_focus_clear()) return false;
-        } else {
-            g_focused_slot = JCOS_DISPLAY_SURFACE_FOCUS_NONE;
-        }
-    }
+    if (display_service_focus_slot() == client->slot && compositor_service_running() &&
+        !display_service_focus_clear()) return false;
 
     u32 slot = client->slot;
     g_input_clients[slot] = 0;
@@ -480,27 +455,8 @@ bool display_service_input_client_end(DisplayServiceInputClient *client) {
 }
 
 bool display_service_surface_remove(u32 slot) {
-    if (!surface_slot_valid(slot) || !g_surfaces[slot]) return false;
-
-    ManagedServiceConnection connection;
-    k_memset(&connection, 0, sizeof(connection));
-    if (!connect(&connection)) return false;
-
-    IpcMessage request;
-    IpcMessage reply;
-    k_memset(&request, 0, sizeof(request));
-    k_memset(&reply, 0, sizeof(reply));
-    request.word_count = 3U;
-    request.words[0] = service_header(JCOS_DISPLAY_SERVICE_OP_SURFACE_REMOVE);
-    request.words[1] = 0ULL;
-    request.words[2] = slot;
-
-    bool removed = managed_service_call(&g_display_service, &connection, &request, &reply) &&
-        reply.word_count == 4U && reply.words[0] == JCOS_DISPLAY_SERVICE_REPLY_REMOVED &&
-        reply.words[1] == connection.incarnation &&
-        reply.words[2] == JCOS_DISPLAY_SERVICE_PROTOCOL_VERSION && reply.words[3] == slot;
-    if (removed && g_focused_slot == slot) g_focused_slot = JCOS_DISPLAY_SURFACE_FOCUS_NONE;
-    return removed;
+    return surface_slot_valid(slot) && g_surfaces[slot] && compositor_service_running() &&
+        compositor_service_surface_remove(slot);
 }
 
 bool display_service_surface_detach_slot(u32 slot) {
@@ -510,9 +466,12 @@ bool display_service_surface_detach_slot(u32 slot) {
     if (!g_display_service.program.process_created) return false;
 
     ManagedServiceState state = managed_service_state(&g_display_service);
-    if (state == MANAGED_SERVICE_RUNNING) {
+    if (state == MANAGED_SERVICE_RUNNING && compositor_service_running()) {
         if (!managed_service_idle(&g_display_service) || !display_service_surface_remove(slot))
             return false;
+    } else if (state == MANAGED_SERVICE_RUNNING &&
+               compositor_service_state() != MANAGED_SERVICE_STOPPED) {
+        return false;
     }
 
     if (!display_surface_unmap_reader(surface, &g_display_service.program.process,
@@ -599,7 +558,7 @@ bool display_service_client_grant_end(DisplayServiceClientGrant *grant) {
 
 bool display_service_stop(void) {
     if (display_service_input_client_count() ||
-        g_focused_slot != JCOS_DISPLAY_SURFACE_FOCUS_NONE) return false;
+        compositor_service_state() != MANAGED_SERVICE_STOPPED) return false;
     ManagedServiceState state = managed_service_state(&g_display_service);
     if (state == MANAGED_SERVICE_STOPPED) {
         if (display_service_surface_count()) return false;
@@ -615,9 +574,9 @@ bool display_service_stop(void) {
 }
 
 bool display_service_recover(void) {
-    if (display_service_input_client_count()) return false;
+    if (display_service_input_client_count() ||
+        compositor_service_state() != MANAGED_SERVICE_STOPPED) return false;
     ManagedServiceState state = managed_service_state(&g_display_service);
-    g_focused_slot = JCOS_DISPLAY_SURFACE_FOCUS_NONE;
     u64 owner_pid = g_display_service.program.process_created ?
         g_display_service.program.process.id : display_direct_owner_process_id();
 

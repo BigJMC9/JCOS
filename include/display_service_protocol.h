@@ -5,24 +5,24 @@
 
 #define JCOS_DISPLAY_SERVICE_PROTOCOL_VERSION JCOS_SERVICE_PROTOCOL_VERSION_1
 
-#define JCOS_DISPLAY_SERVICE_OP_PING            1ULL
-#define JCOS_DISPLAY_SERVICE_OP_REDRAW          2ULL
-#define JCOS_DISPLAY_SERVICE_OP_SHUTDOWN        3ULL
-#define JCOS_DISPLAY_SERVICE_OP_DIAG_FAULT      4ULL
-#define JCOS_DISPLAY_SERVICE_OP_PRESENT_SURFACE 5ULL
-#define JCOS_DISPLAY_SERVICE_OP_SURFACE_CONFIG  6ULL
-#define JCOS_DISPLAY_SERVICE_OP_COMPOSE         7ULL
-#define JCOS_DISPLAY_SERVICE_OP_SURFACE_REMOVE  8ULL
-#define JCOS_DISPLAY_SERVICE_OP_FOCUS_SURFACE   9ULL
+#define JCOS_DISPLAY_SERVICE_OP_PING             1ULL
+#define JCOS_DISPLAY_SERVICE_OP_REDRAW           2ULL
+#define JCOS_DISPLAY_SERVICE_OP_SHUTDOWN         3ULL
+#define JCOS_DISPLAY_SERVICE_OP_DIAG_FAULT       4ULL
+#define JCOS_DISPLAY_SERVICE_OP_PRESENT_SURFACE  5ULL
+#define JCOS_DISPLAY_SERVICE_OP_SET_PIXEL_MASKS  6ULL
+#define JCOS_DISPLAY_SERVICE_OP_CLEAR            7ULL
+#define JCOS_DISPLAY_SERVICE_OP_PRESENT_RECT     8ULL
+#define JCOS_DISPLAY_SERVICE_OP_SAMPLE           9ULL
 
-#define JCOS_DISPLAY_SERVICE_REPLY_PONG       0x4453504C59504F4EULL
-#define JCOS_DISPLAY_SERVICE_REPLY_DRAWN      0x4453504C59445257ULL
-#define JCOS_DISPLAY_SERVICE_REPLY_STOPPED    0x4453504C59535450ULL
-#define JCOS_DISPLAY_SERVICE_REPLY_PRESENTED  0x4453504C59505253ULL
-#define JCOS_DISPLAY_SERVICE_REPLY_CONFIGURED 0x4453504C59434647ULL
-#define JCOS_DISPLAY_SERVICE_REPLY_COMPOSED   0x4453504C59434D50ULL
-#define JCOS_DISPLAY_SERVICE_REPLY_REMOVED    0x4453504C59524D56ULL
-#define JCOS_DISPLAY_SERVICE_REPLY_FOCUSED    0x4453504C59464F43ULL
+#define JCOS_DISPLAY_SERVICE_REPLY_PONG           0x4453504C59504F4EULL
+#define JCOS_DISPLAY_SERVICE_REPLY_DRAWN          0x4453504C59445257ULL
+#define JCOS_DISPLAY_SERVICE_REPLY_STOPPED        0x4453504C59535450ULL
+#define JCOS_DISPLAY_SERVICE_REPLY_PRESENTED      0x4453504C59505253ULL
+#define JCOS_DISPLAY_SERVICE_REPLY_MASKS_SET      0x4453504C594D4153ULL
+#define JCOS_DISPLAY_SERVICE_REPLY_CLEARED        0x4453504C59434C52ULL
+#define JCOS_DISPLAY_SERVICE_REPLY_RECT_PRESENTED 0x4453504C59524543ULL
+#define JCOS_DISPLAY_SERVICE_REPLY_SAMPLED        0x4453504C59534D50ULL
 
 #define JCOS_DISPLAY_SERVICE_HEADER(op, version) \
     ((((version) & 0xFFFFFFFFULL) << 32) | ((op) & 0xFFFFFFFFULL))
@@ -33,6 +33,8 @@
  *   arg[1] = direct framebuffer virtual address
  *   arg[2] = width[31:0] | height[63:32]
  *   arg[3] = pixels_per_scanline[31:0] | GOP pixel_format[63:32]
+ * PixelBitMask channel masks are supplied after launch through the versioned
+ * SET_PIXEL_MASKS operation so the common program-startup ABI remains stable.
  */
 #define JCOS_DISPLAY_GEOMETRY(width, height) \
     (((unsigned long long)(height) << 32) | (unsigned long long)(width))
@@ -43,10 +45,14 @@
 #define JCOS_DISPLAY_STRIDE(word) ((unsigned int)((word) & 0xFFFFFFFFULL))
 #define JCOS_DISPLAY_PIXEL_FORMAT(word) ((unsigned int)(((word) >> 32) & 0xFFFFFFFFULL))
 
-/* R8C bounded shared-surface ABI. Every slot is one page. Writers map one
- * surface RW/NX in their private process; the display service maps each slot
- * RO/NX. Slot virtual addresses are service-private implementation ABI, not
- * arbitrary physical-memory authority. */
+#define JCOS_DISPLAY_MASK_PAIR(low, high) ((((unsigned long long)(high)) << 32) | (unsigned long long)(low))
+#define JCOS_DISPLAY_MASK_LOW(word) ((unsigned int)((word) & 0xFFFFFFFFULL))
+#define JCOS_DISPLAY_MASK_HIGH(word) ((unsigned int)(((word) >> 32) & 0xFFFFFFFFULL))
+
+/* Bounded shared-surface ABI. Every slot is one page. Writers map one surface
+ * RW/NX in their private process; the display service maps each slot RO/NX.
+ * Placement, z-order and focus policy belong to the separate Ring3 compositor.
+ */
 #define JCOS_DISPLAY_SURFACE_VIRTUAL_BASE  0x0000023000000000ULL
 #define JCOS_DISPLAY_SURFACE_WIDTH         64U
 #define JCOS_DISPLAY_SURFACE_HEIGHT        64U
@@ -74,9 +80,9 @@
 
 #define JCOS_DISPLAY_SURFACE_FOCUS_NONE 0xFFFFFFFFU
 
-/* R8C.3 client input ABI. Graphical clients receive only a dedicated
- * RECEIVE endpoint plus their own RW/NX surface mapping; they never receive
- * the compositor service command endpoint. */
+/* Graphical clients receive only a dedicated RECEIVE endpoint plus their own
+ * RW/NX surface mapping; they never receive compositor command authority or a
+ * direct framebuffer mapping. */
 #define JCOS_DISPLAY_CLIENT_PROTOCOL_VERSION 1ULL
 #define JCOS_DISPLAY_CLIENT_OP_KEY_EVENT     1ULL
 #define JCOS_DISPLAY_CLIENT_OP_DIAG_FAULT    2ULL

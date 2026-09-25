@@ -1,6 +1,7 @@
 #include "graphical_session.h"
 
 #include "arch.h"
+#include "compositor_service.h"
 #include "display.h"
 #include "display_service.h"
 #include "display_surface.h"
@@ -132,12 +133,14 @@ static bool release_writer(void) {
 bool graphical_session_cleanup(void) {
     bool retained = g_active || g_exit_queue_created || g_writer_pid ||
         program_instance_needs_cleanup(&g_app) || g_client.active ||
-        g_client.endpoint_created || display_surface_valid(&g_surface);
+        g_client.endpoint_created || display_surface_valid(&g_surface) ||
+        compositor_service_state() != MANAGED_SERVICE_STOPPED ||
+        display_service_state() != MANAGED_SERVICE_STOPPED;
     if (!retained) return true;
 
     bool ok = true;
 
-    if (display_service_running() &&
+    if (compositor_service_running() &&
         display_service_focus_slot() != JCOS_DISPLAY_SURFACE_FOCUS_NONE &&
         !display_service_focus_clear()) ok = false;
 
@@ -149,8 +152,9 @@ bool graphical_session_cleanup(void) {
         if (!display_service_input_client_end(&g_client)) ok = false;
     }
 
-    if (display_service_surface_slot_attached(GRAPHICAL_SESSION_SLOT) &&
-        !display_service_surface_detach_slot(GRAPHICAL_SESSION_SLOT)) ok = false;
+    if (!compositor_service_cleanup()) ok = false;
+
+    if (display_service_surface_slot_attached(GRAPHICAL_SESSION_SLOT) && !display_service_surface_detach_slot(GRAPHICAL_SESSION_SLOT)) ok = false;
 
     if (!display_service_cleanup()) ok = false;
 
@@ -205,6 +209,10 @@ bool graphical_session_start(void) {
         serial_write("R8 GUI START FAILED: invalid framebuffer geometry.\n");
         return false;
     }
+    if (compositor_service_state() != MANAGED_SERVICE_STOPPED) {
+        serial_write("R8 GUI START FAILED: compositor service not STOPPED.\n");
+        return false;
+    }
     if (display_service_state() != MANAGED_SERVICE_STOPPED) {
         serial_write("R8 GUI START FAILED: display service not STOPPED.\n");
         return false;
@@ -246,6 +254,10 @@ bool graphical_session_start(void) {
     }
     if (!display_service_surface_attach_slot(&g_surface, GRAPHICAL_SESSION_SLOT)) {
         failure = "surface attach slot 0";
+        goto fail;
+    }
+    if (!compositor_service_start()) {
+        failure = "compositor service start";
         goto fail;
     }
     if (!display_service_input_client_begin(&g_client, &g_surface, GRAPHICAL_SESSION_SLOT)) {
@@ -339,7 +351,8 @@ fail:
 }
 
 bool graphical_session_handle_event(const KeyEvent *event) {
-    if (!g_active || !event || !display_service_running() || !app_blocked() ||
+    if (!g_active || !event || !display_service_running() ||
+        !compositor_service_running() || !app_blocked() ||
         display_service_focus_slot() != GRAPHICAL_SESSION_SLOT) return false;
 
     KeyEvent fallback;
@@ -396,7 +409,8 @@ bool graphical_session_last_event(KeyEvent *out) {
 bool graphical_session_test_fault_client(ProcessExitInfo *out) {
     if (!out) return false;
     k_memset(out, 0, sizeof(*out));
-    if (!g_active || !display_service_running() || !app_blocked() ||
+    if (!g_active || !display_service_running() ||
+        !compositor_service_running() || !app_blocked() ||
         display_service_focus_slot() != GRAPHICAL_SESSION_SLOT || !g_client.active ||
         !g_client.kernel_send_cap ||
         g_client.kernel_send_handle == CAPABILITY_INVALID_HANDLE ||
@@ -421,10 +435,43 @@ bool graphical_session_test_fault_client(ProcessExitInfo *out) {
     return out->process_id == process_id && out->thread_id == thread_id;
 }
 
+bool graphical_session_test_fault_compositor(ProcessExitInfo *out) {
+    if (!out) return false;
+    k_memset(out, 0, sizeof(*out));
+    if (!g_active || !display_service_running() ||
+        !compositor_service_running() || !app_blocked() ||
+        display_service_focus_slot() != GRAPHICAL_SESSION_SLOT || !g_client.active ||
+        !g_app.process_created || !g_app.thread_created) return false;
+
+    u64 display_pid = display_service_process_id();
+    u64 process_id = compositor_service_process_id();
+    u64 thread_id = compositor_service_thread_id();
+    if (!display_pid || !process_id || !thread_id) return false;
+
+    if (!compositor_service_fault() || compositor_service_running()) return false;
+    ManagedServiceState state = compositor_service_state();
+    if (state != MANAGED_SERVICE_FAILED && state != MANAGED_SERVICE_REAP_PENDING)
+        return false;
+    if (!compositor_service_last_exit_info(out) || out->process_id != process_id ||
+        out->thread_id != thread_id) return false;
+
+    /* Window policy can fail independently. The display process keeps the GOP
+     * lease and the graphical client remains blocked on its private endpoint. */
+    return (
+        g_active && 
+        app_blocked() && 
+        display_service_running() &&
+        display_service_process_id() == display_pid &&
+        display_direct_state() == DISPLAY_LEASE_USER &&
+        display_direct_owner_process_id() == display_pid
+    );
+}
+
 bool graphical_session_test_fault_display_service(ProcessExitInfo *out) {
     if (!out) return false;
     k_memset(out, 0, sizeof(*out));
-    if (!g_active || !display_service_running() || !app_blocked() ||
+    if (!g_active || !display_service_running() ||
+        !compositor_service_running() || !app_blocked() ||
         display_service_focus_slot() != GRAPHICAL_SESSION_SLOT || !g_client.active ||
         !g_app.process_created || !g_app.thread_created) return false;
 
@@ -439,10 +486,9 @@ bool graphical_session_test_fault_display_service(ProcessExitInfo *out) {
     if (!display_service_last_exit_info(out) || out->process_id != process_id ||
         out->thread_id != thread_id) return false;
 
-    /* The compositor fault must not implicitly kill the client or release the
-     * framebuffer behind the recovery owner. Input routing will independently
-     * fall back because display_service_running() is now false. */
-    return g_active && app_blocked() &&
+    /* A display-process fault does not implicitly kill the client or separate
+     * compositor. GOP ownership remains retained until supervised cleanup. */
+    return g_active && app_blocked() && compositor_service_running() &&
         display_direct_state() == DISPLAY_LEASE_USER &&
         display_direct_owner_process_id() == process_id;
 }
@@ -472,25 +518,23 @@ bool graphical_session_run(void) {
     bool normal_exit = false;
 
     for (;;) {
-        if (!g_active || !display_service_running() || g_app.thread.state == THREAD_STATE_DEAD) {
+        if (!g_active || !display_service_running() || !compositor_service_running() ||
+            g_app.thread.state == THREAD_STATE_DEAD) {
             serial_write("R8 GUI: session component stopped unexpectedly; reclaiming display.\n");
             break;
         }
-
         KeyEvent event;
         k_memset(&event, 0, sizeof(event));
         if (!input_poll(&event)) {
             arch_pause();
             continue;
         }
-
         /* Escape is intentionally kernel-owned. It remains available even if
          * the Ring3 client or compositor input parser is unhealthy. */
         if (event.pressed && event.key == KEY_ESCAPE) {
             normal_exit = true;
             break;
         }
-
         if (!graphical_session_handle_event(&event)) {
             serial_write("R8 GUI: focused input/present transaction failed; reclaiming display.\n");
             break;

@@ -60,9 +60,9 @@ bool display_service_surface_slot_attached(u32 slot);
 bool display_service_surface_slot_mapping_valid(u32 slot);
 u32 display_service_surface_count(void);
 
-/* Userspace compositor policy. Geometry and z-order are interpreted by the
- * Ring3 service; the kernel only maps validated surface resources and carries
- * bounded control messages. */
+/* Compatibility-facing graphics policy API. Geometry, z-order and focus are
+ * owned by the separate Ring3 compositor service. The display service retains
+ * only the framebuffer mapping and bounded surface blit primitives. */
 bool display_service_surface_configure(u32 slot, u32 x, u32 y,
     u32 width, u32 height, u32 z);
 bool display_service_compose(u32 *out_count, u32 *out_sample);

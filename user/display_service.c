@@ -9,20 +9,16 @@ typedef struct {
     JcosU32 height;
     JcosU32 stride;
     JcosU32 pixel_format;
+    JcosU32 red_mask;
+    JcosU32 green_mask;
+    JcosU32 blue_mask;
+    JcosU32 reserved_mask;
+    unsigned int masks_valid;
 } DisplayTarget;
-
-typedef struct {
-    JcosU32 x;
-    JcosU32 y;
-    JcosU32 width;
-    JcosU32 height;
-    JcosU32 z;
-    unsigned int active;
-} CompositorSlot;
 
 static void clear_message(JcosIpcMessage *message) {
     if (!message) return;
-    for (JcosU32 i = 0; i < JCOS_IPC_MESSAGE_MAX_WORDS; ++i) message->words[i] = 0ULL;
+    for (JcosU32 i = 0U; i < JCOS_IPC_MESSAGE_MAX_WORDS; ++i) message->words[i] = 0ULL;
     message->word_count = 0U;
 }
 
@@ -44,6 +40,19 @@ static int startup_valid(const JcosProgramStartup *startup) {
     return width && height && stride >= width && format <= 2U;
 }
 
+static JcosU32 channel(JcosU32 value, JcosU32 mask) {
+    if (!mask) return 0U;
+    JcosU32 shift = 0U;
+    while (shift < 31U && ((mask >> shift) & 1U) == 0U) ++shift;
+    JcosU32 max = mask >> shift;
+    return (JcosU32)((((JcosU64)(value & 0xFFU) * (JcosU64)max) / 255ULL << shift) & mask);
+}
+
+static int target_ready(const DisplayTarget *target) {
+    return target && target->framebuffer && target->width && target->height &&
+        target->stride >= target->width && (target->pixel_format <= 1U || target->masks_valid);
+}
+
 static JcosU32 rgb(const DisplayTarget *target, JcosU32 r, JcosU32 g, JcosU32 b) {
     if (!target) return 0U;
     r &= 0xFFU;
@@ -51,10 +60,10 @@ static JcosU32 rgb(const DisplayTarget *target, JcosU32 r, JcosU32 g, JcosU32 b)
     b &= 0xFFU;
     if (target->pixel_format == 0U) return r | (g << 8) | (b << 16);
     if (target->pixel_format == 1U) return b | (g << 8) | (r << 16);
-
-    /* PixelBitMask needs mask metadata for true colour. Keep the R8 fallback
-     * deterministic until that metadata is part of the display-service ABI. */
-    return (r || g || b) ? 0xFFFFFFFFU : 0U;
+    if (target->pixel_format != 2U || !target->masks_valid) return 0U;
+    return channel(r, target->red_mask) |
+        channel(g, target->green_mask) |
+        channel(b, target->blue_mask);
 }
 
 static JcosU32 rgb332(const DisplayTarget *target, unsigned char pixel) {
@@ -69,117 +78,54 @@ static const volatile unsigned char *surface_source(JcosU32 slot) {
     return (const volatile unsigned char *)(JcosU64)JCOS_DISPLAY_SURFACE_SLOT_VA(slot);
 }
 
-static void clear_target(const DisplayTarget *target) {
-    if (!target || !target->framebuffer || !target->width || !target->height ||
-        target->stride < target->width) return;
+static int clear_target(const DisplayTarget *target) {
+    if (!target_ready(target)) return 0;
     JcosU32 black = rgb(target, 0U, 0U, 0U);
     for (JcosU32 y = 0U; y < target->height; ++y) {
         volatile JcosU32 *row = target->framebuffer + (JcosU64)y * target->stride;
         for (JcosU32 x = 0U; x < target->width; ++x) row[x] = black;
     }
+    return 1;
 }
 
-static void draw_surface_rect(const DisplayTarget *target, JcosU32 slot,
-    const CompositorSlot *config) {
+static int draw_surface_rect(const DisplayTarget *target, JcosU32 slot,
+    JcosU32 x, JcosU32 y, JcosU32 width, JcosU32 height) {
     const volatile unsigned char *source = surface_source(slot);
-    if (!target || !source || !config || !config->active || !config->width ||
-        !config->height) return;
+    if (!target_ready(target) || !source || !width || !height ||
+        x >= target->width || y >= target->height ||
+        width > target->width - x || height > target->height - y) return 0;
 
-    for (JcosU32 dy = 0U; dy < config->height; ++dy) {
-        JcosU32 source_y = (JcosU32)(((JcosU64)dy * JCOS_DISPLAY_SURFACE_HEIGHT) /
-            config->height);
+    for (JcosU32 dy = 0U; dy < height; ++dy) {
+        JcosU32 source_y = (JcosU32)(((JcosU64)dy * JCOS_DISPLAY_SURFACE_HEIGHT) / height);
         if (source_y >= JCOS_DISPLAY_SURFACE_HEIGHT)
             source_y = JCOS_DISPLAY_SURFACE_HEIGHT - 1U;
-        volatile JcosU32 *row = target->framebuffer +
-            (JcosU64)(config->y + dy) * target->stride + config->x;
+        volatile JcosU32 *row = target->framebuffer + (JcosU64)(y + dy) * target->stride + x;
         const volatile unsigned char *source_row = source +
             (JcosU64)source_y * JCOS_DISPLAY_SURFACE_STRIDE;
 
-        for (JcosU32 dx = 0U; dx < config->width; ++dx) {
-            JcosU32 source_x = (JcosU32)(((JcosU64)dx * JCOS_DISPLAY_SURFACE_WIDTH) /
-                config->width);
+        for (JcosU32 dx = 0U; dx < width; ++dx) {
+            JcosU32 source_x = (JcosU32)(((JcosU64)dx * JCOS_DISPLAY_SURFACE_WIDTH) / width);
             if (source_x >= JCOS_DISPLAY_SURFACE_WIDTH)
                 source_x = JCOS_DISPLAY_SURFACE_WIDTH - 1U;
             row[dx] = rgb332(target, source_row[source_x]);
         }
     }
-}
-
-static void draw_shared_surface(const DisplayTarget *target) {
-    if (!target) return;
-    CompositorSlot full;
-    full.x = 0U;
-    full.y = 0U;
-    full.width = target->width;
-    full.height = target->height;
-    full.z = 0U;
-    full.active = 1U;
-    draw_surface_rect(target, 0U, &full);
-}
-
-static JcosU32 compose(const DisplayTarget *target, const CompositorSlot *slots,
-    JcosU32 *out_sample) {
-    if (!target || !slots || !out_sample) return 0U;
-    clear_target(target);
-
-    unsigned int drawn[JCOS_DISPLAY_SURFACE_CAPACITY];
-    for (JcosU32 i = 0U; i < JCOS_DISPLAY_SURFACE_CAPACITY; ++i) drawn[i] = 0U;
-
-    JcosU32 count = 0U;
-    for (;;) {
-        JcosU32 best = JCOS_DISPLAY_SURFACE_CAPACITY;
-        for (JcosU32 i = 0U; i < JCOS_DISPLAY_SURFACE_CAPACITY; ++i) {
-            if (!slots[i].active || drawn[i]) continue;
-            if (best == JCOS_DISPLAY_SURFACE_CAPACITY || slots[i].z < slots[best].z ||
-                (slots[i].z == slots[best].z && i < best)) best = i;
-        }
-        if (best == JCOS_DISPLAY_SURFACE_CAPACITY) break;
-        draw_surface_rect(target, best, &slots[best]);
-        drawn[best] = 1U;
-        ++count;
-    }
-
-    JcosU32 sample_x = target->width / 2U;
-    JcosU32 sample_y = target->height / 2U;
-    *out_sample = target->framebuffer[(JcosU64)sample_y * target->stride + sample_x];
-    return count;
-}
-
-static int configure_slot(const DisplayTarget *target, CompositorSlot *slots,
-    JcosU64 config_word, JcosU64 position_word, JcosU64 extent_word) {
-    if (!target || !slots) return 0;
-    JcosU32 slot = JCOS_DISPLAY_SURFACE_CONFIG_SLOT(config_word);
-    JcosU32 z = JCOS_DISPLAY_SURFACE_CONFIG_Z(config_word);
-    JcosU32 x = JCOS_DISPLAY_SURFACE_POSITION_X(position_word);
-    JcosU32 y = JCOS_DISPLAY_SURFACE_POSITION_Y(position_word);
-    JcosU32 width = JCOS_DISPLAY_SURFACE_EXTENT_WIDTH(extent_word);
-    JcosU32 height = JCOS_DISPLAY_SURFACE_EXTENT_HEIGHT(extent_word);
-    if (slot >= JCOS_DISPLAY_SURFACE_CAPACITY || !width || !height ||
-        x >= target->width || y >= target->height ||
-        width > target->width - x || height > target->height - y) return 0;
-
-    slots[slot].x = x;
-    slots[slot].y = y;
-    slots[slot].width = width;
-    slots[slot].height = height;
-    slots[slot].z = z;
-    slots[slot].active = 1U;
     return 1;
 }
 
-static void remove_slot(CompositorSlot *slots, JcosU32 slot) {
-    if (!slots || slot >= JCOS_DISPLAY_SURFACE_CAPACITY) return;
-    slots[slot].x = 0U;
-    slots[slot].y = 0U;
-    slots[slot].width = 0U;
-    slots[slot].height = 0U;
-    slots[slot].z = 0U;
-    slots[slot].active = 0U;
+static int draw_shared_surface(const DisplayTarget *target) {
+    return target_ready(target) && draw_surface_rect(target, 0U, 0U, 0U, target->width, target->height);
+}
+
+static JcosU32 sample_center(const DisplayTarget *target) {
+    if (!target_ready(target)) return 0U;
+    JcosU32 x = target->width / 2U;
+    JcosU32 y = target->height / 2U;
+    return target->framebuffer[(JcosU64)y * target->stride + x];
 }
 
 static void draw_pattern(const DisplayTarget *target) {
-    if (!target || !target->framebuffer || !target->width || !target->height ||
-        target->stride < target->width) return;
+    if (!target_ready(target)) return;
 
     JcosU32 black = rgb(target, 0U, 0U, 0U);
     JcosU32 white = rgb(target, 255U, 255U, 255U);
@@ -195,18 +141,29 @@ static void draw_pattern(const DisplayTarget *target) {
     for (JcosU32 y = 0U; y < target->height; ++y) {
         volatile JcosU32 *row = target->framebuffer + (JcosU64)y * target->stride;
         for (JcosU32 x = 0U; x < target->width; ++x) {
-            JcosU32 color = black;
-            if (target->pixel_format <= 1U && y < band) {
-                color = x < third ? red : (x < third * 2U ? green : blue);
-            } else if (target->pixel_format == 2U && y < band) {
-                color = ((x / 32U) & 1U) ? white : black;
-            }
-
+            JcosU32 color = y < band ?
+                (x < third ? red : (x < third * 2U ? green : blue)) : black;
             if (x < 4U || y < 4U || x + 4U >= target->width || y + 4U >= target->height)
                 color = white;
             row[x] = color;
         }
     }
+}
+
+static int set_pixel_masks(DisplayTarget *target, JcosU64 rg, JcosU64 br) {
+    if (!target || target->pixel_format != 2U) return 0;
+    JcosU32 red = JCOS_DISPLAY_MASK_LOW(rg);
+    JcosU32 green = JCOS_DISPLAY_MASK_HIGH(rg);
+    JcosU32 blue = JCOS_DISPLAY_MASK_LOW(br);
+    JcosU32 reserved = JCOS_DISPLAY_MASK_HIGH(br);
+    if (!(red | green | blue) || (red & green) || (red & blue) || (green & blue)) return 0;
+
+    target->red_mask = red;
+    target->green_mask = green;
+    target->blue_mask = blue;
+    target->reserved_mask = reserved;
+    target->masks_valid = 1U;
+    return 1;
 }
 
 static int send_reply(JcosCapabilityHandle reply_cap, JcosU64 code,
@@ -235,12 +192,13 @@ void jcos_main(const JcosProgramStartup *startup) {
     target.height = JCOS_DISPLAY_HEIGHT(startup->arguments[2]);
     target.stride = JCOS_DISPLAY_STRIDE(startup->arguments[3]);
     target.pixel_format = JCOS_DISPLAY_PIXEL_FORMAT(startup->arguments[3]);
+    target.red_mask = 0U;
+    target.green_mask = 0U;
+    target.blue_mask = 0U;
+    target.reserved_mask = 0U;
+    target.masks_valid = target.pixel_format <= 1U;
 
-    CompositorSlot slots[JCOS_DISPLAY_SURFACE_CAPACITY];
-    for (JcosU32 i = 0U; i < JCOS_DISPLAY_SURFACE_CAPACITY; ++i) remove_slot(slots, i);
-    JcosU32 focused_slot = JCOS_DISPLAY_SURFACE_FOCUS_NONE;
-
-    draw_pattern(&target);
+    if (target_ready(&target)) draw_pattern(&target);
 
     for (;;) {
         JcosIpcMessage request;
@@ -268,8 +226,17 @@ void jcos_main(const JcosProgramStartup *startup) {
             continue;
         }
 
+        if (op == JCOS_DISPLAY_SERVICE_OP_SET_PIXEL_MASKS) {
+            if (request.word_count != 3U || !set_pixel_masks(&target, request.words[1], request.words[2])) {
+                if (!send_reply(reply_cap, JCOS_SERVICE_REPLY_INVALID_REQUEST, incarnation, op, 4U)) jcos_thread_exit();
+                continue;
+            }
+            if (!send_reply(reply_cap, JCOS_DISPLAY_SERVICE_REPLY_MASKS_SET, incarnation, 0ULL, 3U)) jcos_thread_exit();
+            continue;
+        }
+
         if (op == JCOS_DISPLAY_SERVICE_OP_REDRAW) {
-            if (request.word_count != 2U) {
+            if (request.word_count != 2U || !target_ready(&target)) {
                 if (!send_reply(reply_cap, JCOS_SERVICE_REPLY_INVALID_REQUEST, incarnation, op, 4U)) jcos_thread_exit();
                 continue;
             }
@@ -278,64 +245,48 @@ void jcos_main(const JcosProgramStartup *startup) {
             continue;
         }
 
-        if (op == JCOS_DISPLAY_SERVICE_OP_PRESENT_SURFACE) {
-            if (request.word_count != 3U) {
+        if (op == JCOS_DISPLAY_SERVICE_OP_CLEAR) {
+            if (request.word_count != 2U || !clear_target(&target)) {
                 if (!send_reply(reply_cap, JCOS_SERVICE_REPLY_INVALID_REQUEST, incarnation, op, 4U)) jcos_thread_exit();
                 continue;
             }
-            draw_shared_surface(&target);
+            if (!send_reply(reply_cap, JCOS_DISPLAY_SERVICE_REPLY_CLEARED, incarnation, 0ULL, 3U)) jcos_thread_exit();
+            continue;
+        }
+
+        if (op == JCOS_DISPLAY_SERVICE_OP_PRESENT_SURFACE) {
+            if (request.word_count != 3U || !draw_shared_surface(&target)) {
+                if (!send_reply(reply_cap, JCOS_SERVICE_REPLY_INVALID_REQUEST, incarnation, op, 4U)) jcos_thread_exit();
+                continue;
+            }
             if (!send_reply(reply_cap, JCOS_DISPLAY_SERVICE_REPLY_PRESENTED, incarnation, request.words[2], 4U)) jcos_thread_exit();
             continue;
         }
 
-        if (op == JCOS_DISPLAY_SERVICE_OP_SURFACE_CONFIG) {
-            if (request.word_count != 4U || !configure_slot(&target, slots,
-                    request.words[1], request.words[2], request.words[3])) {
+        if (op == JCOS_DISPLAY_SERVICE_OP_PRESENT_RECT) {
+            if (request.word_count != 4U || request.words[1] >= JCOS_DISPLAY_SURFACE_CAPACITY) {
                 if (!send_reply(reply_cap, JCOS_SERVICE_REPLY_INVALID_REQUEST, incarnation, op, 4U)) jcos_thread_exit();
                 continue;
             }
-            JcosU32 slot = JCOS_DISPLAY_SURFACE_CONFIG_SLOT(request.words[1]);
-            if (!send_reply(reply_cap, JCOS_DISPLAY_SERVICE_REPLY_CONFIGURED, incarnation, slot, 4U)) jcos_thread_exit();
+            JcosU32 slot = (JcosU32)request.words[1];
+            JcosU32 x = JCOS_DISPLAY_SURFACE_POSITION_X(request.words[2]);
+            JcosU32 y = JCOS_DISPLAY_SURFACE_POSITION_Y(request.words[2]);
+            JcosU32 width = JCOS_DISPLAY_SURFACE_EXTENT_WIDTH(request.words[3]);
+            JcosU32 height = JCOS_DISPLAY_SURFACE_EXTENT_HEIGHT(request.words[3]);
+            if (!draw_surface_rect(&target, slot, x, y, width, height)) {
+                if (!send_reply(reply_cap, JCOS_SERVICE_REPLY_INVALID_REQUEST, incarnation, op, 4U)) jcos_thread_exit();
+                continue;
+            }
+            if (!send_reply(reply_cap, JCOS_DISPLAY_SERVICE_REPLY_RECT_PRESENTED, incarnation, slot, 4U)) jcos_thread_exit();
             continue;
         }
 
-        if (op == JCOS_DISPLAY_SERVICE_OP_COMPOSE) {
-            if (request.word_count != 2U) {
+        if (op == JCOS_DISPLAY_SERVICE_OP_SAMPLE) {
+            if (request.word_count != 2U || !target_ready(&target)) {
                 if (!send_reply(reply_cap, JCOS_SERVICE_REPLY_INVALID_REQUEST, incarnation, op, 4U)) jcos_thread_exit();
                 continue;
             }
-            JcosU32 sample = 0U;
-            JcosU32 count = compose(&target, slots, &sample);
-            if (!send_reply(reply_cap, JCOS_DISPLAY_SERVICE_REPLY_COMPOSED, incarnation, JCOS_DISPLAY_COMPOSE_DETAIL(count, sample), 4U))
-                jcos_thread_exit();
-            continue;
-        }
-
-        if (op == JCOS_DISPLAY_SERVICE_OP_FOCUS_SURFACE) {
-            if (request.word_count != 3U || request.words[2] > 0xFFFFFFFFULL) {
-                if (!send_reply(reply_cap, JCOS_SERVICE_REPLY_INVALID_REQUEST, incarnation, op, 4U)) jcos_thread_exit();
-                continue;
-            }
-            JcosU32 requested = (JcosU32)request.words[2];
-            if (requested != JCOS_DISPLAY_SURFACE_FOCUS_NONE &&
-                (requested >= JCOS_DISPLAY_SURFACE_CAPACITY || !slots[requested].active)) {
-                if (!send_reply(reply_cap, JCOS_SERVICE_REPLY_INVALID_REQUEST, incarnation, op, 4U)) jcos_thread_exit();
-                continue;
-            }
-            focused_slot = requested;
-            if (!send_reply(reply_cap, JCOS_DISPLAY_SERVICE_REPLY_FOCUSED, incarnation, focused_slot, 4U)) jcos_thread_exit();
-            continue;
-        }
-
-        if (op == JCOS_DISPLAY_SERVICE_OP_SURFACE_REMOVE) {
-            if (request.word_count != 3U || request.words[2] >= JCOS_DISPLAY_SURFACE_CAPACITY) {
-                if (!send_reply(reply_cap, JCOS_SERVICE_REPLY_INVALID_REQUEST, incarnation, op, 4U)) jcos_thread_exit();
-                continue;
-            }
-            JcosU32 slot = (JcosU32)request.words[2];
-            remove_slot(slots, slot);
-            if (focused_slot == slot) focused_slot = JCOS_DISPLAY_SURFACE_FOCUS_NONE;
-            if (!send_reply(reply_cap, JCOS_DISPLAY_SERVICE_REPLY_REMOVED, incarnation, slot, 4U)) jcos_thread_exit();
+            if (!send_reply(reply_cap, JCOS_DISPLAY_SERVICE_REPLY_SAMPLED, incarnation, sample_center(&target), 4U)) jcos_thread_exit();
             continue;
         }
 

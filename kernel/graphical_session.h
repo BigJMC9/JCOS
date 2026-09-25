@@ -17,9 +17,11 @@ bool graphical_session_last_event(KeyEvent *out);
  * SEND authority for this diagnostic operation. Resources remain owned until
  * graphical_session_cleanup() proves the recovery path. */
 bool graphical_session_test_fault_client(ProcessExitInfo *out);
-/* Acceptance-only deliberate Ring3 compositor/display-service #UD. The
- * client must remain contained and the display lease stays retained until
- * graphical_session_cleanup() performs the recovery transaction. */
+/* Acceptance-only compositor #UD. The display service and client stay alive,
+ * proving window policy can be recovered without surrendering the GOP lease. */
+bool graphical_session_test_fault_compositor(ProcessExitInfo *out);
+/* Acceptance-only display-service #UD. The separate compositor and client
+ * remain contained while the GOP lease is retained for supervised teardown. */
 bool graphical_session_test_fault_display_service(ProcessExitInfo *out);
 u64 graphical_session_run_count(void);
 u64 graphical_session_event_count(void);
