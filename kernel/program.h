@@ -19,6 +19,26 @@ typedef struct {
 } ProgramGrantSpec;
 
 typedef struct {
+    /*
+     * Physical storage borrowed by the launched process.
+     *
+     * The launcher maps and later unmaps these pages, but never owns or frees
+     * the underlying physical frames. Intended for bounded device/firmware
+     * resources such as the R8 GOP framebuffer.
+     *
+     * virtual_base is page aligned. physical_base may be unaligned; the
+     * containing physical pages are mapped and the caller retains the offset.
+     *
+     * Only VM_WRITE and VM_UNCACHED are accepted here. VM_USER is added by the
+     * launcher and VM_EXEC is never permitted.
+     */
+    u64 physical_base;
+    u64 size;
+    u64 virtual_base;
+    vm_flags_t flags;
+} ProgramBorrowedMappingSpec;
+
+typedef struct {
     const VfsNode *file;
     /* Optional terminal observer. Registration commits inside launch after all
      * other fallible setup and before run-queue publication. */
@@ -30,6 +50,7 @@ typedef struct {
     const void *readonly_data;
     u64 readonly_size;
     u64 readonly_virtual_base;
+    ProgramBorrowedMappingSpec borrowed_mapping;
 } ProgramLaunchSpec;
 
 typedef struct {
@@ -37,7 +58,9 @@ typedef struct {
     Thread thread;
     UserElfImage image;
     frame_t stack_frame;
+
     CapabilityHandle startup_handles[JCOS_PROGRAM_STARTUP_MAX_CAPABILITIES];
+
     bool process_created;
     bool stack_frame_allocated;
     bool stack_mapped;
@@ -46,9 +69,18 @@ typedef struct {
     bool unpublished_space;
     bool unpublished_stack;
     bool unlinked_table;
+
     u64 readonly_virtual_base;
     frame_t readonly_first_frame;
     u32 readonly_page_count;
+
+    /*
+     * Borrowed physical mappings are removed during teardown but their frames
+     * are never returned to PMM.
+     */
+    u64 borrowed_virtual_base;
+    frame_t borrowed_first_frame;
+    u32 borrowed_page_count;
 } ProgramInstance;
 
 /*

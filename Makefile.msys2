@@ -15,11 +15,13 @@ USER_LAUNCH_PROBE := $(ROOTFS_DIR)/bin/launchprobe.elf
 USER_RUNTIME_TEST := $(ROOTFS_DIR)/bin/runtimetest.elf
 USER_RUNTIME_CANCEL_TEST := $(ROOTFS_DIR)/bin/runtimecanceltest.elf
 USER_RUNTIME_BLOCK_TEST := $(ROOTFS_DIR)/bin/runtimeblocktest.elf
+USER_DISPLAY_SERVICE := $(ROOTFS_DIR)/bin/displayservice.elf
+USER_SURFACE_APP := $(ROOTFS_DIR)/bin/surfaceapp.elf
 USER_MEDIA_PLAYER := $(ROOTFS_DIR)/bin/mediaplayer.elf
 .DEFAULT_GOAL := all
 .DELETE_ON_ERROR:
 
-USER_PROGRAMS := $(USER_ELF_TEST) $(USER_SUPERVISOR) $(USER_WORKER_SERVICE) $(USER_ORDINARY_SERVICE) $(USER_ORDINARY_SERVICE_REPLACEMENT) $(USER_CONSOLE_SERVICE) $(USER_HELLO) $(USER_INPUT_ECHO) $(USER_LAUNCH_PROBE) $(USER_RUNTIME_TEST) $(USER_RUNTIME_BLOCK_TEST) $(USER_RUNTIME_CANCEL_TEST) $(USER_MEDIA_PLAYER)
+USER_PROGRAMS := $(USER_ELF_TEST) $(USER_SUPERVISOR) $(USER_WORKER_SERVICE) $(USER_ORDINARY_SERVICE) $(USER_ORDINARY_SERVICE_REPLACEMENT) $(USER_CONSOLE_SERVICE) $(USER_HELLO) $(USER_INPUT_ECHO) $(USER_LAUNCH_PROBE) $(USER_RUNTIME_TEST) $(USER_RUNTIME_BLOCK_TEST) $(USER_RUNTIME_CANCEL_TEST) $(USER_DISPLAY_SERVICE) $(USER_SURFACE_APP) $(USER_MEDIA_PLAYER)
 ROOTFS_FILES := $(shell test -d $(ROOTFS_DIR) && find $(ROOTFS_DIR) -type f)
 IMAGE := $(BUILD)/JA-os.img
 
@@ -155,6 +157,47 @@ $(USER_ORDINARY_SERVICE_REPLACEMENT): $(BUILD)/user_crt0_startup.o \
 	      $(BUILD)/user_crt0_startup.o \
 	      $(BUILD)/user_syscall.o \
 	      $(BUILD)/user_ordinary_service_replacement.o
+	$(CHECK_ELF_RELOCATIONS)
+
+$(BUILD)/user_display_service.o: user/display_service.c \
+                                 user/lib/syscall.h \
+                                 include/user_abi.h \
+                                 include/program_startup.h \
+                                 include/service_protocol.h \
+                                 include/display_service_protocol.h | $(BUILD)
+	$(CLANG) $(USER_CFLAGS) -c $< -o $@
+
+$(USER_DISPLAY_SERVICE): $(BUILD)/user_crt0_startup.o \
+                         $(BUILD)/user_syscall.o \
+                         $(BUILD)/user_display_service.o \
+                         user/display_service.ld Makefile.msys2
+	mkdir -p $(dir $@)
+	$(LD) -m elf_x86_64 -nostdlib -static \
+	      -T user/display_service.ld \
+	      -o $@ \
+	      $(BUILD)/user_crt0_startup.o \
+	      $(BUILD)/user_syscall.o \
+	      $(BUILD)/user_display_service.o
+	$(CHECK_ELF_RELOCATIONS)
+
+$(BUILD)/user_surface_app.o: user/surface_app.c \
+                             user/lib/syscall.h \
+                             include/user_abi.h \
+                             include/program_startup.h \
+                             include/display_service_protocol.h | $(BUILD)
+	$(CLANG) $(USER_CFLAGS) -c $< -o $@
+
+$(USER_SURFACE_APP): $(BUILD)/user_crt0_startup.o \
+                     $(BUILD)/user_syscall.o \
+                     $(BUILD)/user_surface_app.o \
+                     user/surface_app.ld Makefile.msys2
+	mkdir -p $(dir $@)
+	$(LD) -m elf_x86_64 -nostdlib -static \
+	      -T user/surface_app.ld \
+	      -o $@ \
+	      $(BUILD)/user_crt0_startup.o \
+	      $(BUILD)/user_syscall.o \
+	      $(BUILD)/user_surface_app.o
 	$(CHECK_ELF_RELOCATIONS)
 
 $(BUILD)/user_boot_archive.o: user/lib/boot_archive.c \

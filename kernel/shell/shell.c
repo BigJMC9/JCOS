@@ -49,6 +49,7 @@
 #include "test_registry.h"
 #include "editor.h"
 #include "input.h"
+#include "input_router.h"
 #include "userspace_shell.h"
 
 
@@ -7315,7 +7316,7 @@ NORETURN void shell_run(const BootInfo *boot) {
     for (;;) {
         KeyEvent event;
 
-        if (!input_poll(&event)) {
+        if (!input_poll_routed(&event)) {
             if (timer_initialized()) {
                 u32 frequency = timer_frequency();
                 u64 interval = frequency >= 2U ? (u64)(frequency / 2U) : 1ULL;

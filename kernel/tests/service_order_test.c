@@ -18,6 +18,7 @@
 #define SERVICE_ORDER_COOKIE 0x5352564F52444552ULL
 #define SERVICE_ORDER_CLEANUP_COOKIE 0x535256434C45414EULL
 #define SERVICE_ORDER_RFLAGS_IF (1ULL << 9)
+#define SERVICE_ORDER_PROGRESS_RETRIES 4U
 
 static Thread g_spinner;
 static bool g_spinner_created;
@@ -130,12 +131,40 @@ void service_order_test_run(void) {
     u64 ticks_before = timer_ticks();
     SupervisorStopResult stop_result = supervisor_stop_bounded();
     bool stopped = stop_result == SUPERVISOR_STOP_GRACEFUL;
+    u64 stop_preempt_delta = scheduler_preemption_count() - preempt_before;
+    u64 stop_tick_delta = timer_ticks() - ticks_before;
+    bool pit_during_stop = stop_preempt_delta > 0ULL && stop_tick_delta > 0ULL;
     u64 spin_count = g_spinner_count;
-    u64 preempt_delta = scheduler_preemption_count() - preempt_before;
-    u64 tick_delta = timer_ticks() - ticks_before;
+
+    /*
+     * The spinner is deliberately non-yielding. A PIT interrupt may already
+     * be pending when the blocking shutdown path first dispatches it, allowing
+     * IRQ0 to preempt the spinner before spinner_entry() executes its first
+     * increment. That is valid timer preemption, not lack of contention.
+     *
+     * Keep the timer evidence scoped to supervisor_stop_bounded(), then give
+     * the still-runnable spinner a few bounded follow-up slices only to prove
+     * forward progress. Returning from scheduler_yield() here still requires
+     * timer preemption because the spinner never yields or blocks.
+     */
+    for (u32 retry = 0U;
+         stopped && pit_during_stop && spin_count == 0ULL &&
+             scheduler_preemption_enabled() &&
+             retry < SERVICE_ORDER_PROGRESS_RETRIES &&
+             g_spinner.state == THREAD_STATE_READY &&
+             g_spinner.on_run_queue &&
+             g_spinner.interrupt_context_ready &&
+             g_spinner.interrupt_rsp;
+         ++retry) {
+        if (!scheduler_yield()) break;
+        spin_count = g_spinner_count;
+    }
+
+    bool spinner_progress = spin_count > 0ULL;
     bool service_released = stopped && !supervisor_running();
 
-    report("SPINNER RAN / PIT PREEMPTED", spin_count > 0ULL && preempt_delta > 0ULL && tick_delta > 0ULL);
+    report("SPINNER RAN WITHOUT YIELD", spinner_progress);
+    report("PIT PREEMPTED DURING SHUTDOWN", pit_during_stop);
     report("BOUNDED SUPERVISOR STOP THROUGH CONTENTION", service_released);
 
     flags = irq_save();
@@ -160,7 +189,7 @@ void service_order_test_run(void) {
         process_thread_count(kernel) == kernel_threads_before && after.free_pages == before.free_pages;
     report("RESOURCE / PREEMPTION BASELINES", baselines);
 
-    if (spin_count > 0ULL && preempt_delta > 0ULL && tick_delta > 0ULL && service_released &&
+    if (spinner_progress && pit_during_stop && service_released &&
         queue_restored && ping && baselines) {
         terminal_set_color(terminal_accent_color());
         terminal_writeln("SERVICE ORDER / BOUNDED SHUTDOWN TEST: PASS");

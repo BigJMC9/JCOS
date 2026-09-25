@@ -667,6 +667,7 @@ bool vmm_query_page(const VmPageMap *map, u64 virtual_address, frame_t *frame, v
         if ((pml4e & PTE_WRITE) && (pdpte & PTE_WRITE) && (pde & PTE_WRITE) && (pte & PTE_WRITE)) result |= VM_WRITE;
         if ((pml4e & PTE_USER) && (pdpte & PTE_USER) && (pde & PTE_USER) && (pte & PTE_USER)) result |= VM_USER;
         if (!((pml4e | pdpte | pde | pte) & PTE_NX)) result |= VM_EXEC;
+        if (pte & PTE_PCD) result |= VM_UNCACHED;
 
         *flags = result;
     }
@@ -676,10 +677,14 @@ bool vmm_query_page(const VmPageMap *map, u64 virtual_address, frame_t *frame, v
 
 static vm_flags_t vmm_test_entry_flags(u64 entry) {
     if (!(entry & PTE_PRESENT)) return 0;
+
     vm_flags_t flags = 0;
+
     if (entry & PTE_WRITE) flags |= VM_WRITE;
     if (entry & PTE_USER) flags |= VM_USER;
     if (!(entry & PTE_NX)) flags |= VM_EXEC;
+    if (entry & PTE_PCD) flags |= VM_UNCACHED;
+
     return flags;
 }
 
@@ -739,30 +744,25 @@ static bool unmap_page_locked(VmPageMap *map, u64 virtual_address, frame_t *old_
     if (!existing_table(pml4, i4, &pdpt_frame, &pdpt)) return false;
 
     u32 i3 = pdpt_index(virtual_address);
-
     frame_t pd_frame;
     u64 *pd;
 
     if (!existing_table(pdpt, i3, &pd_frame, &pd)) return false;
 
     u32 i2 = pd_index(virtual_address);
-
     frame_t pt_frame;
     u64 *pt;
 
     if (!existing_table(pd, i2, &pt_frame, &pt)) return false;
 
     u32 i1 = pt_index(virtual_address);
-
     u64 entry = pt[i1];
 
     if (!(entry & PTE_PRESENT) || (entry & (1ULL << 8))) return false;
 
     frame_t mapped = entry_frame(entry);
-
     /* Remove the mapping. */
     pt[i1] = 0;
-
     if (old_frame) *old_frame = mapped;
 
     flush_active_map(map);

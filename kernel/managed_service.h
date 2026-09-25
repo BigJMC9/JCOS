@@ -43,6 +43,12 @@ typedef struct {
     u32 startup_grant_count;
     u64 startup_arguments[MANAGED_SERVICE_MAX_EXTRA_ARGUMENTS];
     u32 startup_argument_count;
+
+    /* Optional kernel-selected physical resource mapping. The generic managed
+     * service layer forwards this to program_launch(); userspace never chooses
+     * a physical address through IPC or a syscall. */
+    ProgramBorrowedMappingSpec borrowed_mapping;
+
     u32 shutdown_request_word_count;
     u64 shutdown_request_words[IPC_MESSAGE_MAX_WORDS];
 } ManagedServiceLaunchExtras;

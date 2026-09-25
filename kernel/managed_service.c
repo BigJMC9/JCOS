@@ -328,6 +328,7 @@ static bool managed_service_start_resolved_ex(ManagedService *service, const Vfs
     for (u32 i = 0; i < extra_arguments; ++i) {
         launch.startup_arguments[MANAGED_SERVICE_BASE_STARTUP_ARGUMENTS + i] = extras->startup_arguments[i];
     }
+    if (extras) launch.borrowed_mapping = extras->borrowed_mapping;
 
     if (!program_launch(&service->program, &launch) || !service_wait_ready(service)) goto fail;
     service->state = MANAGED_SERVICE_RUNNING;

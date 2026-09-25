@@ -1,4 +1,7 @@
 #include "test_registry.h"
+#include "display_lease_test.h"
+#include "display_service_test.h"
+#include "display_surface_test.h"
 
 #include "capability_test.h"
 #include "constructor_test.h"
@@ -45,7 +48,7 @@
 #include "user_test_fixture.h"
 #include "vmm_reclaim_test.h"
 
-#define KERNEL_TEST_CAPACITY 48U
+#define KERNEL_TEST_CAPACITY 64U
 
 static KernelTest g_tests[KERNEL_TEST_CAPACITY];
 static u32 g_test_count;
@@ -87,6 +90,12 @@ static void kernel_test_set_deep_runs(const char *name, u32 runs) {
 static void kernel_test_registry_init(void) {
     if (g_test_registry_initialized) return;
     g_test_registry_initialized = true;
+    kernel_test_add("display-lease", "validated GOP resource and exclusive framebuffer ownership handoff",
+        KERNEL_TEST_ACCEPTANCE, display_lease_test_run, display_lease_test_cleanup_run);
+    kernel_test_add_live("display-service", "Ring3 GOP service direct mapping, fault recovery and restart",
+        KERNEL_TEST_ACCEPTANCE, display_service_test_run, display_service_test_cleanup_run);
+    kernel_test_add_live("display-surface", "bounded shared RGB332 surface from Ring3 app through display service",
+        KERNEL_TEST_ACCEPTANCE, display_surface_test_run, display_surface_test_cleanup_run);
     kernel_test_add("capability", "capability handles, rights and revoke", KERNEL_TEST_LIFETIME, capability_table_test_run, 0);
     kernel_test_add("capability-lifetime", "capability lifetime and safe storage reuse", KERNEL_TEST_LIFETIME, capability_lifetime_test_run, 0);
     kernel_test_add("constructor", "creation rollback and storage lifetime", KERNEL_TEST_LIFETIME, constructor_test_run, 0);
