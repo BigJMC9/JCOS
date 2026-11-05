@@ -64,37 +64,34 @@ static bool wait_app_blocked(void) {
     return true;
 }
 
-static bool wait_app_dead(void) {
-    u64 timeout = timeout_ticks();
-    if (!timeout || !g_app.thread_created) return false;
-    u64 started = timer_ticks();
+static bool app_thread_terminal(void) {
+    if (!g_app.thread_created) return false;
     Thread *thread = &g_app.thread;
-
-    while (thread->state != THREAD_STATE_DEAD) {
-        if ((u64)(timer_ticks() - started) >= timeout) return false;
-        if (thread->state == THREAD_STATE_READY) {
-            /* SEND may wake a blocking RECEIVE while its reservation remains
-             * live. Resume the continuation instead of treating that as stale. */
-            if (!thread->on_run_queue || !thread->interrupt_context_ready ||
-                !thread->interrupt_rsp) return false;
-        } else if (thread->state == THREAD_STATE_BLOCKED) {
-            if (thread->on_run_queue || !thread->interrupt_context_ready ||
-                !thread->interrupt_rsp || !thread_wait_active(thread)) return false;
-        } else {
-            return false;
-        }
-        if (!scheduler_yield()) return false;
-    }
-
-    return !thread->on_run_queue && !thread->interrupt_context_ready &&
-        !thread->interrupt_rsp && !thread_wait_active(thread);
+    return thread->state == THREAD_STATE_DEAD && !thread->on_run_queue &&
+        !thread->interrupt_context_ready && !thread->interrupt_rsp &&
+        !thread_wait_active(thread);
 }
 
-static bool drain_app_exit(ProcessExitInfo *out) {
-    if (!out || !g_exit_queue_created ||
-        process_exit_queue_pending_count(&g_exit_queue) != 1U) return false;
+static bool wait_app_exit(ProcessExitInfo *out) {
+    if (!out || !g_exit_queue_created || !g_app.thread_created) return false;
     k_memset(out, 0, sizeof(*out));
-    return process_exit_queue_try_receive(&g_exit_queue, out) &&
+
+    u64 timeout = timeout_ticks();
+    if (!timeout) return false;
+    u64 started = timer_ticks();
+
+    for (;;) {
+        u32 pending = process_exit_queue_pending_count(&g_exit_queue);
+        if (pending > 1U) return false;
+        if (pending == 1U && app_thread_terminal()) break;
+        if ((u64)(timer_ticks() - started) >= timeout) return false;
+        if (!scheduler_yield()) arch_pause();
+    }
+
+    if (process_exit_queue_pending_count(&g_exit_queue) != 1U ||
+        !process_exit_queue_try_receive(&g_exit_queue, out)) return false;
+
+    return app_thread_terminal() &&
         process_exit_queue_pending_count(&g_exit_queue) == 0U &&
         process_exit_queue_watch_count(&g_exit_queue) == 0U;
 }
@@ -428,9 +425,11 @@ bool graphical_session_test_fault_client(ProcessExitInfo *out) {
         JCOS_DISPLAY_CLIENT_OP_DIAG_FAULT, JCOS_DISPLAY_CLIENT_PROTOCOL_VERSION);
     message.words[1] = display_service_input_client_id(&g_client);
 
+    /* The exit queue is the authoritative terminal-event handoff. Waiting on
+     * it avoids depending on an intermediate scheduler-visible thread state. */
     if (!message.words[1] ||
         !ipc_try_send(kernel, g_client.kernel_send_handle, &message) ||
-        !wait_app_dead() || !drain_app_exit(out)) return false;
+        !wait_app_exit(out)) return false;
 
     return out->process_id == process_id && out->thread_id == thread_id;
 }

@@ -4,7 +4,7 @@
 #include "lib.h"
 #include "object_storage.h"
 
-#define DEVICE_RESOURCE_STORAGE_CAPACITY 8U
+#define DEVICE_RESOURCE_STORAGE_CAPACITY 64U
 
 static void *g_resources[DEVICE_RESOURCE_STORAGE_CAPACITY];
 static u64 g_next_id = 1ULL;
@@ -28,6 +28,13 @@ bool device_resource_valid(const DeviceResource *resource) {
             DEVICE_RESOURCE_STORAGE_CAPACITY;
     resource_irq_restore(flags);
     return valid;
+}
+
+u32 device_resource_object_count(void) {
+    u64 flags = resource_irq_save();
+    u32 count = object_storage_count(g_resources, DEVICE_RESOURCE_STORAGE_CAPACITY);
+    resource_irq_restore(flags);
+    return count;
 }
 
 bool device_resource_create(DeviceResource *resource, DeviceResourceKind kind) {

@@ -27,6 +27,7 @@ static u64 service_header(u64 op) {
 }
 
 static bool configure_pixel_masks(const FramebufferInfo *info);
+static bool wait_idle(void);
 
 static bool surface_slot_valid(u32 slot) {
     return slot < JCOS_DISPLAY_SURFACE_CAPACITY;
@@ -144,7 +145,7 @@ bool display_service_start(void) {
 
 bool display_service_surface_attach_slot(DisplaySurface *surface, u32 slot) {
     if (!surface_slot_valid(slot) || !display_surface_valid(surface) || g_surfaces[slot] ||
-        !managed_service_idle(&g_display_service) ||
+        !wait_idle() ||
         !g_display_service.program.process_created) return false;
 
     for (u32 i = 0U; i < JCOS_DISPLAY_SURFACE_CAPACITY; ++i)
@@ -362,7 +363,7 @@ bool display_service_input_client_begin(DisplayServiceInputClient *client,
         display_surface_writer_process_id(surface) ||
         g_input_clients[slot] || g_surfaces[slot] != surface ||
         !display_service_surface_slot_mapping_valid(slot) ||
-        !managed_service_idle(&g_display_service) || !g_next_input_client_id)
+        !wait_idle() || !g_next_input_client_id)
         return false;
 
     k_memset(client, 0, sizeof(*client));
@@ -493,7 +494,7 @@ static bool display_service_surface_detach_all(void) {
 bool display_service_client_grant_begin(DisplayServiceClientGrant *out) {
     if (!out) return false;
     k_memset(out, 0, sizeof(*out));
-    if (!display_service_surface_mapping_valid() || !managed_service_idle(&g_display_service))
+    if (!display_service_surface_mapping_valid() || !wait_idle())
         return false;
 
     Process *kernel = process_kernel();

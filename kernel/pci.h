@@ -4,6 +4,8 @@
 #include "types.h"
 
 #define PCI_MAX_DEVICES 512U
+#define PCI_CONFIG_SPACE_SIZE 256U
+#define PCI_STANDARD_BAR_COUNT 6U
 
 #define PCI_CLASS_MASS_STORAGE 0x01U
 
@@ -36,6 +38,7 @@ typedef struct {
     u8 index;
     bool prefetchable;
     u64 base;
+    u64 size;
 } PciBar;
 
 typedef struct {
@@ -65,6 +68,9 @@ const PciDevice *pci_find_class(
     u8 subclass,
     u32 ordinal
 );
+
+bool pci_address_valid(PciAddress address);
+bool pci_device_is_enumerated(const PciDevice *device);
 
 u8 pci_config_read8(
     PciAddress address,
@@ -100,6 +106,19 @@ void pci_config_write32(
 );
 
 bool pci_read_bar(
+    const PciDevice *device,
+    u8 index,
+    PciBar *out
+);
+
+/* Decode the exact implemented size from a PCI BAR sizing readback. This is
+ * pure arithmetic and is shared by hardware probing and deterministic tests. */
+bool pci_bar_decode_size(PciBarType type, u32 low_mask, u32 high_mask, u64 *out_size);
+
+/* BAR sizing temporarily writes all ones to the BAR and therefore runs only
+ * when I/O decode, memory decode, and bus mastering are all disabled. The BAR
+ * contents are restored before return. Active devices are never probed. */
+bool pci_probe_bar(
     const PciDevice *device,
     u8 index,
     PciBar *out

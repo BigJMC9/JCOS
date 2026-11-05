@@ -19,6 +19,15 @@
 #include "interrupt_state_test.h"
 #include "lib.h"
 #include "peer_death_test.h"
+#include "pci_assignment_test.h"
+#include "pci_bar_access_test.h"
+#include "pci_bar_resource_test.h"
+#include "pci_config_test.h"
+#include "pci_dma_buffer_test.h"
+#include "pci_dma_submission_test.h"
+#include "pci_device_recovery_test.h"
+#include "pci_irq_resource_test.h"
+#include "pci_irq_router_test.h"
 #include "program_launch_test.h"
 #include "program_startup_test.h"
 #include "runtime_preemption_test.h"
@@ -96,6 +105,26 @@ static void kernel_test_registry_init(void) {
         KERNEL_TEST_ACCEPTANCE, display_service_test_run, display_service_test_cleanup_run);
     kernel_test_add_live("display-surface", "bounded shared RGB332 surface from Ring3 app through display service",
         KERNEL_TEST_ACCEPTANCE, display_surface_test_run, display_surface_test_cleanup_run);
+    kernel_test_add("pci-assignment", "exclusive PCI function ownership, quiesce and quarantine lifecycle",
+        KERNEL_TEST_ACCEPTANCE, pci_assignment_test_run, pci_assignment_test_cleanup_run);
+    kernel_test_add("pci-config", "serialized PCI config access and non-destructive BAR bounds discovery",
+        KERNEL_TEST_ACCEPTANCE, pci_config_test_run, 0);
+    kernel_test_add("pci-bar-resource", "capability-bound PCI BAR identity, bounds and parent lifetime",
+        KERNEL_TEST_ACCEPTANCE, pci_bar_resource_test_run, pci_bar_resource_test_cleanup_run);
+    kernel_test_add("pci-bar-access", "page-exact PCI MMIO mappings and mediated port-I/O authority",
+        KERNEL_TEST_ACCEPTANCE, pci_bar_access_test_run, pci_bar_access_test_cleanup_run);
+    kernel_test_add("pci-irq-resource", "capability-bound IRQ delivery, acknowledgement and storm containment",
+        KERNEL_TEST_ACCEPTANCE, pci_irq_resource_test_run, pci_irq_resource_test_cleanup_run);
+    kernel_test_add("pci-irq-router", "masked IOAPIC source leasing and PCI legacy INTx vector ownership",
+        KERNEL_TEST_ACCEPTANCE, pci_irq_router_test_run, pci_irq_router_test_cleanup_run);
+    kernel_test_add("pci-dma-buffer", "mediated DMA storage, active-access pinning and reset quarantine",
+        KERNEL_TEST_ACCEPTANCE, pci_dma_buffer_test_run, pci_dma_buffer_test_cleanup_run);
+    kernel_test_add("pci-dma-submission", "bounded DMA submission lease, register exclusion and quarantine",
+        KERNEL_TEST_ACCEPTANCE, pci_dma_submission_test_run, pci_dma_submission_test_cleanup_run);
+    kernel_test_add("pci-device-recovery", "assignment quarantine, IRQ masking and DMA recovery proof",
+        KERNEL_TEST_ACCEPTANCE, pci_device_recovery_test_run, pci_device_recovery_test_cleanup_run);
+    kernel_test_add_live("pci-driver-hostile", "hung Ring3 driver, IRQ storm and active DMA recovery",
+        KERNEL_TEST_ACCEPTANCE, pci_driver_hostile_test_run, pci_driver_hostile_test_cleanup_run);
     kernel_test_add("capability", "capability handles, rights and revoke", KERNEL_TEST_LIFETIME, capability_table_test_run, 0);
     kernel_test_add("capability-lifetime", "capability lifetime and safe storage reuse", KERNEL_TEST_LIFETIME, capability_lifetime_test_run, 0);
     kernel_test_add("constructor", "creation rollback and storage lifetime", KERNEL_TEST_LIFETIME, constructor_test_run, 0);
@@ -162,6 +191,16 @@ static void kernel_test_registry_init(void) {
      * Deep mode is deliberately uneven: deterministic model checks stay at one
      * run while lifetime, ordering, scheduling and recovery paths get repeated.
      */
+    kernel_test_set_deep_runs("pci-assignment", 4U);
+    kernel_test_set_deep_runs("pci-config", 4U);
+    kernel_test_set_deep_runs("pci-bar-resource", 4U);
+    kernel_test_set_deep_runs("pci-bar-access", 4U);
+    kernel_test_set_deep_runs("pci-irq-resource", 8U);
+    kernel_test_set_deep_runs("pci-irq-router", 4U);
+    kernel_test_set_deep_runs("pci-dma-buffer", 8U);
+    kernel_test_set_deep_runs("pci-dma-submission", 8U);
+    kernel_test_set_deep_runs("pci-device-recovery", 8U);
+    kernel_test_set_deep_runs("pci-driver-hostile", 8U);
     kernel_test_set_deep_runs("capability-lifetime", 8U);
     kernel_test_set_deep_runs("constructor", 8U);
     kernel_test_set_deep_runs("stack-reclaim", 8U);

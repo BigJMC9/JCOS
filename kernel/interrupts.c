@@ -3,6 +3,7 @@
 #include "lib.h"
 #include "terminal.h"
 #include "interrupt_controller.h"
+#include "pci_irq_router.h"
 #include "ps2.h"
 #include "thread.h"
 #include "syscall.h"
@@ -264,6 +265,12 @@ InterruptFrame *interrupt_dispatch(InterruptFrame *frame) {
     }
     if (vector == 0x21) {
         ps2_handle_irq();
+        interrupt_controller_eoi(vector);
+        return frame;
+    }
+    if (vector >= PCI_IRQ_ROUTER_VECTOR_FIRST &&
+        vector <= PCI_IRQ_ROUTER_VECTOR_LAST &&
+        pci_irq_router_handle_vector(vector)) {
         interrupt_controller_eoi(vector);
         return frame;
     }

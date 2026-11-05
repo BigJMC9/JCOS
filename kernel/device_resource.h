@@ -6,7 +6,12 @@
 typedef enum {
     DEVICE_RESOURCE_NONE = 0,
     DEVICE_RESOURCE_DISPLAY,
-    DEVICE_RESOURCE_AUDIO
+    DEVICE_RESOURCE_AUDIO,
+    DEVICE_RESOURCE_PCI_FUNCTION,
+    DEVICE_RESOURCE_PCI_MMIO_BAR,
+    DEVICE_RESOURCE_PCI_IO_BAR,
+    DEVICE_RESOURCE_PCI_IRQ,
+    DEVICE_RESOURCE_PCI_DMA_BUFFER
 } DeviceResourceKind;
 
 typedef struct {
@@ -19,5 +24,6 @@ typedef struct {
 bool device_resource_create(DeviceResource *resource, DeviceResourceKind kind);
 bool device_resource_destroy(DeviceResource *resource);
 bool device_resource_valid(const DeviceResource *resource);
+u32 device_resource_object_count(void);
 
 #endif

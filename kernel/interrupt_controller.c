@@ -1,5 +1,7 @@
 #include "interrupt_controller.h"
 #include "arch.h"
+#include "interrupts.h"
+#include "lib.h"
 
 #define PIC1_COMMAND 0x20
 #define PIC1_DATA    0x21
@@ -26,10 +28,24 @@
 
 #define KEYBOARD_VECTOR 0x21U
 #define SPURIOUS_VECTOR 0xFFU
+#define CONTROLLER_RFLAGS_IF (1ULL << 9)
+#define IOAPIC_DELIVERY_STATUS (1U << 12)
+#define IOAPIC_REMOTE_IRR      (1U << 14)
 
 static InterruptControllerInfo g_info;
 static u64 g_lapic_base;
 static const AcpiInfo *g_acpi;
+
+static u64 controller_irq_save(void) {
+    u64 flags;
+    __asm__ volatile ("pushfq; popq %0" : "=r"(flags) : : "memory");
+    interrupts_disable();
+    return flags;
+}
+
+static void controller_irq_restore(u64 flags) {
+    if (flags & CONTROLLER_RFLAGS_IF) interrupts_enable();
+}
 
 static void io_wait(void) {
     arch_out8(0x80, 0);
@@ -113,6 +129,35 @@ static void ioapic_write(u32 base, u8 reg, u32 value) {
 
 static u32 ioapic_redirection_count(u32 base) {
     return ((ioapic_read(base, 1) >> 16) & 0xFFU) + 1U;
+}
+
+static bool ioapic_find_gsi(u32 gsi, const AcpiIoApic **out_io, u32 *out_pin) {
+    if (!g_acpi || !out_io || !out_pin) return false;
+    *out_io = 0;
+    *out_pin = 0U;
+    for (u32 i = 0U; i < g_acpi->io_apic_count; ++i) {
+        const AcpiIoApic *io = &g_acpi->io_apics[i];
+        u32 count = ioapic_redirection_count(io->address);
+        if (gsi >= io->gsi_base && gsi - io->gsi_base < count) {
+            *out_io = io;
+            *out_pin = gsi - io->gsi_base;
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool route_flags_valid(u16 flags) {
+    u32 polarity = flags & 3U;
+    u32 trigger = (flags >> 2) & 3U;
+    return polarity != 2U && trigger != 2U;
+}
+
+static u32 route_low(u16 flags, u8 vector) {
+    u32 low = vector;
+    if ((flags & 3U) == 3U) low |= (1U << 13);
+    if (((flags >> 2) & 3U) == 3U) low |= (1U << 15);
+    return low;
 }
 
 static void ioapic_mask_all(const AcpiIoApic *io) {
@@ -249,4 +294,139 @@ bool interrupt_controller_enable_legacy_irq(u8 irq, u8 vector) {
     }
 
     return false;
+}
+
+bool interrupt_controller_legacy_irq_route(u8 irq, u32 *out_gsi, u16 *out_flags) {
+    if (!out_gsi || !out_flags) return false;
+    *out_gsi = 0U;
+    *out_flags = 0U;
+    u64 flags = controller_irq_save();
+    bool valid = g_info.mode == INTERRUPT_CONTROLLER_APIC && g_acpi &&
+        irq < ACPI_LEGACY_IRQ_COUNT;
+    if (valid) {
+        *out_gsi = g_acpi->legacy_irqs[irq].gsi;
+        *out_flags = g_acpi->legacy_irqs[irq].flags;
+    }
+    controller_irq_restore(flags);
+    return valid;
+}
+
+static bool lease_current_locked(const InterruptControllerGsiLease *lease, bool *out_masked) {
+    if (out_masked) *out_masked = true;
+    if (!lease || !lease->valid || g_info.mode != INTERRUPT_CONTROLLER_APIC || !g_acpi)
+        return false;
+    const AcpiIoApic *io = 0;
+    u32 pin = 0U;
+    if (!ioapic_find_gsi(lease->gsi, &io, &pin) || !io ||
+        io->address != lease->ioapic_address ||
+        (u8)(0x10U + pin * 2U) != lease->redirection_register) return false;
+    u32 low = ioapic_read(io->address, lease->redirection_register);
+    u32 high = ioapic_read(io->address, (u8)(lease->redirection_register + 1U));
+    u32 compare_mask = ~(LAPIC_LVT_MASKED | IOAPIC_DELIVERY_STATUS | IOAPIC_REMOTE_IRR);
+    if ((low & compare_mask) != (lease->routed_low & compare_mask) ||
+        high != lease->routed_high) return false;
+    if (out_masked) *out_masked = (low & LAPIC_LVT_MASKED) != 0U;
+    return true;
+}
+
+bool interrupt_controller_gsi_lease_acquire(u32 gsi, u16 route_flags, u8 vector,
+    InterruptControllerGsiLease *out) {
+    if (!out) return false;
+    k_memset(out, 0, sizeof(*out));
+    u64 flags = controller_irq_save();
+    bool acquired = false;
+    if (g_info.mode != INTERRUPT_CONTROLLER_APIC || !g_acpi ||
+        g_info.local_apic_id > 255U || vector < 0x20U || vector == SPURIOUS_VECTOR ||
+        !route_flags_valid(route_flags)) goto done;
+
+    const AcpiIoApic *io = 0;
+    u32 pin = 0U;
+    if (!ioapic_find_gsi(gsi, &io, &pin) || !io || pin > 119U) goto done;
+    u8 reg = (u8)(0x10U + pin * 2U);
+    u32 saved_low = ioapic_read(io->address, reg);
+    u32 saved_high = ioapic_read(io->address, (u8)(reg + 1U));
+
+    /* Never steal a source that is live or still has an in-flight level IRQ. */
+    if (!(saved_low & LAPIC_LVT_MASKED) ||
+        (saved_low & (IOAPIC_DELIVERY_STATUS | IOAPIC_REMOTE_IRR))) goto done;
+
+    u32 low = route_low(route_flags, vector);
+    u32 high = (g_info.local_apic_id & 0xFFU) << 24;
+    ioapic_write(io->address, reg, low | LAPIC_LVT_MASKED);
+    ioapic_write(io->address, (u8)(reg + 1U), high);
+    ioapic_write(io->address, reg, low | LAPIC_LVT_MASKED);
+
+    out->ioapic_address = io->address;
+    out->gsi = gsi;
+    out->saved_low = saved_low;
+    out->saved_high = saved_high;
+    out->routed_low = low;
+    out->routed_high = high;
+    out->redirection_register = reg;
+    out->vector = vector;
+    out->valid = true;
+    acquired = true;
+
+done:
+    controller_irq_restore(flags);
+    return acquired;
+}
+
+bool interrupt_controller_gsi_lease_mask(InterruptControllerGsiLease *lease) {
+    u64 flags = controller_irq_save();
+    bool masked = false;
+    bool current_masked = true;
+    if (lease_current_locked(lease, &current_masked)) {
+        if (!current_masked)
+            ioapic_write(lease->ioapic_address, lease->redirection_register,
+                lease->routed_low | LAPIC_LVT_MASKED);
+        masked = true;
+    }
+    controller_irq_restore(flags);
+    return masked;
+}
+
+bool interrupt_controller_gsi_lease_unmask(InterruptControllerGsiLease *lease) {
+    u64 flags = controller_irq_save();
+    bool unmasked = false;
+    bool current_masked = true;
+    if (lease_current_locked(lease, &current_masked)) {
+        if (current_masked)
+            ioapic_write(lease->ioapic_address, lease->redirection_register,
+                lease->routed_low);
+        unmasked = true;
+    }
+    controller_irq_restore(flags);
+    return unmasked;
+}
+
+bool interrupt_controller_gsi_lease_query(const InterruptControllerGsiLease *lease,
+    bool *out_masked) {
+    if (!out_masked) return false;
+    *out_masked = true;
+    u64 flags = controller_irq_save();
+    bool current_masked = true;
+    bool valid = lease_current_locked(lease, &current_masked);
+    if (valid) *out_masked = current_masked;
+    controller_irq_restore(flags);
+    return valid;
+}
+
+bool interrupt_controller_gsi_lease_release(InterruptControllerGsiLease *lease) {
+    if (!lease) return false;
+    u64 flags = controller_irq_save();
+    bool current_masked = false;
+    bool released = lease_current_locked(lease, &current_masked);
+    if (released) {
+        if (!current_masked)
+            ioapic_write(lease->ioapic_address, lease->redirection_register,
+                lease->routed_low | LAPIC_LVT_MASKED);
+        ioapic_write(lease->ioapic_address, (u8)(lease->redirection_register + 1U),
+            lease->saved_high);
+        ioapic_write(lease->ioapic_address, lease->redirection_register,
+            lease->saved_low);
+        k_memset(lease, 0, sizeof(*lease));
+    }
+    controller_irq_restore(flags);
+    return released;
 }

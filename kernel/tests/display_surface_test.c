@@ -112,6 +112,48 @@ static bool baseline_matches(const DisplaySurfaceBaseline *baseline) {
         terminal_render_enabled() == baseline->terminal_render;
 }
 
+static void recovery_stress_failure(u32 cycle, const char *phase) {
+    terminal_write("  RECOVERY STRESS FAILURE: CYCLE ");
+    terminal_write_u64((u64)cycle + 1ULL);
+    terminal_write(" / ");
+    terminal_writeln(phase ? phase : "UNKNOWN");
+    if (phase) report(phase, false);
+}
+
+static void baseline_difference(const char *name, u64 expected, u64 current) {
+    if (expected == current) return;
+    terminal_write("    BASELINE DRIFT / ");
+    terminal_write(name);
+    terminal_write(": EXPECTED ");
+    terminal_write_u64(expected);
+    terminal_write(" / CURRENT ");
+    terminal_write_u64(current);
+    terminal_putchar('\n');
+}
+
+static void report_baseline_drift(const DisplaySurfaceBaseline *expected) {
+    DisplaySurfaceBaseline current;
+    k_memset(&current, 0, sizeof(current));
+    if (!expected || !capture_baseline(&current)) {
+        terminal_writeln("    BASELINE DRIFT / CURRENT SNAPSHOT UNAVAILABLE");
+        return;
+    }
+
+    baseline_difference("FREE PAGES", expected->free_pages, current.free_pages);
+    baseline_difference("PROCESSES", expected->processes, current.processes);
+    baseline_difference("ADDRESS SPACES", expected->spaces, current.spaces);
+    baseline_difference("THREADS", expected->threads, current.threads);
+    baseline_difference("ENDPOINTS", expected->endpoints, current.endpoints);
+    baseline_difference("CAPABILITY TABLES", expected->tables, current.tables);
+    baseline_difference("EXIT QUEUES", expected->exit_queues, current.exit_queues);
+    baseline_difference("KERNEL CAPS", expected->kernel_caps, current.kernel_caps);
+    baseline_difference("KERNEL THREADS", expected->kernel_threads, current.kernel_threads);
+    baseline_difference("SCHEDULER THREADS", expected->scheduler_threads,
+        current.scheduler_threads);
+    baseline_difference("TERMINAL RENDER", expected->terminal_render ? 1ULL : 0ULL,
+        current.terminal_render ? 1ULL : 0ULL);
+}
+
 static bool close_exit_queue(void) {
     if (!g_exit_queue_created) return true;
     if (process_exit_queue_pending_count(&g_exit_queue)) {
@@ -385,14 +427,26 @@ static bool wait_input_app_blocked(u32 index) {
     return true;
 }
 
-static bool wait_input_app_dead(u32 index) {
+static bool input_app_terminal(u32 index) {
     if (index >= DISPLAY_INPUT_CLIENT_COUNT) return false;
+    Thread *thread = &g_input_apps[index].thread;
+    return thread->state == THREAD_STATE_DEAD && !thread->on_run_queue &&
+        !thread->interrupt_context_ready && !thread->interrupt_rsp &&
+        !thread_wait_active(thread);
+}
+
+static bool wait_input_app_dead(u32 index) {
+    if (index >= DISPLAY_INPUT_CLIENT_COUNT || !g_input_exit_queue_created[index]) return false;
     u64 timeout = timeout_ticks();
     if (!timeout) return false;
     u64 started = timer_ticks();
     Thread *thread = &g_input_apps[index].thread;
+    ProcessExitQueue *queue = &g_input_exit_queues[index];
 
-    while (thread->state != THREAD_STATE_DEAD) {
+    for (;;) {
+        u32 pending = process_exit_queue_pending_count(queue);
+        if (pending > 1U) return false;
+        if (pending == 1U && input_app_terminal(index)) break;
         if ((u64)(timer_ticks() - started) >= timeout) return false;
         if (thread->state == THREAD_STATE_READY) {
             /* A blocking IPC RECEIVE is legitimately READY while its wait
@@ -404,12 +458,15 @@ static bool wait_input_app_dead(u32 index) {
         } else if (thread->state == THREAD_STATE_BLOCKED) {
             if (thread->on_run_queue || !thread->interrupt_context_ready ||
                 !thread->interrupt_rsp || !thread_wait_active(thread)) return false;
-        } else return false;
+        } else if (thread->state != THREAD_STATE_DEAD) {
+            return false;
+        }
         if (!scheduler_yield()) return false;
     }
 
-    return !thread->on_run_queue && !thread->interrupt_context_ready &&
-        !thread->interrupt_rsp && !thread_wait_active(thread);
+    return input_app_terminal(index) &&
+        process_exit_queue_pending_count(queue) == 1U &&
+        process_exit_queue_watch_count(queue) == 0U;
 }
 
 static bool drain_input_exit(u32 index, ProcessExitInfo *out) {
@@ -451,17 +508,35 @@ static bool input_writer_mapping_exact(u32 index, const DisplaySurface *surface)
         (flags & VM_WRITE) && !(flags & VM_EXEC) && !(flags & VM_UNCACHED);
 }
 
+static bool input_client_launch_failure(u32 index, const char *phase) {
+    terminal_write("  INPUT CLIENT ");
+    terminal_write_u64(index);
+    terminal_write(" / ");
+    terminal_write(phase ? phase : "UNKNOWN LAUNCH PHASE");
+    terminal_writeln(": FAILED");
+    return false;
+}
+
 static bool launch_input_client(u32 index, DisplaySurface *surface, u32 slot) {
-    if (index >= DISPLAY_INPUT_CLIENT_COUNT || !surface || index != slot) return false;
+    if (index >= DISPLAY_INPUT_CLIENT_COUNT || !surface || index != slot)
+        return input_client_launch_failure(index, "ARGUMENT VALIDATION");
+
     VfsNode *file = vfs_resolve(vfs_root(), JCOS_DISPLAY_SURFACE_APP_PATH);
-    if (!file || file->type != VFS_FILE || !file->data || !file->size) return false;
-    if (!display_service_input_client_begin(&g_input_clients[index], surface, slot) ||
-        !display_service_input_client_id(&g_input_clients[index])) return false;
-    if (!process_exit_queue_create(&g_input_exit_queues[index])) return false;
+    if (!file || file->type != VFS_FILE || !file->data || !file->size)
+        return input_client_launch_failure(index, "SURFACE APP LOOKUP");
+
+    if (!display_service_input_client_begin(&g_input_clients[index], surface, slot))
+        return input_client_launch_failure(index, "INPUT ENDPOINT AUTHORITY BEGIN");
+    if (!display_service_input_client_id(&g_input_clients[index]))
+        return input_client_launch_failure(index, "INPUT CLIENT ID");
+
+    if (!process_exit_queue_create(&g_input_exit_queues[index]))
+        return input_client_launch_failure(index, "EXIT QUEUE CREATE");
     g_input_exit_queue_created[index] = true;
 
     ProgramBorrowedMappingSpec mapping;
-    if (!display_surface_writer_mapping(surface, &mapping)) return false;
+    if (!display_surface_writer_mapping(surface, &mapping))
+        return input_client_launch_failure(index, "WRITER MAPPING SPEC");
 
     ProgramLaunchSpec spec;
     k_memset(&spec, 0, sizeof(spec));
@@ -476,14 +551,22 @@ static bool launch_input_client(u32 index, DisplaySurface *surface, u32 slot) {
     spec.borrowed_mapping = mapping;
 
     ProgramInstance *app = &g_input_apps[index];
-    if (!program_launch(app, &spec) || !input_child_authority_exact(index) ||
-        !input_writer_mapping_exact(index, surface) ||
-        !display_surface_writer_claim(surface, &app->process) ||
-        !display_service_input_client_bind(&g_input_clients[index], &app->process) ||
-        display_service_input_client_process_id(&g_input_clients[index]) != app->process.id)
-        return false;
+    if (!program_launch(app, &spec))
+        return input_client_launch_failure(index, "PROGRAM LAUNCH");
+    if (!input_child_authority_exact(index))
+        return input_client_launch_failure(index, "RECEIVE-ONLY CAPABILITY ATTENUATION");
+    if (!input_writer_mapping_exact(index, surface))
+        return input_client_launch_failure(index, "WRITER MAPPING EXACTNESS");
+    if (!display_surface_writer_claim(surface, &app->process))
+        return input_client_launch_failure(index, "SURFACE WRITER CLAIM");
+    if (!display_service_input_client_bind(&g_input_clients[index], &app->process))
+        return input_client_launch_failure(index, "INPUT CLIENT BIND");
+    if (display_service_input_client_process_id(&g_input_clients[index]) != app->process.id)
+        return input_client_launch_failure(index, "INPUT CLIENT PROCESS ID");
 
-    return wait_input_app_blocked(index);
+    if (!wait_input_app_blocked(index))
+        return input_client_launch_failure(index, "INITIAL RECEIVE WAIT");
+    return true;
 }
 
 static bool finish_input_app(u32 index, DisplaySurface *surface) {
@@ -711,14 +794,29 @@ void display_surface_test_run(void) {
     /* R8C.3: each graphical client receives a dedicated RECEIVE-only input
      * endpoint. Ring3 compositor focus chooses the destination; the kernel
      * transports a bounded key event only to that focused endpoint. */
-    bool input_clients = launch_input_client(0U, &g_compositor_surfaces[0], 0U) &&
-        launch_input_client(1U, &g_compositor_surfaces[1], 1U) &&
-        display_service_input_client_count() == 2U &&
-        display_service_focus_slot() == JCOS_DISPLAY_SURFACE_FOCUS_NONE &&
-        input_marker_absent(&g_compositor_surfaces[0]) &&
+    bool first_input_client = launch_input_client(0U, &g_compositor_surfaces[0], 0U);
+    report("INPUT CLIENT 0 RECEIVE-ONLY CAPABILITY", first_input_client);
+    if (!first_input_client) goto fail;
+
+    bool second_input_client = launch_input_client(1U, &g_compositor_surfaces[1], 1U);
+    report("INPUT CLIENT 1 RECEIVE-ONLY CAPABILITY", second_input_client);
+    if (!second_input_client) goto fail;
+
+    bool input_client_count = display_service_input_client_count() == 2U;
+    report("TWO INPUT CLIENTS REGISTERED", input_client_count);
+    if (!input_client_count) goto fail;
+
+    bool input_focus_clear =
+        display_service_focus_slot() == JCOS_DISPLAY_SURFACE_FOCUS_NONE;
+    report("INPUT FOCUS INITIALLY CLEAR", input_focus_clear);
+    if (!input_focus_clear) goto fail;
+
+    bool input_markers_clear = input_marker_absent(&g_compositor_surfaces[0]) &&
         input_marker_absent(&g_compositor_surfaces[1]);
-    report("PER-CLIENT RECEIVE-ONLY INPUT CAPABILITIES", input_clients);
-    if (!input_clients) goto fail;
+    report("INPUT SURFACE MARKERS INITIALLY CLEAR", input_markers_clear);
+    if (!input_markers_clear) goto fail;
+
+    report("PER-CLIENT RECEIVE-ONLY INPUT CAPABILITIES", true);
 
     KeyEvent first_event = display_input_key('A', true, false, false);
     KeyEvent fallback_event;
@@ -737,13 +835,26 @@ void display_surface_test_run(void) {
 
     u8 first_flags = (u8)(JCOS_DISPLAY_INPUT_FLAG_PRESSED | JCOS_DISPLAY_INPUT_FLAG_SHIFT);
     k_memset(&fallback_event, 0xFF, sizeof(fallback_event));
-    bool first_routed = input_route_event(&first_event, &fallback_event) == INPUT_ROUTE_GRAPHICS &&
-        fallback_event.key == KEY_NONE &&
-        wait_input_app_dead(0U) &&
-        input_marker_matches(&g_compositor_surfaces[0], 'A', first_flags) &&
-        input_app_blocked(1U) && input_marker_absent(&g_compositor_surfaces[1]);
-    report("HARDWARE ROUTER SENDS ONLY TO FOCUSED CLIENT", first_routed);
-    if (!first_routed) goto fail;
+    InputRouteResult first_route = input_route_event(&first_event, &fallback_event);
+    bool first_route_accepted = first_route == INPUT_ROUTE_GRAPHICS &&
+        fallback_event.key == KEY_NONE;
+    report("FOCUSED CLIENT ROUTE ACCEPTED", first_route_accepted);
+    if (!first_route_accepted) goto fail;
+
+    bool first_terminal = wait_input_app_dead(0U);
+    report("FOCUSED CLIENT EXIT HANDOFF", first_terminal);
+    if (!first_terminal) goto fail;
+
+    bool first_marker = input_marker_matches(&g_compositor_surfaces[0], 'A', first_flags);
+    report("FOCUSED CLIENT SURFACE EVENT RECORDED", first_marker);
+    if (!first_marker) goto fail;
+
+    bool second_isolated = input_app_blocked(1U) &&
+        input_marker_absent(&g_compositor_surfaces[1]);
+    report("UNFOCUSED CLIENT REMAINS BLOCKED", second_isolated);
+    if (!second_isolated) goto fail;
+
+    report("HARDWARE ROUTER SENDS ONLY TO FOCUSED CLIENT", true);
 
     bool second_focus = display_service_focus_surface(1U) &&
         display_service_focus_slot() == 1U;
@@ -849,13 +960,22 @@ void display_surface_test_run(void) {
 
     ProcessExitInfo client_fault;
     k_memset(&client_fault, 0, sizeof(client_fault));
-    bool client_fault_contained = graphical_session_test_fault_client(&client_fault) &&
-        client_fault.reason == PROCESS_EXIT_FAULT && client_fault.vector == 6ULL &&
-        client_fault.process_id != 0ULL && client_fault.thread_id != 0ULL &&
-        display_service_running() && compositor_service_running() &&
+    bool client_fault_handoff = graphical_session_test_fault_client(&client_fault);
+    report("RING3 GRAPHICAL CLIENT #UD EXIT HANDOFF", client_fault_handoff);
+    if (!client_fault_handoff) goto fail;
+
+    bool client_fault_record = client_fault.reason == PROCESS_EXIT_FAULT &&
+        client_fault.vector == 6ULL && client_fault.process_id != 0ULL &&
+        client_fault.thread_id != 0ULL;
+    report("RING3 GRAPHICAL CLIENT #UD FAULT RECORD", client_fault_record);
+    if (!client_fault_record) goto fail;
+
+    bool client_fault_survivors = display_service_running() && compositor_service_running() &&
         display_direct_state() == DISPLAY_LEASE_USER;
-    report("RING3 GRAPHICAL CLIENT #UD CONTAINED", client_fault_contained);
-    if (!client_fault_contained) goto fail;
+    report("RING3 GRAPHICAL CLIENT #UD SURVIVORS", client_fault_survivors);
+    if (!client_fault_survivors) goto fail;
+
+    report("RING3 GRAPHICAL CLIENT #UD CONTAINED", true);
 
     bool client_recovered = graphical_session_cleanup() &&
         !graphical_session_active() &&
@@ -1002,6 +1122,7 @@ void display_surface_test_run(void) {
         if (!graphical_session_start() || !graphical_session_active() ||
             !display_service_running() || !compositor_service_running() ||
             display_service_focus_slot() != 0U) {
+            recovery_stress_failure(cycle, "SESSION START");
             recovery_stress = false;
             break;
         }
@@ -1013,6 +1134,7 @@ void display_surface_test_run(void) {
         if (!graphical_session_handle_event(&stress_event) ||
             !graphical_session_last_event(&stress_observed) ||
             !same_key_event(&stress_event, &stress_observed)) {
+            recovery_stress_failure(cycle, "INPUT ROUND TRIP");
             recovery_stress = false;
             break;
         }
@@ -1024,6 +1146,7 @@ void display_surface_test_run(void) {
                 stress_fault.reason != PROCESS_EXIT_FAULT || stress_fault.vector != 6ULL ||
                 !display_service_running() || !compositor_service_running() ||
                 display_direct_state() != DISPLAY_LEASE_USER) {
+                recovery_stress_failure(cycle, "CLIENT FAULT CONTAINMENT");
                 recovery_stress = false;
                 break;
             }
@@ -1034,6 +1157,7 @@ void display_surface_test_run(void) {
                 display_service_running() || terminal_render_enabled() ||
                 display_direct_state() != DISPLAY_LEASE_USER ||
                 display_direct_owner_process_id() != stress_fault.process_id) {
+                recovery_stress_failure(cycle, "DISPLAY FAULT CONTAINMENT");
                 recovery_stress = false;
                 break;
             }
@@ -1048,6 +1172,7 @@ void display_surface_test_run(void) {
             k_memset(&fallback, 0, sizeof(fallback));
             if (input_route_event(&fallback_event, &fallback) != INPUT_ROUTE_FALLBACK ||
                 !same_key_event(&fallback_event, &fallback)) {
+                recovery_stress_failure(cycle, "DISPLAY-FAULT INPUT FALLBACK");
                 recovery_stress = false;
                 break;
             }
@@ -1062,12 +1187,17 @@ void display_surface_test_run(void) {
             display_service_surface_count() != 0U ||
             display_direct_state() != DISPLAY_LEASE_KERNEL ||
             display_direct_owner_process_id() != 0ULL || !baseline_matches(&baseline)) {
+            recovery_stress_failure(cycle, "CLEANUP / RESOURCE BASELINE");
+            if (!baseline_matches(&baseline)) report_baseline_drift(&baseline);
             recovery_stress = false;
             break;
         }
     }
-    recovery_stress = recovery_stress &&
-        graphical_session_run_count() == stress_runs_before + R8D_RECOVERY_STRESS_CYCLES;
+    if (recovery_stress &&
+        graphical_session_run_count() != stress_runs_before + R8D_RECOVERY_STRESS_CYCLES) {
+        recovery_stress_failure(R8D_RECOVERY_STRESS_CYCLES - 1U, "SESSION RUN COUNT");
+        recovery_stress = false;
+    }
     report("ALTERNATING CLIENT / DISPLAY RECOVERY STRESS", recovery_stress);
     if (!recovery_stress) goto fail;
 
