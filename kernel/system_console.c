@@ -1,5 +1,6 @@
 #include "system_console.h"
 
+#include "arch.h"
 #include "console_portal.h"
 #include "boot_archive_portal.h"
 #include "lib.h"
@@ -812,20 +813,19 @@ bool system_console_app_session_wait_end(u64 session_id) {
             !managed_service_running(&g_console_service)) return false;
 
         Thread *thread = &g_console_service.program.thread;
-        bool schedulable = false;
-        if (thread->state == THREAD_STATE_READY) {
-            schedulable = thread->on_run_queue && thread->interrupt_context_ready &&
-                thread->interrupt_rsp && !thread_wait_active(thread);
-        } else if (thread->state == THREAD_STATE_BLOCKED) {
-            /* During an application session the console may legitimately block
-             * either waiting for the next application message or back-pressured
-             * while sending a byte to the privileged portal. Those are progress
-             * states, not service failure; keep scheduling until END returns the
-             * service to its ordinary command receive loop or the deadline wins. */
-            schedulable = !thread->on_run_queue && thread->interrupt_context_ready &&
-                thread->interrupt_rsp && thread_wait_active(thread);
-        }
-        if (!schedulable || !scheduler_yield()) return false;
+        u64 flags;
+        __asm__ volatile ("pushfq; popq %0" : "=r"(flags) : : "memory");
+        arch_cli();
+        ThreadState state = thread->state;
+        bool ready = state == THREAD_STATE_READY && thread->on_run_queue &&
+            thread->interrupt_context_ready && thread->interrupt_rsp;
+        bool blocked = state == THREAD_STATE_BLOCKED && !thread->on_run_queue &&
+            thread->interrupt_context_ready && thread->interrupt_rsp &&
+            thread_wait_active(thread);
+        if (flags & (1ULL << 9)) arch_sti();
+
+        /* A READY IPC continuation can retain its wait until it resumes. */
+        if ((!ready && !blocked) || !scheduler_yield()) return false;
     }
 }
 

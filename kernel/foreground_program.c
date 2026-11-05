@@ -23,6 +23,18 @@ static bool g_last_exit_valid;
 static u64 g_run_count;
 
 #define FOREGROUND_MEDIA_BASE 0x0000010000000000ULL
+#define FOREGROUND_RFLAGS_IF (1ULL << 9)
+
+static u64 foreground_irq_save(void) {
+    u64 flags;
+    __asm__ volatile ("pushfq; popq %0" : "=r"(flags) : : "memory");
+    arch_cli();
+    return flags;
+}
+
+static void foreground_irq_restore(u64 flags) {
+    if (flags & FOREGROUND_RFLAGS_IF) arch_sti();
+}
 
 typedef struct {
     CapabilityHandle display_authority;
@@ -132,9 +144,23 @@ static bool foreground_wait(ProgramInstance *program, u64 session_id, bool *canc
 
     for (;;) {
         Thread *thread = &program->thread;
-        if (thread->state == THREAD_STATE_DEAD) {
-            return !thread->on_run_queue && !thread->interrupt_context_ready &&
-                !thread->interrupt_rsp && !thread_wait_active(thread);
+        u64 flags = foreground_irq_save();
+        ThreadState state = thread->state;
+        bool waiting = thread_wait_active(thread);
+        bool dead = state == THREAD_STATE_DEAD && !thread->on_run_queue &&
+            !thread->interrupt_context_ready && !thread->interrupt_rsp && !waiting;
+        bool ready = state == THREAD_STATE_READY && thread->on_run_queue &&
+            thread->interrupt_context_ready && thread->interrupt_rsp;
+        bool blocked = state == THREAD_STATE_BLOCKED && !thread->on_run_queue &&
+            thread->interrupt_context_ready && thread->interrupt_rsp && waiting;
+        foreground_irq_restore(flags);
+
+        if (state == THREAD_STATE_DEAD) return dead;
+        if (!ready && !blocked) {
+            serial_write("R7 LAUNCH WAIT FAILED: INVALID APPLICATION THREAD STATE ");
+            serial_write_u64((u64)state);
+            serial_write(".\n");
+            return false;
         }
 
         KeyEvent event;
@@ -147,18 +173,10 @@ static bool foreground_wait(ProgramInstance *program, u64 session_id, bool *canc
             if (!system_console_app_input_event(session_id, &event)) return false;
         }
 
-        if (thread->state == THREAD_STATE_READY) {
-            if (!thread->on_run_queue || !thread->interrupt_context_ready || !thread->interrupt_rsp ||
-                thread_wait_active(thread) || !scheduler_yield()) return false;
-        } else if (thread->state == THREAD_STATE_BLOCKED) {
-            if (thread->on_run_queue || !thread->interrupt_context_ready || !thread->interrupt_rsp ||
-                !thread_wait_active(thread)) return false;
-            /* Other service/portal threads may have become runnable after the
-             * application's blocking IPC. Yield when possible; otherwise wait
-             * for device input or the next interrupt/preemption opportunity. */
-            if (!scheduler_yield()) arch_pause();
-        } else {
-            return false;
+        /* A woken IPC continuation may be READY with its reservation still active. */
+        if (!scheduler_yield()) {
+            if (ready) return false;
+            arch_pause();
         }
     }
 }
@@ -228,22 +246,34 @@ bool foreground_program_run_pending(void) {
     bool cancelled = false;
     bool dead = foreground_wait(&g_foreground_program, session_id, &cancelled);
     if (!dead) {
-        if (cancelled) serial_write("R7 LAUNCH: foreground application cancelled by Escape.\n");
+        if (cancelled)
+            serial_write("R7 LAUNCH: foreground application cancelled by Escape.\n");
+        else
+            serial_write("R7 LAUNCH FAILED: foreground application wait.\n");
         goto fail;
     }
 
-    if (!system_console_app_session_wait_end(session_id)) goto fail;
+    if (!system_console_app_session_wait_end(session_id)) {
+        serial_write("R7 LAUNCH FAILED: console session completion.\n");
+        goto fail;
+    }
 
     ProcessExitInfo info;
     k_memset(&info, 0, sizeof(info));
     if (!process_exit_queue_try_receive(&g_foreground_exit_queue, &info) ||
         info.reason != PROCESS_EXIT_NORMAL || info.process_id != pid ||
         process_exit_queue_pending_count(&g_foreground_exit_queue) ||
-        process_exit_queue_watch_count(&g_foreground_exit_queue)) goto fail;
+        process_exit_queue_watch_count(&g_foreground_exit_queue)) {
+        serial_write("R7 LAUNCH FAILED: process exit record.\n");
+        goto fail;
+    }
     g_last_exit = info;
     g_last_exit_valid = true;
 
-    if (!program_reap(&g_foreground_program) || !queue_release()) goto fail;
+    if (!program_reap(&g_foreground_program) || !queue_release()) {
+        serial_write("R7 LAUNCH FAILED: process reap or exit queue release.\n");
+        goto fail;
+    }
     audio_session_reset();
     display_session_reset();
     terminal_redraw();

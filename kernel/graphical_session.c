@@ -24,6 +24,11 @@
 #define GRAPHICAL_SESSION_TIMEOUT_SECONDS 2ULL
 #define GRAPHICAL_SESSION_RFLAGS_IF (1ULL << 9)
 
+/* Enable composition timing explicitly when investigating display latency. */
+#ifndef JCOS_GRAPHICAL_SESSION_COMPOSE_TIMING
+#define JCOS_GRAPHICAL_SESSION_COMPOSE_TIMING 0
+#endif
+
 static DisplaySurface g_surface;
 static DisplayServiceInputClient g_client;
 static ProgramInstance g_app;
@@ -410,16 +415,20 @@ bool graphical_session_handle_event(const KeyEvent *event) {
 
     u32 count = 0U;
     u32 sample = 0U;
+#if JCOS_GRAPHICAL_SESSION_COMPOSE_TIMING
     u64 compose_started = timer_initialized() ? timer_ticks() : 0ULL;
+#endif
     bool composed = display_service_compose(&count, &sample);
     if (!composed || count != 1U) {
         serial_write("R8 GUI INPUT COMPOSE: RESULT ");
         serial_write_u64(composed ? 1ULL : 0ULL);
         serial_write(" / SURFACE COUNT ");
         serial_write_u64((u64)count);
+#if JCOS_GRAPHICAL_SESSION_COMPOSE_TIMING
         serial_write(" / ELAPSED TICKS ");
         serial_write_u64(timer_initialized() ?
             (u64)(timer_ticks() - compose_started) : 0ULL);
+#endif
         serial_write(" / COMPOSITOR STATE ");
         serial_write_u64((u64)compositor_service_state());
         serial_write(" / DISPLAY STATE ");
