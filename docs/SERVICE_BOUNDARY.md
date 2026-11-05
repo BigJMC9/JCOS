@@ -1,424 +1,156 @@
-# JA OS privileged mechanism and userspace service boundary
+# JCOS privileged mechanisms and userspace services
 
-Status: R7 exit gate reported functional on the 2026-09-21 local working tree;
-formal verified-milestone status awaits a committed revision.
+This document describes the current authority and lifetime boundaries. Build/run instructions are in the [project README](../README.md); execution constraints are in the [runtime profile](RUNTIME_PROFILE.md). Shared headers and the implementation remain authoritative for exact protocol values.
 
-## Privileged mechanism boundary
+## Responsibility map
 
-The microkernel owns protection and mechanism: address spaces, threads and
-scheduling, capability/object lifetime, bounded IPC/waits, terminal process
-outcomes, and minimal hardware-facing mechanisms. Policy such as service names,
-client protocols, formatting, retry/replay decisions, filesystem namespace and
-ordinary launch/restart policy belongs in userspace.
+| Component | Runs in | Current responsibility |
+| --- | --- | --- |
+| Address spaces, scheduler, capabilities, IPC and process outcomes | Kernel | Protection, bounded communication and object lifetime |
+| Console policy service | Ring 3 | Normal shell/editor, formatting, archive namespace, executable selection and ordinary-service policy |
+| Console and boot-archive portals | Kernel | Bounded terminal operations and raw reads from the immutable archive |
+| Program and ordinary-service brokers | Kernel | Validate byte extents and perform generic launch, bounded stop and reap transactions |
+| Display service | Ring 3 | Render into the validated GOP framebuffer while holding the exclusive direct lease |
+| Compositor service | Ring 3 | Surface placement, z-order, focus and composition requests |
+| Graphical client | Ring 3 | Write its own bounded surface and receive focused input |
+| PCI resource/recovery framework | Kernel | Enforce assignment, BAR/IRQ/DMA authority, access lifetimes and quarantine |
+| Constrained PCI driver probe | Ring 3 | Exercise a narrow mediated request protocol through a privileged test backend |
+| AHCI, xHCI, audio, hardware input and emergency monitor | Kernel | Existing device/diagnostic paths; these have not become general userspace services |
 
-R7a.1 introduces a console-output example without a new console syscall or a
-console-specific capability type. `ConsolePortal` is built from the existing
-endpoint, capability and kernel-thread mechanisms. The console service receives
-only SEND authority to that portal. The privileged consumer accepts one bounded
-byte-write message and emits it through the existing terminal/serial path.
-Formatting and client-facing behavior remain outside the portal.
-
-The kernel emergency monitor, terminal implementation, VFS pathname lookup and
-bootstrap service orchestration remain transitional privileged policy after
-this patch. The normal Ring3 shell is the boot-default command surface; the
-monitor remains a recovery/development surface, not a permanent application API.
-
-## Versioned service protocol boundary
-
-New R7 services use the bounded four-word IPC convention in
-`include/service_protocol.h`.
-
-Request:
-
-- word 0: service operation
-- word 1: protocol version
-- words 2-3: operation payload
-
-Reply:
-
-- word 0: service-specific result or common protocol error
-- word 1: service incarnation
-- word 2: protocol version supported by the replying service
-- word 3: optional result/error detail
-
-Version 1 requires an exact version match. A mismatch returns
-`JCOS_SERVICE_REPLY_INCOMPATIBLE_VERSION`; an unknown operation returns
-`JCOS_SERVICE_REPLY_UNKNOWN_OPERATION`. Neither condition is a service crash.
-Future compatibility rules require a new documented protocol version rather
-than silently reinterpreting words.
+Bootstrap executable lookup, managed-service orchestration, console/input routing and graphical-session coordination also remain privileged. A generic broker accepting an archive extent does not imply that every orchestration decision has moved out of the kernel.
 
 ## Authority and lifetime
 
-Capability handles are local authority, not global object names. A transferred
-capability is attenuated to the rights explicitly granted by the launcher. The
-R7 console service receives RECEIVE on its command endpoint, SEND on its reply
-endpoint and SEND-only authority to the privileged console portal.
-
-Capability generation and service incarnation remain separate identities. A
-replacement service must use a new incarnation and clients must reconnect; old
-handles are never silently retargeted.
-
-## Cancellation, retry and replay
-
-IPC peer death and cancellation continue to use the R2/R6 terminal wait
-semantics. Successful delivery does not imply durable application completion.
-The kernel and generic launcher do not replay requests after service failure.
-Any retry or idempotency rule is part of the userspace protocol and must be
-explicitly documented per service.
-
-## Emergency diagnostics
-
-Serial and minimal kernel terminal diagnostics remain independent of ordinary
-userspace services so a broken console/shell service cannot make kernel failure
-indistinguishable from display-service failure. R7 will reduce normal kernel
-console/shell policy while retaining that emergency path.
-
-## R7a.2 persistent bootstrap console
-
-R7a.2 makes the console service a required persistent bootstrap service. The
-kernel still performs bootstrap path lookup and initial service orchestration as
-a transitional policy, but ordinary post-bootstrap status output can now cross
-the versioned Ring3 console protocol before reaching the privileged byte portal.
-
-The portal is intentionally longer-lived than one console-service incarnation.
-A console process fault is contained and reaped through `ManagedService`; restart
-creates a new process, endpoint authority and service incarnation while retaining
-the same privileged portal endpoint and consumer thread. A saved client
-connection to the failed incarnation remains stale and is never retargeted.
-
-`ManagedServiceLaunchExtras` now permits bounded protocol-specific startup
-grants, arguments and shutdown request words after the fixed command/reply
-envelope. The legacy `ManagedServiceSpec` remains unchanged for R6 callers.
-This is generic launch plumbing for R7 services, not a console-specific kernel
-API.
-
-A failed ordinary console write is not replayed through the emergency sink. The
-kernel may emit a fixed serial diagnostic stating that userspace output is
-unavailable, but the ambiguous application payload is suppressed. This keeps
-the R6 retry/replay rule intact.
-
-The raw framebuffer terminal and serial path remain available for bootstrap,
-kernel faults, test diagnostics and power-transition failures. The kernel monitor remains transitional privileged policy for diagnostics.
-R7a.3 moves the first normal shell parser/line policy into Ring3; broader
-application-facing input/output endpoints remain subsequent R7 work.
-
-## R7a.3 userspace normal-shell handoff
-
-R7a.3 moves the first normal interactive shell policy into the persistent Ring3
-console service. The kernel monitor remains available for development and
-emergency diagnostics, but it no longer needs to parse commands while a normal
-userspace session is active.
-
-The transitional handoff is explicit: the kernel monitor command `usershell`
-activates the Ring3 shell and then becomes only an input broker. It polls the
-existing PS/2/serial mechanism and forwards bounded, versioned key events to the
-console service. Character echo, line buffering, command parsing, command
-results and the normal prompt are all userspace policy. The initial userspace
-command set is deliberately small (`help`, `echo`, `about`, `status`,
-`monitor`) while filesystem and power policy remain migration targets.
-
-The public key-event vocabulary in `console_service_protocol.h` is versioned
-separately from the kernel-internal `KeyCode` enum. Modifiers and the printable
-byte are carried as bounded scalar payload; Ring3 receives no PS/2 ports,
-controller state, serial registers, framebuffer pointer or terminal internals.
-
-Every forwarded event is a bounded request/reply transaction. A console-service
-failure does not cause the triggering input event to be replayed after restart.
-The broker may restart the service, reactivate a fresh shell session and accept
-the next event. This preserves the R6 no-implicit-replay rule for input as well
-as output.
-
-`monitor` returns an explicit userspace action in the event reply. Escape is
-also reserved as a kernel-owned emergency return path, so a broken userspace
-parser cannot trap the operator outside the kernel monitor.
-
-## R7a.4 boot-default userspace shell
-
-R7a.4 changes only the boot policy, not the public protocol or privilege
-boundary. After the persistent console service starts and the boot-status banner
-is emitted, the kernel activates the Ring3 shell before entering the kernel
-monitor. The monitor is entered only after the userspace `monitor` command, the
-kernel-owned Escape emergency return, or a userspace-shell activation/recovery
-failure.
-
-The boot wrapper records successful default-shell handoffs and total Ring3 shell
-sessions. The acceptance test can therefore prove, after returning to the
-monitor, that this boot actually passed through the userspace shell first rather
-than merely compiling a default-shell branch. Returning to the monitor does not
-stop or replace the persistent console service; `usershell` re-enters a fresh
-Ring3 shell session over the same current service incarnation.
-
-A boot-default activation failure is fail-open only with respect to operator
-diagnostics: the kernel emits a fixed serial/terminal error and enters the
-emergency monitor. No ambiguous key or output payload is replayed across that
-fallback.
-
-## R7b.1 foreground application console output
-
-R7b.1 adds the first application-facing console ABI without exposing the
-console service's private management endpoint. A separate foreground-application
-endpoint is created by `system_console` and granted RECEIVE-only to the Ring3
-console service. An application launch receives only SEND authority to that
-endpoint, attenuated through the ordinary `ProgramLaunchSpec` transaction.
-
-The public application protocol is `include/console_client_protocol.h`. It is a
-one-way, bounded stream protocol: each WRITE carries a service-session ID and up
-to 16 bytes; END closes the foreground output session and returns the console
-service to its private management/shell receive loop. Malformed, incompatible or
-stale application messages are discarded without generating management replies.
-Applications therefore cannot inject shutdown, diagnostic-fault or shell-control
-operations merely by possessing console-output authority.
-
-A foreground session is explicitly single-client policy for this milestone.
-The kernel opens a nonzero session ID before launch, the application receives
-that ID as startup data, and the console service accepts payload only while the
-matching session is active. There is no implicit replay. If an application dies
-without END, its owner must terminate/reap the client and abort the session;
-normal console-service replacement is not allowed to silently adopt an active
-client session.
-
-The temporary kernel SEND|TRANSFER capability used to attenuate a child output
-capability exists only across `program_launch()` and is revoked immediately
-after publication. On a normal console-service restart the application endpoint
-is destroyed and recreated; its endpoint identity changes while the lower-level
-privileged byte portal remains stable. Old transport authority therefore never
-silently becomes authority for the replacement service.
-
-`/bin/hello.elf` is the first independently linked Ring3 utility using the new
-client library (`user/lib/console.c`). The R7b.1 acceptance gate launches it,
-checks that its capability table contains SEND but not RECEIVE authority,
-observes its output through the userspace console policy and byte portal, reaps
-it to the exact baseline, replaces the console service, and launches a second
-copy through a fresh foreground session.
-
-R7b.2 adds the complementary foreground input channel without weakening the
-output capability boundary established here.
-
-## R7b.2 foreground application input and focus
-
-R7b.2 adds a second public application endpoint for input. The privileged
-hardware-input mechanism retains SEND-only authority to this endpoint while a
-foreground application may receive an attenuated RECEIVE-only capability at
-launch. Output and input are therefore separate one-way authorities: an
-application cannot manufacture input by writing to its output endpoint, and it
-cannot inject console-management requests through either public channel.
-
-The public event format is `include/console_input_protocol.h`. It carries a
-versioned key-event operation, the foreground session ID, a public key code and
-a packed printable-byte/modifier value. This vocabulary is shared by the normal
-Ring3 shell boundary and standalone applications but remains independent of the
-kernel-internal `KeyCode` enum.
-
-Foreground focus is explicit and single-client in this milestone. The same
-nonzero session ID that scopes application output also scopes input. The kernel
-input broker refuses events for any other session ID. The application-side
-client library consumes and discards stale-session input rather than returning
-it to a newly focused application. The input endpoint is also drained before a
-new session starts, so an ambiguous old event is never replayed as fresh input.
-
-The kernel retains one SEND capability to the application-input endpoint for
-the lifetime of the current console-service incarnation. A temporary
-RECEIVE|TRANSFER authority exists only while the generic launcher attenuates a
-child RECEIVE capability and is revoked immediately after publication. On
-console-service restart both public application endpoints are destroyed and
-recreated, while the lower privileged byte portal remains stable.
-
-`/bin/inputecho.elf` is the first independently linked application that receives
-both directions of the public console contract. It receives exactly SEND-only
-output and RECEIVE-only input authority, waits for one focused key event,
-validates the printable byte and modifiers, writes a result through the normal
-Ring3 console service and ends the foreground session. The acceptance gate runs
-that transaction on two service incarnations and requires exact object/resource
-baselines after each reap.
-
-The physical PS/2/serial poller is still privileged mechanism in R7b.2. Moving
-ordinary executable lookup/launch policy and broader focus/service orchestration
-into userspace remains subsequent R7 work; this slice establishes the authority
-and cancellation contract those policies can use.
-
-## R7c.1 userspace boot-archive namespace
-
-R7c.1 moves the first filesystem namespace/read policy across the Ring3
-boundary without introducing a pathname-aware kernel API. The privileged
-mechanism is `BootArchivePortal`: two capability-controlled endpoints plus a
-kernel worker thread over the immutable boot archive byte range supplied by the
-loader. Its protocol (`include/boot_archive_portal_abi.h`) supports only INFO
-and bounded READ-by-offset. It does not parse tar headers and has no operation
-for path lookup, directories, files, executables or application names.
-
-The persistent console service receives attenuated SEND authority to the raw
-request endpoint and RECEIVE authority from the raw reply endpoint. Together
-with its existing command/reply, byte-portal and application-output grants this
-uses six startup capabilities, within the v1 eight-capability startup envelope.
-Archive discovery is intentionally lazy: process startup installs the handles
-but performs no archive IPC until the first filesystem command. This preserves
-the ManagedService readiness contract that a newly launched service first
-becomes observable blocked on its ordinary command endpoint.
-
-`user/lib/boot_archive.c` owns the USTAR parser and namespace policy in Ring3.
-It validates header magic/checksum, octal sizes and archive bounds, canonicalizes
-names, rejects `..` path components, iterates entries and reads regular-file
-content only through bounded raw portal requests. The Ring3 shell now implements
-`ls`, `stat PATH`, `cat PATH` and `fscheck` using that library. The known
-`/etc/r7c1.txt` fixture is an acceptance artifact proving that path resolution
-and file-content policy are not delegated back to the kernel VFS.
-
-The raw archive portal is mechanism lifetime, not console-policy lifetime. A
-normal console-service restart recreates the Ring3 service incarnation while
-preserving the archive portal request endpoint, reply endpoint and kernel thread.
-Requests and replies carry the current managed-service incarnation; a stale reply
-from a dead policy incarnation is discarded rather than replayed into the
-replacement. Ambiguous reads are never converted into pathname-level retries by
-the kernel.
-
-This milestone is deliberately read-only and immutable. The raw portal exposes
-at most eight bytes per READ because the current IPC ABI has four 64-bit words;
-filesystem caching, writable storage, richer file-service concurrency and
-memory-backed bulk transfer are later work. The transitional kernel VFS still
-exists for the kernel monitor and current kernel-owned program launcher. The
-next R7 launch-policy slice should reuse the Ring3-resolved archive entry and
-move executable pathname choice out of the kernel rather than adding a kernel
-`launch(path)` interface.
-
-## R7c.2 userspace pathname selection / generic foreground launch
-
-R7c.2 moves executable naming and foreground launch choice into the Ring3 shell.
-The shell resolves `run PATH` with the same userspace USTAR namespace introduced
-in R7c.1. The privileged side never receives the pathname. Instead the policy
-service submits a versioned one-way request containing only:
-
-- the current console-service incarnation,
-- an immutable boot-archive data offset,
-- the exact byte length of the selected file.
-
-The kernel validates that raw extent against the configured immutable boot
-archive and passes a temporary `VfsNode` byte view to the existing generic ELF
-loader. This view has no namespace identity and is not inserted into kernel VFS.
-ELF validity, mapping, capability attenuation, exit publication and reclaim
-remain generic privileged mechanisms.
-
-The launch request endpoint is a policy transport and reincarnates with the
-console/shell service. A queued request is therefore never inherited across a
-service replacement. The raw BootArchivePortal and ConsolePortal remain stable
-privileged mechanisms.
-
-A foreground launch opens the existing R7b application I/O session, attenuates
-SEND-only output and RECEIVE-only input capabilities into the child, revokes the
-temporary TRANSFER authorities after publication, routes focus to the child, and
-waits for both normal process exit and application-session settlement before
-returning to the Ring3 shell. Escape is a kernel-owned emergency cancellation
-path; cancellation does not replay the launch request or input into a replacement
-service.
-
-
-## R7d.1 userspace ordinary-service naming and restart policy
-
-R7d.1 moves the first ordinary background-service naming, executable selection
-and restart decision into Ring3. The normal shell/policy service owns the
-mapping `worker -> /bin/ordinaryservice.elf`, resolves that executable through
-the R7c userspace boot-archive namespace, and submits only an immutable archive
-extent to the privileged service broker. The broker never receives the service
-name or pathname.
-
-The service-broker request protocol is `include/service_broker_protocol.h`.
-START and RESTART contain only the policy-service incarnation, immutable archive
-offset and exact byte length. STOP, STATUS and the acceptance-only diagnostic
-fault contain no executable identity. The broker endpoint is one-way SEND
-from the Ring3 policy service and RECEIVE in the kernel. It reincarnates when
-the policy service is replaced, so an unconsumed request cannot silently become
-a command from a replacement policy incarnation.
-
-The privileged `background_service` component is deliberately a bounded
-single-slot mechanism in protocol v1. It validates the requested extent against
-the immutable boot archive, creates a temporary pathname-free file view, and
-reuses `ManagedService` for capability attenuation, program publication,
-bounded stop, fault observation and reap. It does not maintain a service-name
-registry and does not choose which executable should be restarted.
-
-`include/ordinary_service_protocol.h` defines the common lifecycle profile used
-by the first ordinary service (`/bin/ordinaryservice.elf`): versioned PING,
-SHUTDOWN and an acceptance-only diagnostic fault operation. Replies carry the
-managed-service incarnation. Capability generation remains the transport
-identity; the protocol incarnation remains the service identity. Neither is
-silently retargeted after replacement.
-
-The Ring3 commands are `service start worker`, `service status worker`,
-`service fault worker`, `service restart worker`, and `service stop worker`.
-An unknown service name is rejected before any service-broker IPC occurs.
-START/RESTART pathname resolution is likewise entirely Ring3 policy. The
-kernel only observes the resulting extent and requested generic lifecycle
-operation.
-
-Control is not replayed after failure. A service-broker request is consumed at
-most once. If the ordinary service faults, its failed incarnation is retained
-until an explicit Ring3 restart/stop decision causes bounded recovery. Replacing
-the console/policy service creates a new service-broker endpoint rather than
-adopting an old mailbox. The unrelated supervisor, raw boot-archive portal and
-console byte portal remain independent.
-
-The persistent console service now receives exactly eight startup capabilities,
-the maximum in `JcosProgramStartup` v1: its managed command/reply pair plus the
-byte portal, application-output endpoint, two raw boot-archive handles,
-foreground-launch broker and ordinary-service broker. R7d.1 deliberately does
-not enlarge the startup ABI; future policy transports should use a more scalable
-service-directory/wait-set design rather than incrementally adding fixed startup
-slots.
-
-Shutdown/reboot accounting includes an active ordinary background service as an
-explicit process/address-space/thread/capability-table, two managed-service
-endpoints, one exit queue and four kernel transport/grant capabilities. Power
-quiesce first releases the background slot, then the console policy service and
-finally the legacy supervisor, and still requires the exact kernel-only object
-baseline before firmware transition.
-
-
-## R7d.1b - Ring3 shell editor parity and local-error reset
-
-The normal Ring3 shell owns its complete interactive line-editor state. The
-console portal exposes only minimal terminal mechanisms: byte emission, cursor
-left, line-up/line-down/page-up/page-down/to-bottom scrollback control, and
-one-shot accent-byte emission for selection rendering. No history, clipboard, command buffer, or
-service-name policy moves back into the kernel.
-
-The Ring3 editor now supports Up/Down history, Left/Right, Home/End, Delete,
-Backspace, Page Up/Page Down, Ctrl+Page Up/Page Down one-line scrollback,
-Shift+arrow selection, and Ctrl+Shift+C/X/V.
-Editor history/clipboard storage is static userspace BSS rather than the one-page
-initial user stack.
-
-Locally rejected `service` commands are complete shell transactions: they clear
-the submitted line and emit a fresh prompt without sending a broker request.
-This prevents a rejected name such as `service start nope` from contaminating
-the next command.
-
-
-## R7d.2 - userspace executable replacement
-
-The Ring3 policy command `service replace worker` resolves
-`/bin/ordinaryservice-v2.elf` and submits the existing generic
-`RESTART_EXTENT` broker request. The kernel receives only an immutable archive
-offset and size. It does not receive the `worker` name, either pathname, or a
-replacement-specific operation.
-
-`ordinaryservice.elf` and `ordinaryservice-v2.elf` are independently linked
-executables implementing ordinary-service protocol v1. The protocol's
-`IDENTIFY` operation distinguishes the primary and replacement artifacts for
-acceptance testing without changing their lifecycle contract. Incompatible
-versions, malformed requests, and unknown operations return explicit common
-service errors and leave the service alive.
-
-Replacement uses the existing managed-service teardown transaction. A failed
-incarnation remains retained until the Ring3 decision arrives, then its process,
-thread, endpoints, capabilities and exit publication are reaped before the new
-extent is launched. Requests are not replayed, old authority is not retargeted,
-and the replacement receives a fresh service incarnation.
-The selected image remains Ring3 policy state, so a later
-`service restart worker` launches the replacement again rather than silently
-returning to the primary executable.
-
-The `service-policy` acceptance test starts and identifies the primary ELF,
-probes version and unknown-operation handling, faults it, verifies the unrelated
-supervisor and console policy remain usable, replaces it with the distinct
-second ELF, verifies the new image identity and incarnation, and restores the
-exact resource baseline. This switches OS-service executables at runtime from
-Ring3 policy without rebuilding or rebooting the kernel.
+Capability handles identify authority within one capability table. Equal numeric handles in different processes do not imply access to the same object. Launch grants are explicitly attenuated: SEND, RECEIVE, READ, WRITE and MANAGE are separate rights where the object type supports them.
+
+Capability deletion, object close, object destruction and service replacement are different operations. Endpoint/object references held by waiters or suspended kernel continuations must remain valid until those users are detached. A woken thread can still retain references before its continuation resumes. Cleanup retains ownership records when release cannot complete, allowing a defined retry or quarantine rather than losing the resource ledger.
+
+Service incarnation identifies a particular service lifetime; it is distinct from capability slot generation and process identity. Replacing a service requires fresh authority and an explicit reconnect. A saved connection is not silently retargeted to a new process.
+
+The common program startup ABI is defined in [program_startup.h](../include/program_startup.h). Its current envelope contains at most eight capability handles and four scalar arguments. It does not grant ambient access to hardware, a filesystem namespace or another service's management channel.
+
+## IPC and protocol versions
+
+The syscall IPC transport carries at most four 64-bit words in registers. The current endpoint profile has one mailbox message, one blocked sender and one blocked receiver. A C wrapper structure does not make the transport a general userspace-pointer ABI. See [user_abi.h](../include/user_abi.h), [endpoint.h](../kernel/endpoint.h) and [ipc.c](../kernel/ipc.c).
+
+[service_protocol.h](../include/service_protocol.h) defines the common service convention:
+
+| Word | Request | Reply |
+| --- | --- | --- |
+| 0 | Operation | Service result or common error |
+| 1 | Protocol version | Service incarnation |
+| 2 | Payload | Supported protocol version |
+| 3 | Payload | Optional result/error detail |
+
+Protocols using this convention require an exact version match. Incompatible versions, malformed requests and unknown operations have explicit error results. They do not require a service crash.
+
+Some interfaces pack operation/version/count into a header word to fit their bounded payload. Console streams, raw archive reads, brokers and graphics use their own shared header definitions. Do not assume that the common table describes every message layout or that a public OS release number replaces an interface version. See [Versioning](VERSIONING.md).
+
+### Completion and replay
+
+Successful send/acceptance does not prove that the receiver consumed a request, that an operation completed or that data became durable. Cancellation, close, timeout and process death must preserve the actual commit point.
+
+No broker or service-replacement path implicitly replays an ambiguous application request. In particular:
+
+- A failed console write is not replayed through the emergency terminal sink.
+- An input event that triggered failure is not delivered again to a replacement shell.
+- A queued launch/service request is not inherited by a new policy-service incarnation.
+- A stale reply is discarded according to its transport/session/incarnation contract.
+
+A caller can make an explicit new request after reconnecting, subject to that operation's own semantics.
+
+## Console, input and normal shell
+
+The persistent Ring 3 console service is the normal boot command surface. It owns history, the command buffer, selection/clipboard state, editing, formatting and prompt policy. Hardware polling remains privileged, and key codes/modifiers cross the boundary as bounded public events rather than kernel enum layout or device-register access.
+
+The [ConsolePortal](../kernel/console_portal.c) supplies byte output, cursor-left, accent-byte output and page/line/bottom scrollback operations. It does not parse commands or manage the shell's history. Its authority is granted to the console policy service; ordinary applications use separate endpoints.
+
+| Foreground channel | Application authority | Contract |
+| --- | --- | --- |
+| Output | SEND only | [console_client_protocol.h](../include/console_client_protocol.h): WRITE carries a session ID and at most 16 bytes; END settles the output session |
+| Input | RECEIVE only | [console_input_protocol.h](../include/console_input_protocol.h): versioned key events scoped to the active session |
+
+The foreground policy is single-client. Session IDs are nonzero and explicit. Stale input is drained/discarded, and output/input capabilities cannot be used to inject console-management commands. Temporary TRANSFER authorities exist only across the launch transaction and are revoked after publication.
+
+If a foreground client dies without END, its owner must terminate/reap it and abort the session. A replacement console does not silently adopt that client. Console replacement recreates application-facing and policy-broker endpoints while retaining the lower-level byte/archive portals where their lifetime permits it.
+
+`monitor` returns to the privileged diagnostic surface. Escape is also retained as a kernel-owned emergency route. Boot activation or shell recovery failure returns to that surface with diagnostics, without replaying the failed application payload. `usershell` begins a fresh shell session over the current console incarnation.
+
+## Archive namespace and launch policy
+
+The [BootArchivePortal](../kernel/boot_archive_portal.c) exposes INFO and bounded READ-by-offset over the immutable bytes supplied by the loader. Each read returns at most eight payload bytes. The portal has no pathname, directory, executable-name or filesystem-mutation operation.
+
+[user/lib/boot_archive.c](../user/lib/boot_archive.c) parses USTAR headers, validates sizes/checksums and bounds, rejects parent-path traversal, and implements the normal shell's read-only namespace. `ls`, `stat`, `cat` and `fscheck` use this Ring 3 path.
+
+For `run PATH`, Ring 3 resolves the executable and submits its immutable archive offset and exact size through [program_broker_protocol.h](../include/program_broker_protocol.h). The kernel validates that extent and gives a temporary pathname-free byte view to the ELF loader. Validation, protected mapping, capability grants, process publication, exit and reclaim remain privileged mechanisms.
+
+Foreground launch opens an I/O session and routes input to the launched client until process exit and session settlement. Escape cancels through the privileged broker. The media extension supplies bounded executable/media extents and uses the separate legacy presentation/audio path described below.
+
+The kernel VFS remains available to bootstrap paths and the emergency monitor. The Ring 3 archive namespace is not a writable filesystem or a general storage-service implementation.
+
+## Ordinary-service policy and recovery
+
+The Ring 3 shell maps the demonstration name `worker` to an independently linked ELF and chooses start, stop, restart or replacement. It rejects unknown names locally. Its supported command form is:
+
+```text
+service start|stop|restart|replace|status|fault worker
+```
+
+`fault` is a deliberate diagnostic operation. `replace` selects the second compatible ELF; subsequent explicit restarts retain that Ring 3 selection.
+
+[service_broker_protocol.h](../include/service_broker_protocol.h) carries the policy-service incarnation and raw archive extent for START/RESTART. The privileged [background_service](../kernel/background_service.c) component is a bounded single-slot mechanism. It validates the extent and uses `ManagedService` for launch, bounded stop, exit observation and reap. It receives neither the `worker` name nor the chosen pathname.
+
+Managed-service recovery preserves terminal outcome records, detaches old transport state, reclaims owned resources when safe, and publishes a fresh incarnation. A failed ordinary service is retained until an explicit stop/restart decision. Clients reconnect with new authority; ambiguous requests are not replayed. The unrelated supervisor and raw portals have independent lifetimes.
+
+The console policy service currently uses all eight startup capability slots. The fixed startup envelope is an actual bound, not an expandable service directory. Shutdown coordinates the background service, console service and supervisor before checking the kernel-only baseline.
+
+## Display and compositor separation
+
+[display.c](../kernel/display.c) validates the GOP resource and performs an exclusive kernel-to-userspace lease transition. It suppresses kernel framebuffer rendering before the direct mapping becomes runnable and restores the terminal only after supervised teardown. Serial diagnostics remain independent of framebuffer ownership.
+
+The three graphical roles have separate authority:
+
+| Role | Direct access | Policy / requests |
+| --- | --- | --- |
+| Graphical application | Its own surface mapped RW/NX; dedicated input RECEIVE endpoint | Produce pixels and handle focused events |
+| Compositor service | Bounded command/reply authority to the display service; no GOP mapping | Placement, z-order, focus and composition order |
+| Display service | Exclusive validated GOP mapping; shared surfaces mapped RO/NX | Convert/render pixels and execute bounded presentation operations |
+
+The shared profile in [display_service_protocol.h](../include/display_service_protocol.h) has four 4 KiB slots, each 64 × 64 RGB332. The compositor protocol is defined separately in [compositor_service_protocol.h](../include/compositor_service_protocol.h). The display service supports the supplied GOP pixel-format metadata, including channel masks for PixelBitMask conversion. This does not provide native mode setting or GPU acceleration.
+
+A compositor failure can be handled without killing the graphical client or relinquishing the display service's GOP lease. The acceptance paths explicitly replace/reconnect the compositor and restore its bounded configuration. A display-service failure retains its lease for supervised cleanup; process death alone does not transfer framebuffer ownership back to the kernel.
+
+The interactive `gui` path currently runs one client. Its normal loop exits and cleans up if a component unexpectedly stops; it does not automatically perform every replacement scenario exercised by the tests. Escape remains kernel-owned and restores terminal ownership after successful cleanup.
+
+The older capability-checked `DISPLAY_INFO`/`DISPLAY_PRESENT` and `AUDIO_INFO`/`AUDIO_WRITE` syscalls remain for the bounded media path. They perform kernel-mediated access, including checked reads of user buffers. Legacy presentation is blocked while the direct display lease is held. These paths are separate from the shared-surface compositor contract and remain transitional privileged functionality.
+
+## Device authority and recovery
+
+The current PCI framework consists primarily of kernel resource APIs. A constrained Ring 3 probe uses a dedicated IPC mediator; there is no general public PCI syscall suite for arbitrary driver deployment.
+
+| Resource | Enforced boundary | Important limit |
+| --- | --- | --- |
+| Assignment | One owner process and live non-transferable MANAGE capability; subordinate resources pin the assignment | Claiming a function does not enable decode, bus mastering, BAR access or interrupts |
+| BAR | Enumerated identity, verified range, explicit rights and access pins | MMIO mappings must be page-exact; PIO remains mediated; no arbitrary physical-address ABI |
+| IRQ | Per-assignment event authority, sequence acknowledgement, masking and storm containment | Hardware routing uses firmware-programmed legacy INTx through IOAPIC; no MSI/MSI-X or general ACPI `_PRT` discovery |
+| DMA buffer/submission | Bounded owned storage, offset/length/direction checks, active-access pins and quarantine | Submission requires the Ring 3 buffer mapping removed and excludes user BAR/PIO access; it does not enable bus mastering |
+| Recovery | Stops new authority, removes CPU access, masks IRQ sources and revokes access while retaining assignment ownership and unsafe resources | Reuse requires evidence that device access has ended; clearing a mapping or killing the process is insufficient |
+
+A kernel mediator alone receives the physical DMA span. Bus-master exposure is tracked for the assignment lifetime; merely clearing the PCI command bit later does not erase that exposure. Recovery after exposure requires an adequate reset/quiescence proof before DMA buffers and assignment identity can be reused.
+
+The PCIe Function Level Reset implementation validates capability-list traversal and operates only on an already quarantined, CPU-quiesced function with decoding, bus mastering and INTx disabled. Unsupported or failed reset leaves the relevant quarantine intact. The presence of this implementation is not a qualification of any particular device's reset behavior.
+
+The automated userspace probe uses a virtual device backend: an enumerated PCI function supplies identity, while CPU-mediated buffer operations and software IRQ signalling exercise request validation, fault/hang containment and lifetime recovery. No physical bus mastering is enabled for those scenarios. Read-only discovery and optional recovery of an already-inert function have separate coverage. See [Testing](TESTING.md).
+
+There is no implemented general IOMMU protection path. The current contract therefore supports constrained/mediated drivers; arbitrary untrusted physical bus mastering is outside the supported isolation model. Device DMA, CPU mappings, IRQ delivery and process lifetime are separate obligations.
+
+## Verification and source map
+
+Tests cover launch/rollback, IPC terminal ordering, capability lifetime, service replacement, console sessions, graphics faults and PCI resource recovery. An acceptance-test implementation is not an execution record; retain the actual build, platform and logs using [Testing](TESTING.md).
+
+| Contract | Primary implementation / definitions |
+| --- | --- |
+| Launch and service lifetime | [program.c](../kernel/program.c), [managed_service.c](../kernel/managed_service.c), [process_exit_queue.c](../kernel/process_exit_queue.c) |
+| Console and policy brokers | [system_console.c](../kernel/system_console.c), [console_service.c](../user/console_service.c), [foreground_program.c](../kernel/foreground_program.c), [background_service.c](../kernel/background_service.c) |
+| Graphics | [display_service.c](../user/display_service.c), [compositor_service.c](../user/compositor_service.c), [graphical_session.c](../kernel/graphical_session.c) |
+| PCI access and recovery | [pci_assignment.h](../kernel/pci_assignment.h), [pci_bar_access.h](../kernel/pci_bar_access.h), [pci_irq_router.h](../kernel/pci_irq_router.h), [pci_dma_submission.h](../kernel/pci_dma_submission.h), [pci_device_recovery.h](../kernel/pci_device_recovery.h), [pci_flr.h](../kernel/pci_flr.h) |
