@@ -1,304 +1,184 @@
-# JCOS — Experimental x86-64 Microkernel Operating System
+# JCOS — Experimental x86-64 Operating System
 
-**JCOS (JA OS)** is a from-scratch x86-64 operating system developed by **Jacob Crosbie**. It explores a capability-oriented microkernel design with a deliberately small privileged mechanism layer and increasingly capable Ring 3 services.
+**JCOS (JA OS)** is a from-scratch operating system developed by **Jacob Crosbie**. It uses a capability-oriented microkernel architecture with protected Ring 3 programs and services. The current implementation combines that mechanism layer with explicitly bounded, transitional kernel services and drivers.
 
-The project boots through UEFI, takes ownership of the machine after `ExitBootServices()`, establishes its own memory-management and interrupt environment, launches isolated userspace programs and services, and includes native storage, USB, console, IPC, scheduling, and diagnostic infrastructure.
+JCOS boots through UEFI, leaves Boot Services, installs its own paging and interrupt environment, and starts a userspace console shell. It includes service replacement, a fixed-mode graphical session, native USB keyboard input, storage diagnostics, and a protected PCI resource and recovery framework.
 
-> **Status:** active development. R7 established the current userspace service boundary and native USB host path. R8 work is expanding the system toward a more persistent graphical/application environment.
+> **Status:** active development; the documented source baseline is the untagged commit [`fcfe85714089`](https://github.com/BigJMC9/JCOS/commit/fcfe857140891d7c25a44814e1738970d72a852a). See [Versioning](docs/VERSIONING.md) for public version references and [Documentation](docs/README.md) for the current document set.
 
-## Highlights
+## Current capabilities
 
-- x86-64 UEFI boot with a custom EFI loader
-- Position-independent ELF kernel loaded at a firmware-selected physical address
-- Custom physical and virtual memory management
-- NX, CR0.WP and kernel W^X protections
-- Ring 3 userspace execution and isolated address spaces
-- Capability-based authority model
-- Bounded IPC and versioned userspace service protocols
-- Preemptive scheduling, waits, cancellation and process/thread lifecycle handling
-- Managed userspace services with restart/recovery semantics
-- Boot-default Ring 3 console shell with an emergency kernel monitor
-- Foreground application input/output with explicit focus/session ownership
-- ELF program launching with transactional rollback and capability grants
-- ACPI discovery plus APIC/IOAPIC interrupt infrastructure
-- AHCI storage and block-device support
-- GPT partition discovery
-- Native PCI-discovered xHCI USB host controller support
-- USB core and HID Boot Protocol keyboard support
-- Framebuffer terminal plus COM1 serial diagnostics
-- Root filesystem / boot archive infrastructure
-- Extensive kernel, userspace, service-lifetime and race-sensitive test suites
-- QEMU/OVMF and real-hardware testing
+| Area | Implemented scope |
+| --- | --- |
+| Boot and protection | Custom x86-64 UEFI loader; ELF kernel loaded at a firmware-selected physical address without runtime relocations; kernel-owned paging, physical direct map, NX, CR0.WP and W^X protection |
+| Execution | Isolated address spaces, Process/Thread ownership, single-CPU preemptive scheduling, idle handling, waits, cancellation and process fault outcomes |
+| Authority and IPC | Local capability handles, explicit rights, bounded register-message IPC, tracked teardown/rollback and versioned service protocols |
+| Programs and services | Static ELF64 programs, transactional launch/rollback, versioned startup grants, bounded service shutdown, explicit reconnect and executable replacement |
+| Interactive environment | Boot-default Ring 3 shell, userspace archive namespace and executable selection, focused foreground input/output, and a separate kernel diagnostic monitor |
+| Graphics | Separate Ring 3 display and compositor services, validated GOP ownership handoff, bounded shared RGB332 surfaces and focused graphical input |
+| Devices | AHCI/block/GPT support; native polling xHCI HID Boot Protocol keyboard support; bounded PCI assignment, BAR access, IRQ, DMA-lifetime and recovery mechanisms |
+| Diagnostics | Individual tests, aggregate and repeated stress suites, resource-baseline checks, framebuffer scrollback and COM1 logging |
 
-## Architecture
+### Architecture and present boundaries
 
-JCOS is moving policy out of the kernel and into userspace.
+The kernel enforces address-space protection, scheduling, capabilities, IPC, object lifetime and hardware-resource access. Ring 3 code owns normal shell editing, command parsing, archive pathname resolution, foreground executable selection, ordinary-service naming/replacement, and compositor policy.
 
-The privileged kernel is responsible for protection and mechanism:
+Several components remain privileged: the emergency monitor, bootstrap ELF/VFS helpers, service and graphical-session orchestration, raw console/archive portals, and the AHCI, xHCI and audio drivers. The bounded PCI framework does not mean these existing drivers have moved into userspace.
 
-- address spaces and memory protection
-- threads, scheduling and waits
-- capabilities and object lifetime
-- bounded IPC
-- process outcomes and fault containment
-- minimal hardware-facing mechanisms
+The [service boundary](docs/SERVICE_BOUNDARY.md) describes authority, cancellation, restart and device-lifetime contracts. The [runtime profile](docs/RUNTIME_PROFILE.md) describes the supported execution environment.
 
-Higher-level policy is intended to live in Ring 3 services:
+### Graphics
 
-- shell and console behavior
-- service protocols
-- launch/restart policy
-- formatting
-- retry/replay decisions
-- application-facing I/O
-- future filesystem and device-service policy
+The display service owns the validated firmware GOP framebuffer while the graphical session is active. A separate compositor service chooses placement, z-order and focus and sends bounded presentation requests. Applications receive their own shared surface and input authority; they do not receive direct framebuffer ownership.
 
-Capability handles are local authority rather than global object names. Rights are explicitly granted and can be attenuated when transferred to another process.
+The current shared-surface profile has four 64 × 64 RGB332 slots. The interactive `gui` command runs one graphical client and returns on Escape. Recovery tests exercise client, compositor and display-service faults; the interactive loop tears down the session if a component unexpectedly stops. This is fixed-mode, CPU-rendered graphics, without native GPU mode setting or acceleration.
 
-Service protocols are versioned, bounded and designed so that a crashed service can be replaced without silently retargeting stale client authority.
+### PCI driver framework
 
-For more detail, see [docs/SERVICE_BOUNDARY.md](docs/SERVICE_BOUNDARY.md).
+The source includes exclusive PCI function assignment, validated BAR resources, page-bounded MMIO, mediated port I/O, per-assignment IRQ delivery/acknowledgement, legacy INTx routing through the IOAPIC, DMA buffer/submission lifetime tracking, quarantine and a PCIe Function Level Reset backend.
 
-## Boot flow
+The userspace driver demonstration is a constrained IPC-mediated probe. Its automated DMA/IRQ fault and hang cases use a virtual device path with an enumerated PCI function as identity. They do not establish arbitrary physical-device driver support, IOMMU isolation or hardware DMA/FLR qualification. Generic DMA submissions do not enable bus mastering. See [Device authority and recovery](docs/SERVICE_BOUNDARY.md#device-authority-and-recovery) for the exact boundary.
 
-1. UEFI firmware loads `EFI/BOOT/BOOTX64.EFI` from the EFI System Partition.
-2. The loader opens and validates `KERNEL.ELF`.
-3. ELF program segments are loaded into firmware-allocated memory.
-4. GOP framebuffer information and the final UEFI memory map are collected.
-5. A dedicated kernel stack and boot handoff structure are prepared.
-6. The loader calls `ExitBootServices()`.
-7. The x86-64 entry stub establishes the kernel execution environment.
-8. JCOS initializes memory protection, interrupts, platform discovery and core kernel subsystems.
-9. Userspace services and the normal Ring 3 shell are brought online.
+### Storage and USB
 
-After `ExitBootServices()`, JCOS no longer relies on UEFI Boot Services, BIOS interrupts, a host operating system or libc.
+The image contains a GPT partition table and FAT32 EFI System Partition. The loader supplies an immutable boot archive; the normal shell reads its namespace in Ring 3. AHCI block-device and filesystem diagnostics remain available in the kernel monitor.
 
-## Userspace and services
-
-JCOS includes a growing userspace environment rather than keeping ordinary policy in the kernel.
-
-Current infrastructure includes:
-
-- independently linked Ring 3 ELF programs
-- capability-scoped startup grants
-- versioned service request/reply protocols
-- managed service launch and replacement
-- service incarnation tracking
-- fault containment and reaping
-- console output portals
-- foreground application input and output
-- userspace shell policy
-- program/service brokers
-- supervisor/worker service experiments
-
-The kernel monitor remains as a development and emergency surface while the normal interactive path runs in userspace.
-
-## Storage
-
-The storage path currently includes:
-
-- PCI discovery
-- AHCI controller support
-- DMA-backed block I/O
-- block-device abstraction
-- GPT partition discovery
-- boot/root filesystem infrastructure
-
-The system image itself uses GPT and a FAT32 EFI System Partition.
-
-## USB
-
-JCOS includes a native post-UEFI USB host stack.
-
-USB Host v1 supports:
-
-- PCI-discovered xHCI controllers
-- BIOS/OS ownership handoff
-- hardware-derived slot and root-port counts
-- 32-byte and 64-byte xHCI context layouts
-- scratchpad buffers
-- USB 2.x / USB 3.x root-port discovery
-- port reset and recovery
-- xHCI command, event and transfer rings
-- device slot enable/address flow
-- endpoint-zero control transfers
-- configuration/interface/endpoint parsing
-- directly attached HID Boot Protocol keyboards
-- polling-based keyboard input
-- safe keyboard-disconnect detection
-
-The first bare-metal acceptance platform is a **Gigabyte Z390 Gaming X** system.
-
-See [docs/USB_HOST_V1.md](docs/USB_HOST_V1.md) for the exact supported/deferred scope.
-
-## Diagnostics and testing
-
-JCOS has a registry-backed diagnostic harness intended for both QEMU and bare-metal validation.
-
-From the emergency monitor:
-
-~~~text
-test list
-test NAME
-test all
-test all deep
-~~~
-
-`test all` runs the full registered suite once.
-
-`test all deep` repeats stress-sensitive scheduler, ordering, lifetime and service-recovery tests to increase the chance of exposing race and cleanup failures.
-
-The harness records:
-
-- distinct tests passed/failed
-- total iterations
-- captured failing stages
-- cleanup failures
-- retained state requiring a reboot
-- tests skipped after an unsafe baseline
-
-Long-running suites retain logical scrollback while avoiding extremely slow full-framebuffer line shifting.
-
-See [docs/TESTING.md](docs/TESTING.md).
-
-## Build requirements
-
-### Debian / Ubuntu / WSL
-
-~~~sh
-sudo apt update
-sudo apt install clang lld nasm binutils python3 qemu-system-x86 ovmf
-~~~
-
-### MSYS2 MINGW64
-
-~~~sh
-pacman -Syu
-pacman -S --needed make mingw-w64-x86_64-clang mingw-w64-x86_64-lld mingw-w64-x86_64-llvm-tools mingw-w64-x86_64-nasm mingw-w64-x86_64-python
-~~~
-
-Optional QEMU package:
-
-~~~sh
-pacman -S --needed mingw-w64-x86_64-qemu
-~~~
+The native USB profile supports one PCI-discovered xHCI controller and one directly attached HID Boot Protocol keyboard. It uses hardware-reported port/context capabilities and polling after UEFI exits. The recorded bare-metal bring-up platform includes the **Gigabyte Z390 Gaming X**; that is a limited support record, not a claim about all xHCI controllers. See [USB Host v1](docs/USB_HOST_V1.md) for limits and hardware checks.
 
 ## Build
 
-On MSYS2 MINGW64:
+[Makefile.msys2](Makefile.msys2) is the current complete build entry point. Despite its name, it can also be used with GNU make and the required tools on Linux/WSL. The repository's `Mkfile` is a legacy NMake description and is not equivalent to the current build.
 
-~~~sh
-make -f Makefile.msys2
-~~~
+### MSYS2 MINGW64
 
-Build the bootable GPT/FAT32 image:
+Install the toolchain in the **MINGW64** shell:
 
-~~~sh
+```sh
+pacman -Syu
+pacman -S --needed make tar mingw-w64-x86_64-clang mingw-w64-x86_64-lld mingw-w64-x86_64-llvm-tools mingw-w64-x86_64-nasm mingw-w64-x86_64-python
+```
+
+QEMU is optional for building and required for the emulator run targets:
+
+```sh
+pacman -S --needed mingw-w64-x86_64-qemu
+```
+
+Build and validate the complete boot image:
+
+```sh
 make -f Makefile.msys2 image
-~~~
-
-Validate the generated image:
-
-~~~sh
 make -f Makefile.msys2 validate
-~~~
+```
 
-The principal outputs are:
+### Debian / Ubuntu / WSL
 
-~~~text
-build/BOOTX64.EFI
-build/KERNEL.ELF
-build/JA-os.img
-~~~
+```sh
+sudo apt update
+sudo apt install make clang lld llvm nasm python3 tar qemu-system-x86 ovmf
+make -f Makefile.msys2 image PYTHON=python3
+make -f Makefile.msys2 validate PYTHON=python3
+```
 
-A Visual Studio Developer Command Prompt can use:
+The build uses freestanding Clang/LLVM, treats compiler warnings as errors, and checks that the kernel and userspace ELF outputs need no runtime relocations. NASM is preferred for kernel architecture assembly; the makefile selects the Clang/GAS source when NASM is unavailable. This selection does not by itself certify both paths on a given checkout.
 
-~~~cmd
-nmake /f Mkfile
-nmake /f Mkfile image
-~~~
+The principal generated artifacts are:
+
+| Artifact | Purpose |
+| --- | --- |
+| `build/BOOTX64.EFI` | UEFI loader |
+| `build/KERNEL.ELF` | Kernel |
+| `rootfs/bin/*.elf` | Independently linked userspace programs |
+| `build/ROOTFS.TAR` | Immutable boot archive |
+| `build/JA-os.img` | Raw GPT/FAT32 boot image |
+
+`make -f Makefile.msys2` also builds the complete image. Optional media encoding uses FFmpeg only when media inputs are present; it is not required for the base image.
 
 ## Run in QEMU
 
-With QEMU/OVMF installed:
+On MSYS2, the makefile supplies its default OVMF firmware paths:
 
-~~~sh
+```sh
 make -f Makefile.msys2 run
-~~~
+```
 
-The firmware initially owns the machine, then hands control to the JCOS loader and kernel. Once boot services are exited, the kernel uses its own framebuffer/serial, interrupt, memory and device infrastructure.
+On Linux/WSL, clear those MSYS2 defaults so the run script can locate a matching installed OVMF pair:
+
+```sh
+make -f Makefile.msys2 run PYTHON=python3 OVMF_CODE= OVMF_VARS=
+```
+
+Alternatively, set both `OVMF_CODE` and `OVMF_VARS` to a matching firmware pair. `run-headless` uses the same image and serial console without a graphical window. The run script starts a Q35 machine with 256 MiB RAM and sends COM1 output to the launching terminal; it copies the firmware variable store to `build/OVMF_VARS.runtime.fd` for the run.
+
+The default QEMU configuration does not exercise the physical USB keyboard path. Emulator, model and hardware checks have different coverage; see [Testing](docs/TESTING.md).
+
+## Use the system
+
+The normal boot enters the Ring 3 shell. `help` lists that shell's commands. Useful examples are:
+
+```text
+ls
+stat /bin/hello.elf
+run /bin/hello.elf
+gui
+service start worker
+service status worker
+service replace worker
+service stop worker
+monitor
+```
+
+Escape leaves the graphical session. In the normal shell, `monitor` or the kernel-owned Escape route enters the emergency/development monitor. Enter `usershell` there to return to the userspace shell.
+
+Diagnostics run in the monitor:
+
+```text
+test list
+test all
+test all deep
+```
+
+The suite reports tests, iterations, failed steps and any safety abort. Its size is discovered from the checked-out source rather than fixed in this README. See [Testing](docs/TESTING.md) for targeted commands, cleanup and evidence capture.
 
 ## Boot on real hardware
 
-The generated `build/JA-os.img` is a raw disk image and must be written to the **whole USB device**, not copied as a normal file onto an existing filesystem.
+`build/JA-os.img` is a **raw disk image**. Write it to the **whole USB device**, not a partition and not as a normal file on an existing filesystem.
 
-Example on Linux:
+**Writing the image replaces the target device's contents. Identify the USB disk by size and device information before choosing the output path.** Linux users can inspect `lsblk`; MSYS2 users can compare `cat /proc/partitions` with Windows `Get-Disk` output. Device letters can change between boots.
 
-~~~sh
-lsblk
-sudo dd if=build/JA-os.img of=/dev/sdX bs=4M status=progress conv=fsync
-sync
-~~~
+After identifying the whole device, an example command is:
 
-Example from an MSYS2 environment where the USB device is exposed as `/dev/sdX`:
-
-~~~sh
+```sh
 dd if=build/JA-os.img of=/dev/sdX bs=4M status=progress conv=fsync
-~~~
+```
 
-**Warning:** writing the image destroys the previous contents of the selected target device. Verify the target disk first.
+Replace `/dev/sdX` with the verified device; Linux normally requires `sudo`, and Windows/MSYS2 requires appropriate raw-disk access. Boot in **UEFI x86-64 mode** with Secure Boot disabled because the loader is unsigned. Record the image hash and machine configuration when reporting results.
 
-Boot the device in **UEFI x86-64 mode**. Secure Boot currently needs to be disabled because the EFI loader is unsigned.
+## Current limitations
+
+- The supported execution profile is single logical CPU and general-purpose registers only. General FP/SIMD/TLS context support and SMP are not established by this build.
+- Userspace programs use static ELF64 and the project's narrow runtime; this is not a general POSIX or Linux binary environment.
+- The ordinary background-service broker has one slot, foreground console focus is single-client, and the graphical surface/profile sizes are bounded.
+- The boot archive is immutable and read-only; a general writable userspace filesystem stack is not provided by it.
+- Physical drivers still include privileged implementations. Unrestricted userspace bus mastering and IOMMU-backed device assignment are not available.
+- The PCI IRQ backend supports firmware-programmed legacy INTx/IOAPIC routing; MSI/MSI-X and general ACPI interrupt-routing discovery are outside its current scope.
+- USB hubs, general HID, USB mass storage, multiple active controllers/devices and automatic re-enumeration are outside the current USB profile.
+- Hardware support and fault recovery are limited to the paths actually qualified. A model test or virtual-device recovery test is not a hardware acceptance result.
 
 ## Repository layout
 
-~~~text
-loader/      UEFI loader, ELF loading and firmware handoff
-kernel/      microkernel, architecture code, memory, IPC, scheduling,
-             storage, USB, console mechanisms and diagnostics
-include/     shared kernel/userspace ABIs and versioned service protocols
-user/        Ring 3 services, applications, test programs and userspace libraries
-rootfs/      files included in the boot/root filesystem
-docs/        architecture, testing and hardware-support documentation
-tools/       image/build support tooling
-~~~
-
-## Development principles
-
-JCOS is intentionally built around a few recurring rules:
-
-1. **Mechanism in the kernel, policy in userspace.**
-2. **Explicit authority.** Processes receive only the capabilities they need.
-3. **Bounded interfaces.** IPC and service protocols use fixed, inspectable contracts.
-4. **No silent replay.** A service restart does not implicitly replay ambiguous application operations.
-5. **Failure containment.** A userspace fault should terminate the responsible process rather than destabilize the kernel.
-6. **Test the real machine.** QEMU is useful, but hardware behavior is part of the acceptance gate.
-
-## Current scope and limitations
-
-JCOS is still an experimental operating system and is not intended for production use.
-
-Notable current limitations include:
-
-- x86-64 UEFI only
-- unsigned EFI loader / no Secure Boot support
-- single-logical-CPU development profile; SMP is not yet a completed production path
-- USB hubs, general HID, USB mass storage and hotplug/re-enumeration remain deferred
-- the xHCI path is currently polling-based rather than interrupt-driven
-- many device drivers and higher-level policies are still kernel-resident or transitional
-- filesystem/device policy is still being migrated toward the intended userspace architecture
-- hardware coverage is intentionally limited while the architecture is still changing rapidly
-
-## Project status
-
-The early project began as a small standalone UEFI kernel. It has since grown into a capability-oriented operating-system environment with protected Ring 3 execution, services, IPC, storage, native USB, program launching and extensive diagnostics.
-
-Current work is focused on the next stage of the userspace/application environment while preserving the protection and recovery guarantees established by the earlier milestones.
+| Directory | Contents |
+| --- | --- |
+| `loader/` | UEFI loader, ELF loading and firmware handoff |
+| `kernel/` | Kernel mechanisms, transitional drivers/services, architecture code and diagnostics |
+| `include/` | Shared kernel/userspace ABI and protocol definitions |
+| `user/` | Ring 3 programs, services, probes and freestanding libraries |
+| `rootfs/` | Files packed into the immutable boot archive |
+| `docs/` | Current architecture, runtime, testing and support contracts |
+| `tools/` | Build, image, emulator and optional media tooling |
 
 ## License
 
 Copyright (C) 2026 Jacob Crosbie.
 
-JCOS is free software licensed under the **GNU General Public License v3.0 only** (`GPL-3.0-only`). You may redistribute and/or modify it under the terms of version 3 of the GNU General Public License as published by the Free Software Foundation.
-
-See the full [GNU GPL v3.0 license text](LICENSE) for details.
+JCOS is licensed under the **GNU General Public License v3.0 only** (`GPL-3.0-only`). See [LICENSE](LICENSE) for the license text.
