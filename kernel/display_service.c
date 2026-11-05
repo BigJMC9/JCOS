@@ -467,12 +467,13 @@ bool display_service_surface_detach_slot(u32 slot) {
     if (!g_display_service.program.process_created) return false;
 
     ManagedServiceState state = managed_service_state(&g_display_service);
-    if (state == MANAGED_SERVICE_RUNNING && compositor_service_running()) {
-        if (!managed_service_idle(&g_display_service) || !display_service_surface_remove(slot))
+    if (state == MANAGED_SERVICE_RUNNING) {
+        if (!wait_idle()) return false;
+        if (compositor_service_running()) {
+            if (!display_service_surface_remove(slot)) return false;
+        } else if (compositor_service_state() != MANAGED_SERVICE_STOPPED) {
             return false;
-    } else if (state == MANAGED_SERVICE_RUNNING &&
-               compositor_service_state() != MANAGED_SERVICE_STOPPED) {
-        return false;
+        }
     }
 
     if (!display_surface_unmap_reader(surface, &g_display_service.program.process,

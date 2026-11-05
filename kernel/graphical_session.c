@@ -22,6 +22,7 @@
 
 #define GRAPHICAL_SESSION_SLOT 0U
 #define GRAPHICAL_SESSION_TIMEOUT_SECONDS 2ULL
+#define GRAPHICAL_SESSION_RFLAGS_IF (1ULL << 9)
 
 static DisplaySurface g_surface;
 static DisplayServiceInputClient g_client;
@@ -46,22 +47,63 @@ static bool app_blocked(void) {
         thread->interrupt_rsp && thread_wait_active(thread);
 }
 
+static bool app_wait_failure(const char *reason, u64 started) {
+    const Thread *thread = &g_app.thread;
+    serial_write("R8 GUI CLIENT WAIT FAILED: ");
+    serial_write(reason);
+    serial_write(" / ELAPSED TICKS ");
+    serial_write_u64(timer_initialized() ? (u64)(timer_ticks() - started) : 0ULL);
+    serial_write(" / THREAD STATE ");
+    serial_write_u64((u64)thread->state);
+    serial_write(" / ON RUN QUEUE ");
+    serial_write_u64(thread->on_run_queue ? 1ULL : 0ULL);
+    serial_write(" / CONTEXT READY ");
+    serial_write_u64(thread->interrupt_context_ready && thread->interrupt_rsp ? 1ULL : 0ULL);
+    serial_write(" / WAIT KIND ");
+    serial_write_u64((u64)thread->wait_kind);
+    serial_write(" / WAIT RESULT ");
+    serial_write_u64((u64)thread->wait_result);
+    serial_write("\n");
+    return false;
+}
+
+static u64 graphical_session_irq_save(void) {
+    u64 flags;
+    __asm__ volatile ("pushfq; popq %0" : "=r"(flags) : : "memory");
+    arch_cli();
+    return flags;
+}
+
+static void graphical_session_irq_restore(u64 flags) {
+    if (flags & GRAPHICAL_SESSION_RFLAGS_IF) arch_sti();
+}
+
 static bool wait_app_blocked(void) {
     u64 timeout = timeout_ticks();
-    if (!timeout || !g_app.thread_created) return false;
-    u64 started = timer_ticks();
+    u64 started = timer_initialized() ? timer_ticks() : 0ULL;
+    if (!timeout || !g_app.thread_created)
+        return app_wait_failure("UNAVAILABLE", started);
     Thread *thread = &g_app.thread;
 
-    while (!app_blocked()) {
-        if ((u64)(timer_ticks() - started) >= timeout) return false;
-        if (thread->state == THREAD_STATE_DEAD) return false;
-        if (thread->state != THREAD_STATE_READY || !thread->on_run_queue ||
-            !thread->interrupt_context_ready || !thread->interrupt_rsp) return false;
+    for (;;) {
+        /* Observe the blocked and runnable states without intervening preemption. */
+        u64 flags = graphical_session_irq_save();
+        bool blocked = app_blocked();
+        bool dead = thread->state == THREAD_STATE_DEAD;
+        bool ready = thread->state == THREAD_STATE_READY &&
+            thread->on_run_queue && thread->interrupt_context_ready &&
+            thread->interrupt_rsp;
+        graphical_session_irq_restore(flags);
+
+        if (blocked) return true;
+        if ((u64)(timer_ticks() - started) >= timeout)
+            return app_wait_failure("TIMEOUT", started);
+        if (dead) return app_wait_failure("THREAD DEAD", started);
+        if (!ready) return app_wait_failure("UNEXPECTED THREAD STATE", started);
         /* A RECEIVE wake may be READY while its reservation is still live.
          * The resumed continuation consumes it before blocking again. */
-        if (!scheduler_yield()) return false;
+        if (!scheduler_yield()) return app_wait_failure("SCHEDULER YIELD", started);
     }
-    return true;
 }
 
 static bool app_thread_terminal(void) {
@@ -347,19 +389,44 @@ fail:
     return false;
 }
 
+static bool input_stage_failure(const char *stage) {
+    serial_write("R8 GUI INPUT FAILED: ");
+    serial_write(stage);
+    serial_write(".\n");
+    return false;
+}
+
 bool graphical_session_handle_event(const KeyEvent *event) {
     if (!g_active || !event || !display_service_running() ||
         !compositor_service_running() || !app_blocked() ||
-        display_service_focus_slot() != GRAPHICAL_SESSION_SLOT) return false;
+        display_service_focus_slot() != GRAPHICAL_SESSION_SLOT)
+        return input_stage_failure("SESSION PRECONDITION");
 
     KeyEvent fallback;
     k_memset(&fallback, 0, sizeof(fallback));
-    if (input_route_event(event, &fallback) != INPUT_ROUTE_GRAPHICS) return false;
-    if (!wait_app_blocked()) return false;
+    if (input_route_event(event, &fallback) != INPUT_ROUTE_GRAPHICS)
+        return input_stage_failure("INPUT ROUTE");
+    if (!wait_app_blocked()) return input_stage_failure("CLIENT RECEIVE WAIT");
 
     u32 count = 0U;
     u32 sample = 0U;
-    if (!display_service_compose(&count, &sample) || count != 1U) return false;
+    u64 compose_started = timer_initialized() ? timer_ticks() : 0ULL;
+    bool composed = display_service_compose(&count, &sample);
+    if (!composed || count != 1U) {
+        serial_write("R8 GUI INPUT COMPOSE: RESULT ");
+        serial_write_u64(composed ? 1ULL : 0ULL);
+        serial_write(" / SURFACE COUNT ");
+        serial_write_u64((u64)count);
+        serial_write(" / ELAPSED TICKS ");
+        serial_write_u64(timer_initialized() ?
+            (u64)(timer_ticks() - compose_started) : 0ULL);
+        serial_write(" / COMPOSITOR STATE ");
+        serial_write_u64((u64)compositor_service_state());
+        serial_write(" / DISPLAY STATE ");
+        serial_write_u64((u64)display_service_state());
+        serial_write("\n");
+        return input_stage_failure("COMPOSITION");
+    }
     (void)sample;
     if (g_event_count != ~0ULL) ++g_event_count;
     return true;

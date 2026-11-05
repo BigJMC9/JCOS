@@ -68,6 +68,31 @@ static bool same_key_event(const KeyEvent *a, const KeyEvent *b) {
         a->ctrl == b->ctrl && a->alt == b->alt;
 }
 
+static u64 key_event_flags(const KeyEvent *event) {
+    if (!event) return 0ULL;
+
+    u64 flags = 0ULL;
+    if (event->pressed) flags |= JCOS_DISPLAY_INPUT_FLAG_PRESSED;
+    if (event->shift) flags |= JCOS_DISPLAY_INPUT_FLAG_SHIFT;
+    if (event->ctrl) flags |= JCOS_DISPLAY_INPUT_FLAG_CTRL;
+    if (event->alt) flags |= JCOS_DISPLAY_INPUT_FLAG_ALT;
+    return flags;
+}
+
+static void report_key_event(const char *name, const KeyEvent *event) {
+    if (!name || !event) return;
+
+    terminal_write("    ");
+    terminal_write(name);
+    terminal_write(": KEY ");
+    terminal_write_u64((u64)event->key);
+    terminal_write(" / CHARACTER ");
+    terminal_write_u64((u64)(u8)event->character);
+    terminal_write(" / FLAGS ");
+    terminal_write_u64(key_event_flags(event));
+    terminal_putchar('\n');
+}
+
 static u64 timeout_ticks(void) {
     if (!timer_initialized()) return 0ULL;
     u32 frequency = timer_frequency();
@@ -897,8 +922,19 @@ void display_surface_test_run(void) {
     report("SURFACE REMOVE / SINGLE-SURFACE COMPOSE", removed);
     if (!removed) goto fail;
 
-    bool readers_detached = display_service_surface_detach_slot(1U) &&
-        display_service_surface_detach_slot(0U) && display_service_surface_count() == 0U;
+    bool reader_one_detached = display_service_surface_detach_slot(1U);
+    bool reader_zero_detached = reader_one_detached &&
+        display_service_surface_detach_slot(0U);
+    bool readers_detached = reader_zero_detached &&
+        display_service_surface_count() == 0U;
+    if (!readers_detached) {
+        if (!reader_one_detached)
+            serial_write("R8C READER DETACH FAILED: SLOT 1.\n");
+        else if (!reader_zero_detached)
+            serial_write("R8C READER DETACH FAILED: SLOT 0.\n");
+        else
+            serial_write("R8C READER DETACH FAILED: SURFACE COUNT NOT ZERO.\n");
+    }
     report("ALL COMPOSITOR READER MAPPINGS DETACHED", readers_detached);
     if (!readers_detached) goto fail;
 
@@ -1131,9 +1167,45 @@ void display_surface_test_run(void) {
             (cycle & 1U) != 0U, (cycle & 2U) != 0U, false);
         KeyEvent stress_observed;
         k_memset(&stress_observed, 0, sizeof(stress_observed));
-        if (!graphical_session_handle_event(&stress_event) ||
-            !graphical_session_last_event(&stress_observed) ||
-            !same_key_event(&stress_event, &stress_observed)) {
+
+        /* Inspect client delivery independently of the full input transaction. */
+        u64 event_count_before = graphical_session_event_count();
+        bool input_handled = graphical_session_handle_event(&stress_event);
+        bool input_recorded = graphical_session_last_event(&stress_observed);
+        bool input_matches = input_recorded &&
+            same_key_event(&stress_event, &stress_observed);
+
+        if (!input_handled || !input_matches) {
+            report("STRESS INPUT HANDLER", input_handled);
+            report("STRESS INPUT MARKER", input_recorded);
+            if (input_recorded) report("STRESS INPUT EVENT MATCH", input_matches);
+
+            terminal_write("    SESSION EVENT COUNT: BEFORE ");
+            terminal_write_u64(event_count_before);
+            terminal_write(" / AFTER ");
+            terminal_write_u64(graphical_session_event_count());
+            terminal_putchar('\n');
+
+            terminal_write("    SERVICES: DISPLAY ");
+            terminal_write(display_service_running() ? "RUNNING" : "NOT RUNNING");
+            terminal_write(" / COMPOSITOR ");
+            terminal_writeln(compositor_service_running() ? "RUNNING" : "NOT RUNNING");
+
+            terminal_write("    INPUT FOCUS: ");
+            u32 focus_slot = display_service_focus_slot();
+            if (focus_slot == JCOS_DISPLAY_SURFACE_FOCUS_NONE) {
+                terminal_writeln("NONE");
+            } else {
+                terminal_write("SLOT ");
+                terminal_write_u64((u64)focus_slot);
+                terminal_putchar('\n');
+            }
+
+            if (input_recorded && !input_matches) {
+                report_key_event("EXPECTED INPUT", &stress_event);
+                report_key_event("OBSERVED INPUT", &stress_observed);
+            }
+
             recovery_stress_failure(cycle, "INPUT ROUND TRIP");
             recovery_stress = false;
             break;
