@@ -33,6 +33,10 @@ void display_session_reset(void);
 bool display_direct_prepare(u64 user_virtual_base,
     ProgramBorrowedMappingSpec *out_mapping, FramebufferInfo *out_info,
     u64 *out_user_framebuffer);
+/* Native/rescue provider only: same exclusive lease, expected active output
+ * generation. Does not publish a descriptor or execute GPU programming. */
+bool display_direct_prepare_native(u64 expected_output_identity, u64 user_virtual_base,
+    ProgramBorrowedMappingSpec *out_mapping, FramebufferInfo *out_info, u64 *out_user_framebuffer);
 bool display_direct_commit(Process *process);
 bool display_direct_abort(void);
 bool display_direct_reclaim(u64 owner_process_id);

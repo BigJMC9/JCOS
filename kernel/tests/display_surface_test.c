@@ -10,6 +10,7 @@
 #include "framebuffer.h"
 #include "graphical_session.h"
 #include "input_router.h"
+#include "interrupts.h"
 #include "lib.h"
 #include "pmm.h"
 #include "process.h"
@@ -460,6 +461,15 @@ static bool input_app_terminal(u32 index) {
         !thread_wait_active(thread);
 }
 
+static u64 input_wait_irq_save(void) {
+    u64 flags;
+    __asm__ volatile ("pushfq; popq %0" : "=r"(flags) : : "memory");
+    interrupts_disable();
+    return flags;
+}
+static void input_wait_irq_restore(u64 flags) {
+    if (flags & (1ULL << 9)) interrupts_enable();
+}
 static bool wait_input_app_dead(u32 index) {
     if (index >= DISPLAY_INPUT_CLIENT_COUNT || !g_input_exit_queue_created[index]) return false;
     u64 timeout = timeout_ticks();
@@ -469,29 +479,33 @@ static bool wait_input_app_dead(u32 index) {
     ProcessExitQueue *queue = &g_input_exit_queues[index];
 
     for (;;) {
+        /* Exit can run between separately observed queue and thread fields.
+         * Match the service/supervisor waits: observe and schedule atomically
+         * under the UP interrupt discipline, preserving the caller's IF. */
+        u64 flags = input_wait_irq_save();
         u32 pending = process_exit_queue_pending_count(queue);
-        if (pending > 1U) return false;
-        if (pending == 1U && input_app_terminal(index)) break;
-        if ((u64)(timer_ticks() - started) >= timeout) return false;
+        if (pending == 1U && input_app_terminal(index)) {
+            bool complete = process_exit_queue_watch_count(queue) == 0U;
+            input_wait_irq_restore(flags);
+            return complete;
+        }
+        bool valid = pending <= 1U && (u64)(timer_ticks() - started) < timeout;
         if (thread->state == THREAD_STATE_READY) {
-            /* A blocking IPC RECEIVE is legitimately READY while its wait
-             * reservation is still live after SEND wakes it. The resumed
-             * continuation consumes the queued message, ends the reservation,
-             * and then this one-shot client exits. */
-            if (!thread->on_run_queue || !thread->interrupt_context_ready ||
-                !thread->interrupt_rsp) return false;
+            /* SEND may wake RECEIVE while its wait reservation is still live. */
+            valid = valid && thread->on_run_queue && thread->interrupt_context_ready &&
+                thread->interrupt_rsp;
         } else if (thread->state == THREAD_STATE_BLOCKED) {
-            if (thread->on_run_queue || !thread->interrupt_context_ready ||
-                !thread->interrupt_rsp || !thread_wait_active(thread)) return false;
-        } else if (thread->state != THREAD_STATE_DEAD) {
+            valid = valid && !thread->on_run_queue && thread->interrupt_context_ready &&
+                thread->interrupt_rsp && thread_wait_active(thread);
+        } else if (thread->state != THREAD_STATE_DEAD) valid = false;
+        if (!valid) {
+            input_wait_irq_restore(flags);
             return false;
         }
-        if (!scheduler_yield()) return false;
+        bool scheduled = scheduler_yield();
+        input_wait_irq_restore(flags);
+        if (!scheduled) return false;
     }
-
-    return input_app_terminal(index) &&
-        process_exit_queue_pending_count(queue) == 1U &&
-        process_exit_queue_watch_count(queue) == 0U;
 }
 
 static bool drain_input_exit(u32 index, ProcessExitInfo *out) {

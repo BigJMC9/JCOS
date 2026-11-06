@@ -121,6 +121,11 @@ int main(int argc, char **argv) {
     CHECK(display_available() && framebuffer_firmware_valid());
     FramebufferInfo info, retained;
     CHECK(framebuffer_info(&info) && info.direct_map_safe);
+    u64 refused_identity=~0ULL;
+    CHECK(!framebuffer_native_install(&info,false,&refused_identity) && !refused_identity &&
+        framebuffer_firmware_valid() && framebuffer_output_matches(0));
+    CHECK(!framebuffer_native_install(&info,false,0));
+    CHECK(!framebuffer_native_install(0,false,&refused_identity) && !refused_identity);
 
     /* Rendering clips to visible pixels; pitch padding/trailing bytes survive. */
     for (u32 i = 0; i < WORDS; ++i) pixels[i] = 0x55AA55AAU;
@@ -211,6 +216,99 @@ int main(int argc, char **argv) {
     CHECK(serial_bytes > previous_serial && observed_lines > 0);
     framebuffer_scanout_status(&status);
     CHECK(status.state == FRAMEBUFFER_SCANOUT_RETIRED && !status.kernel_writers);
-    printf("Framebuffer scanout %s: PASS (production rendering, lease, retirement, serial terminal)\n", argv[1]);
+    /* Native/rescue descriptors are privileged test fixtures. No GPU proof,
+     * real mappings, process fault or hardware restoration is claimed here. */
+    FramebufferOutputStatus output;
+    framebuffer_output_status(&output);
+    CHECK(!output.valid && !output.identity && output.kind==FRAMEBUFFER_OUTPUT_NONE);
+    FramebufferInfo candidate=info, active;
+    u64 native_id=~0ULL, rescue_id=0;
+    CHECK(!framebuffer_output_revoke(0) && !framebuffer_output_matches(0));
+    for (unsigned bad=0; bad<18; ++bad) {
+        candidate=info;
+        switch (bad) {
+        case 0: candidate.physical_base+=4096; break;
+        case 1: candidate.size--; break;
+        case 2: candidate.mapping_physical_base+=4096; break;
+        case 3: candidate.mapping_size+=4096; break;
+        case 4: candidate.page_offset++; break;
+        case 5: candidate.memory_type=7; break;
+        case 6: candidate.direct_map_safe=false; break;
+        case 7: candidate.pixel_format=0; break;
+        case 8: candidate.red_mask=1; break;
+        case 9: candidate.green_mask=1; break;
+        case 10: candidate.blue_mask=1; break;
+        case 11: candidate.reserved_mask=1; break;
+        case 12: candidate.width=0; break;
+        case 13: candidate.height=0; break;
+        case 14: candidate.width=candidate.pixels_per_scanline+1; break;
+        case 15: candidate.pixels_per_scanline=~0U; break;
+        case 16: candidate.height=~0U; break;
+        case 17: candidate.width--; break;
+        }
+        CHECK(!framebuffer_native_install(&candidate,false,&native_id) && !native_id &&
+            !framebuffer_output_valid() && !framebuffer_output_info(&active));
+    }
+    candidate=info;
+    CHECK(framebuffer_native_install(&candidate,false,&native_id) && native_id &&
+        framebuffer_output_valid() && framebuffer_output_matches(native_id) &&
+        !framebuffer_firmware_valid() && !framebuffer_output_matches(0));
+    CHECK(framebuffer_info(&retained) && !memcmp(&retained,&info,sizeof(info)));
+    CHECK(framebuffer_output_info(&active) && !memcmp(&active,&candidate,sizeof(candidate)));
+    CHECK(framebuffer_width()==candidate.width && framebuffer_height()==candidate.height);
+    CHECK(!framebuffer_native_install(&info,true,&rescue_id) && !rescue_id);
+    CHECK(!display_available() && !prepare()); /* Firmware-only service cannot regain authority. */
+    CHECK(!display_retire_firmware_scanout() && framebuffer_output_valid());
+    memcpy(saved,pixels,sizeof(pixels));
+    CHECK(!display_present_user(&user,5,(u64)image,2,2) && unchanged());
+    terminal_set_render_enabled(true);
+    CHECK(terminal_render_enabled());
+    framebuffer_pixel(candidate.width-1,candidate.height-1,0xAABBCC);
+    CHECK(pixels[(candidate.height-1)*PITCH+candidate.width-1]==0xAABBCC);
+    memcpy(saved,pixels,sizeof(pixels));
+    framebuffer_pixel(candidate.width,candidate.height,0x112233);
+    CHECK(unchanged() && framebuffer_writers_idle());
+    ProgramBorrowedMappingSpec mapping;
+    u64 pointer=~0ULL;
+    CHECK(!display_direct_prepare_native(0,USER_BASE,&mapping,&active,&pointer) && !pointer);
+    CHECK(!display_direct_prepare_native(native_id+1,USER_BASE,&mapping,&active,&pointer) && !pointer);
+    CHECK(display_direct_prepare_native(native_id,USER_BASE,&mapping,&active,&pointer) &&
+        pointer==USER_BASE+candidate.page_offset && mapping.physical_base==candidate.physical_base &&
+        active.width==candidate.width && display_direct_state()==DISPLAY_LEASE_HANDOFF);
+    CHECK(framebuffer_output_revoke(native_id) && !display_direct_commit(&user));
+    CHECK(!framebuffer_native_install(&info,true,&rescue_id) && !rescue_id);
+    CHECK(display_direct_abort() && !terminal_render_enabled());
+    CHECK(framebuffer_native_install(&info,true,&rescue_id) && rescue_id!=native_id);
+    CHECK(!framebuffer_output_revoke(native_id) && framebuffer_output_matches(rescue_id));
+    framebuffer_output_status(&output);
+    CHECK(output.kind==FRAMEBUFFER_OUTPUT_RESCUE && output.valid && output.identity==rescue_id);
+    terminal_set_render_enabled(true);
+    CHECK(display_direct_prepare_native(rescue_id,USER_BASE,&mapping,&active,&pointer) &&
+        display_direct_commit(&user) && display_direct_owner_process_id()==user.id);
+    memcpy(saved,pixels,sizeof(pixels));
+    attempt_writes();
+    CHECK(unchanged() && !framebuffer_write_begin());
+    CHECK(framebuffer_output_revoke(rescue_id) && !terminal_render_enabled());
+    CHECK(!framebuffer_native_install(&info,true,&native_id) && !native_id);
+    CHECK(!display_direct_reclaim(user.id+1) && display_direct_reclaim(user.id));
+    CHECK(!terminal_render_enabled() && display_direct_state()==DISPLAY_LEASE_KERNEL);
+    CHECK(framebuffer_native_install(&candidate,false,&native_id) && native_id>rescue_id);
+    CHECK(framebuffer_write_begin() && framebuffer_output_revoke(native_id));
+    CHECK(!framebuffer_write_begin() && !framebuffer_native_install(&info,true,&rescue_id));
+    framebuffer_write_end();
+    CHECK(framebuffer_native_install(&info,true,&rescue_id) && rescue_id>native_id);
+    CHECK(!framebuffer_output_revoke(native_id));
+    CHECK(framebuffer_output_revoke(rescue_id) && framebuffer_output_revoke(rescue_id));
+    CHECK(!framebuffer_output_valid() && !framebuffer_output_matches(rescue_id));
+    framebuffer_output_status(&output);
+    CHECK(output.kind==FRAMEBUFFER_OUTPUT_QUARANTINED && output.identity==rescue_id &&
+        !output.valid && !output.kernel_writers);
+    memcpy(saved,pixels,sizeof(pixels));
+    attempt_writes();
+    CHECK(unchanged());
+    framebuffer_scanout_status(&status);
+    CHECK(status.state==FRAMEBUFFER_SCANOUT_RETIRED && !status.kernel_writers);
+    CHECK(framebuffer_info(&retained) && !memcmp(&info,&retained,sizeof(info)));
+    printf("Framebuffer scanout %s: PASS (production rendering, lease, irreversible retirement, native/rescue descriptor generations and serial terminal)\n", argv[1]);
     return 0;
 }

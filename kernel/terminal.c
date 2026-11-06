@@ -478,7 +478,7 @@ void terminal_set_line_observer(TerminalLineObserver observer, void *context) {
 }
 
 void terminal_set_render_enabled(bool enabled) {
-    if (enabled && !framebuffer_firmware_valid()) enabled = false;
+    if (enabled && !framebuffer_output_valid()) enabled = false;
     if (g_render_enabled == enabled) return;
 
     if (!enabled) {
@@ -493,7 +493,7 @@ void terminal_set_render_enabled(bool enabled) {
 }
 
 bool terminal_render_enabled(void) {
-    return g_render_enabled;
+    return g_render_enabled && framebuffer_output_valid();
 }
 
 void terminal_scrollback_line_up(void) {

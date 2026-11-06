@@ -32,6 +32,10 @@ bool device_register_reader_create_test_bank(DeviceRegisterReader *reader,
 bool device_register_reader_create_test_capture(DeviceRegisterReader *reader,
     Process *owner, u32 pipe, const u32 *values, u32 count, u64 duration,
     CapabilityHandle *out);
+/* Trusted immutable observation producer. Copies fifteen previously captured
+ * fields; the capability reads RAM with finite ordering, not live registers. */
+bool device_register_reader_create_observation(DeviceRegisterReader *reader,
+    Process *owner, u32 pipe, const u32 *values, u64 duration, CapabilityHandle *out);
 bool device_register_reader_valid(const DeviceRegisterReader *reader);
 bool device_register_reader_revoke(DeviceRegisterReader *reader);
 bool device_register_reader_destroy(DeviceRegisterReader *reader);

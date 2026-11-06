@@ -7,6 +7,7 @@
 #include "lib.h"
 #include "object_storage.h"
 #include "physmap.h"
+#include "device_mmio.h"
 
 static void *g_bindings[POLARIS_MMIO_BINDING_CAPACITY];
 static void *g_holds[POLARIS_MMIO_HOLD_CAPACITY];
@@ -187,10 +188,70 @@ done:
     irq_restore(flags);
     return released;
 }
+static PolarisMmioBinding *held_binding(PolarisMmioHold *hold, u64 expected_hold_identity,
+    Process *owner) {
+    if (!device_mmio_interrupts_enabled() || !expected_hold_identity ||
+        object_storage_find(g_holds, POLARIS_MMIO_HOLD_CAPACITY, hold) >= POLARIS_MMIO_HOLD_CAPACITY ||
+        !hold->initialized || hold->identity != expected_hold_identity) return 0;
+    PolarisMmioBinding *b = hold->binding;
+    if (!polaris_mmio_binding_prepared(b) || b->identity != hold->binding_identity ||
+        b->owner != owner || !owner_live(owner) || owner->id != b->owner_id ||
+        pci_assignment_dma_gate_active(b->assignment) || !b->active_holds ||
+        !kernel_context(b->map, b->root_frame)) return 0;
+    return b;
+}
+static bool read_leaf(PolarisMmioBinding *b, u32 page, u32 slot, u32 offset, u32 *out) {
+    u64 address = b->virtual_base + (u64)slot * VM_PAGE_SIZE;
+    frame_t frame;
+    vm_flags_t flags;
+    if (!vmm_query_page(b->map, address, &frame, &flags) ||
+        frame != phys_to_frame(b->plan.bar.base + page) || flags != VM_DEVICE ||
+        !device_mmio_interrupts_enabled()) return false;
+    /* No IRQ-off section spans this load. The retained hold prevents teardown.
+     * A stalled physical transaction has no software-enforced bus timeout. */
+    *out = device_mmio_load32(address + (offset & (VM_PAGE_SIZE - 1ULL)));
+    return true;
+}
+bool polaris_mmio_read_held(PolarisMmioHold *hold, u64 expected_hold_identity,
+    Process *owner, u32 pipe, PolarisDisplayRegister field, u32 *out) {
+    if (!out) return false;
+    *out = 0;
+    PolarisMmioBinding *b = held_binding(hold, expected_hold_identity, owner);
+    if (!b) return false;
+    u32 offset;
+    if (!jcos_polaris_register_offset(pipe, field, b->plan.bar.size, &offset)) return false;
+    u32 page = offset & ~(u32)(VM_PAGE_SIZE - 1ULL), slot = 0;
+    while (slot < b->plan.page_count && b->plan.page_offsets[slot] != page) ++slot;
+    if (slot == b->plan.page_count) return false;
+    return read_leaf(b, page, slot, offset, out);
+}
+bool polaris_mmio_read_location_held(PolarisMmioHold *hold, u64 expected_hold_identity,
+    Process *owner, PolarisLocationRegister field, u32 *out) {
+    if (!out) return false;
+    *out = 0;
+    if ((u32)field >= POLARIS_LOCATION_COUNT) return false;
+    PolarisMmioBinding *b = held_binding(hold, expected_hold_identity, owner);
+    if (!b || !b->location_mapped) return false;
+    u32 offset = field == POLARIS_LOCATION_MC_FB ?
+        POLARIS_MC_VM_FB_LOCATION_BYTE : POLARIS_HDP_NONSURFACE_BASE_BYTE;
+    if (offset + 4ULL > b->plan.bar.size) return false;
+    return read_leaf(b, offset & ~0xFFFU, b->plan.page_count, offset, out);
+}
 static bool cleanup_locked(PolarisMmioBinding *b) {
     if (!polaris_mmio_close(b) || !retained_identity(b) || b->poisoned || b->active_holds)
         return false;
-    if (b->mapped_pages && !kernel_context(b->map, b->root_frame)) return false;
+    if ((b->mapped_pages || b->location_mapped) && !kernel_context(b->map, b->root_frame)) return false;
+    if (b->location_mapped) {
+        u64 address = b->virtual_base + (u64)b->plan.page_count * VM_PAGE_SIZE;
+        frame_t expected = phys_to_frame(b->plan.bar.base + 0x2000ULL);
+        frame_t actual = FRAME_INVALID, old = FRAME_INVALID;
+        vm_flags_t permissions = 0;
+        if (!vmm_query_page(b->map, address, &actual, &permissions) ||
+            actual != expected || permissions != VM_DEVICE ||
+            !vmm_unmap_page(b->map, address, &old)) return false;
+        b->location_mapped = false;
+        if (old != expected) { b->poisoned = true; return false; }
+    }
     while (b->mapped_pages) {
         u32 i = b->mapped_pages - 1U;
         u64 address = b->virtual_base + (u64)i * VM_PAGE_SIZE;
@@ -315,6 +376,39 @@ bool polaris_mmio_prepare(PolarisMmioBinding *b, const BootInfo *boot,
     goto done;
 rollback:
     (void)cleanup_locked(b); /* Failure retains the ledger and unreleased pins. */
+done:
+    irq_restore(flags);
+    return result;
+}
+
+
+bool polaris_mmio_prepare_location(PolarisMmioBinding *b, const BootInfo *boot,
+    Process *owner, u64 expected_binding_identity) {
+    if (!boot || !expected_binding_identity) return false;
+    u64 flags = irq_save();
+    bool result = false;
+    if (!polaris_mmio_binding_prepared(b) || b->identity != expected_binding_identity ||
+        b->owner != owner || b->active_holds || b->location_mapped ||
+        pci_assignment_dma_gate_active(b->assignment) ||
+        !kernel_context(b->map, b->root_frame) || !vmm_device_memory_supported()) goto done;
+    PolarisMmioPlan before, after;
+    if (!current_plan(boot, b->assignment, b->owner_id, &before) ||
+        !same_bytes(&before, &b->plan, sizeof(before))) goto done;
+    u64 physical = b->plan.bar.base + 0x2000ULL, direct = 0;
+    u64 address = b->virtual_base + (u64)b->plan.page_count * VM_PAGE_SIZE;
+    if (POLARIS_MC_VM_FB_LOCATION_BYTE / VM_PAGE_SIZE != 2U ||
+        POLARIS_HDP_NONSURFACE_BASE_BYTE / VM_PAGE_SIZE != 2U ||
+        !page_not_ram(boot, physical) || !physmap_virtual_address(physical, &direct) ||
+        vmm_query_page(b->map, physical, 0, 0) || vmm_query_page(b->map, direct, 0, 0) ||
+        vmm_query_page(b->map, address, 0, 0) ||
+        !vmm_map_page(b->map, address, phys_to_frame(physical), VM_DEVICE)) goto done;
+    b->location_mapped = true; /* Publish before post-map revalidation. */
+    if (!current_plan(boot, b->assignment, b->owner_id, &after) ||
+        !same_bytes(&after, &b->plan, sizeof(after))) {
+        (void)polaris_mmio_close(b);
+        goto done; /* The existing ledger owns the fifth leaf and both pins. */
+    }
+    result = true;
 done:
     irq_restore(flags);
     return result;

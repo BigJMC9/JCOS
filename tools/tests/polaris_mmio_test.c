@@ -21,6 +21,14 @@ static bool exited, supported = true, wrong_context, fail_child, fail_access;
 static bool fail_access_release, fail_child_release, change_after_map, corrupt_unmap_result;
 static u32 map_calls, unmap_calls, config_reads, fail_map, fail_unmap;
 static u64 alias;
+static bool change_location;
+static bool load_interrupts = true;
+static u32 load_calls;
+static u64 load_address;
+bool device_mmio_interrupts_enabled(void) { return load_interrupts; }
+u32 device_mmio_load32(u64 address) {
+    ++load_calls; load_address = address; return 0x12345678U;
+}
 typedef struct { u64 address; frame_t frame; vm_flags_t flags; bool present; } Leaf;
 static Leaf leaves[16];
 void interrupts_disable(void) {}
@@ -88,6 +96,7 @@ bool vmm_map_page(VmPageMap *m, u64 address, frame_t f, vm_flags_t flags) {
     if (map_calls == fail_map || m != &kernel.page_map || flags != VM_DEVICE ||
         address < POLARIS_MMIO_WINDOW_BASE || address >= POLARIS_MMIO_WINDOW_BASE + 0x40000ULL ||
         vmm_query_page(m, address, 0, 0)) return false;
+    if (change_location && map_calls == 5U) config[8]++;
     if (change_after_map && map_calls == 4U) config[8]++; /* identity drift after leaves */
     for (u32 i = 0; i < 16U; ++i) {
         if (leaves[i].present) continue;
@@ -115,6 +124,7 @@ static bool reset(void) {
     memset(&kernel, 0, sizeof(kernel)); kernel.page_map.root_frame = 5U;
     memset(&memory, 0, sizeof(memory));
     memory.type = 11U; memory.physical_start = 0x63400000ULL; memory.number_of_pages = 64U;
+    change_location=false;
     supported = true; exited = wrong_context = fail_child = fail_access = false;
     fail_access_release = fail_child_release = change_after_map = corrupt_unmap_result = false;
     map_calls = unmap_calls = config_reads = fail_map = fail_unmap = 0; alias = 0;
@@ -136,6 +146,18 @@ int main(int argc, char **argv) {
     CHECK(!polaris_mmio_binding_prepared((void *)1));
     CHECK(!polaris_mmio_cleanup((void *)1));
     PolarisMmioBinding b, duplicate;
+    if (argc==2 && strcmp(argv[1],"location-poison")==0) {
+        CHECK(reset());
+        CHECK(polaris_mmio_prepare(&b,&boot,&assignment,&owner,17U));
+        CHECK(polaris_mmio_prepare_location(&b,&boot,&owner,polaris_mmio_binding_identity(&b)));
+        corrupt_unmap_result=true;
+        CHECK(!polaris_mmio_cleanup(&b) && b.poisoned && !b.location_mapped &&
+            b.mapped_pages==4 && assignment.active_access_count==1 && assignment.child_resource_count==1);
+        corrupt_unmap_result=false;
+        CHECK(!polaris_mmio_cleanup(&b) && unmap_calls==1);
+        puts("PASS: inconsistent global-page unmap retains poisoned binding, four pipe leaves and both pins.");
+        return 0;
+    }
     if (argc == 2 && strcmp(argv[1], "poison") == 0) {
         CHECK(reset());
         CHECK(polaris_mmio_prepare(&b, &boot, &assignment, &owner, 17U));
@@ -147,6 +169,75 @@ int main(int argc, char **argv) {
         CHECK(!polaris_mmio_cleanup(&b) && unmap_calls == 1U);
         puts("PASS: inconsistent committed unmap poisons record; remaining leaves and both pins stay retained.");
         return 0;
+    }
+    /* Optional global page retains the same assignment pins and cleanup ledger. */
+    CHECK(reset());
+    CHECK(polaris_mmio_prepare(&b, &boot, &assignment, &owner, 17U));
+    u64 location_binding_id = polaris_mmio_binding_identity(&b), location_hold_id = 0;
+    PolarisMmioHold location_hold;
+    u32 location_value = ~0U;
+    CHECK(!polaris_mmio_prepare_location(&b, &boot, &owner, location_binding_id+1));
+    CHECK(!polaris_mmio_prepare_location(&b, &boot, (Process *)1, location_binding_id));
+    CHECK(polaris_mmio_hold_acquire(&location_hold, &b, location_binding_id, &owner, &location_hold_id));
+    CHECK(!polaris_mmio_prepare_location(&b, &boot, &owner, location_binding_id));
+    CHECK(!polaris_mmio_read_location_held(&location_hold, location_hold_id, &owner,
+        POLARIS_LOCATION_MC_FB, &location_value) && !location_value && !load_calls);
+    CHECK(polaris_mmio_hold_release(&location_hold, location_hold_id));
+    CHECK(polaris_mmio_prepare_location(&b, &boot, &owner, location_binding_id));
+    CHECK(b.location_mapped && map_calls==5 && b.mapped_pages==4 &&
+        assignment.active_access_count==1 && assignment.child_resource_count==1);
+    CHECK(!polaris_mmio_prepare_location(&b, &boot, &owner, location_binding_id));
+    CHECK(polaris_mmio_hold_acquire(&location_hold, &b, location_binding_id, &owner, &location_hold_id));
+    for (unsigned field=0; field<2; ++field) {
+        CHECK(polaris_mmio_read_location_held(&location_hold, location_hold_id, &owner,
+            (PolarisLocationRegister)field, &location_value) && location_value==0x12345678U &&
+            load_address==b.virtual_base+0x4000ULL+(field ? 0xC04ULL : 0x24ULL));
+    }
+    CHECK(load_calls==2);
+    for (unsigned refusal=0; refusal<9; ++refusal) {
+        if (refusal==0) load_interrupts=false;
+        if (refusal==1) wrong_context=true;
+        if (refusal==2) exited=true;
+        if (refusal==3) assignment.state=PCI_ASSIGNMENT_QUARANTINED;
+        if (refusal==4) assignment.dma_gate_active=true;
+        if (refusal==5) leaves[4].flags=VM_DEVICE|VM_USER;
+        if (refusal==6) leaves[4].frame++;
+        CHECK(!polaris_mmio_read_location_held(&location_hold, location_hold_id+(refusal==7),
+            &owner, (PolarisLocationRegister)(refusal==8 ? 2 : 0), &location_value) &&
+            !location_value && load_calls==2);
+        load_interrupts=true; wrong_context=exited=false; assignment.state=PCI_ASSIGNMENT_ASSIGNED;
+        assignment.dma_gate_active=false; leaves[4].flags=VM_DEVICE;
+        if (refusal==6) leaves[4].frame--;
+    }
+    CHECK(!polaris_mmio_cleanup(&b) && !unmap_calls && b.location_mapped);
+    CHECK(polaris_mmio_hold_release(&location_hold, location_hold_id));
+    fail_unmap=1;
+    CHECK(!polaris_mmio_cleanup(&b) && b.location_mapped && b.mapped_pages==4);
+    fail_unmap=0;
+    CHECK(polaris_mmio_cleanup(&b) && empty() && unmap_calls==6);
+    CHECK(reset());
+    CHECK(polaris_mmio_prepare(&b,&boot,&assignment,&owner,17U));
+    change_location=true;
+    CHECK(!polaris_mmio_prepare_location(&b,&boot,&owner,polaris_mmio_binding_identity(&b)) &&
+        b.location_mapped && b.closing && !polaris_mmio_binding_prepared(&b));
+    CHECK(polaris_mmio_cleanup(&b) && empty());
+    load_calls=0;
+    for (unsigned refusal=0; refusal<7; ++refusal) {
+        CHECK(reset());
+        CHECK(polaris_mmio_prepare(&b, &boot, &assignment, &owner, 17U));
+        location_binding_id=polaris_mmio_binding_identity(&b);
+        if (refusal==0) fail_map=5;
+        if (refusal==1) alias=b.plan.bar.base+0x2000;
+        if (refusal==2) {
+            CHECK(physmap_virtual_address(b.plan.bar.base+0x2000,&alias));
+        }
+        if (refusal==3) alias=b.virtual_base+0x4000;
+        if (refusal==4) memory.type=7;
+        if (refusal==5) config[4]=0;
+        if (refusal==6) wrong_context=true;
+        CHECK(!polaris_mmio_prepare_location(&b,&boot,&owner,location_binding_id) && !b.location_mapped);
+        alias=0; memory.type=11; wrong_context=false;
+        CHECK(polaris_mmio_cleanup(&b) && empty());
     }
     CHECK(reset());
     CHECK(polaris_mmio_prepare(&b, &boot, &assignment, &owner, 17U));
@@ -165,6 +256,38 @@ int main(int argc, char **argv) {
     CHECK(!polaris_mmio_hold_acquire(&hold, &b, binding_id, (Process *)1, &hold_id) && !hold_id);
     CHECK(polaris_mmio_hold_acquire(&hold, &b, binding_id, &owner, &hold_id) &&
         hold_id && b.active_holds == 1U && polaris_mmio_hold_count() == 1U);
+    u32 value = ~0U;
+    for (u32 pipe = 0; pipe < POLARIS_DISPLAY_PIPE_COUNT; ++pipe) {
+        for (u32 field = 0; field < POLARIS_DISPLAY_REGISTER_COUNT; ++field) {
+            u32 offset = 0;
+            CHECK(jcos_polaris_register_offset(pipe, (PolarisDisplayRegister)field, b.plan.bar.size, &offset));
+            u32 page = 0;
+            while (page < b.plan.page_count && b.plan.page_offsets[page] != (offset & ~0xFFFU)) ++page;
+            CHECK(polaris_mmio_read_held(&hold, hold_id, &owner, pipe, (PolarisDisplayRegister)field, &value) &&
+                value == 0x12345678U && load_address == b.virtual_base + (u64)page * VM_PAGE_SIZE + (offset & 0xFFFU));
+        }
+    }
+    CHECK(load_calls == 90U);
+    for (u32 refusal = 0; refusal < 8U; ++refusal) {
+        if (refusal == 0) load_interrupts = false;
+        if (refusal == 1) wrong_context = true;
+        if (refusal == 2) exited = true;
+        if (refusal == 3) assignment.state = PCI_ASSIGNMENT_QUARANTINED;
+        if (refusal == 4) assignment.dma_gate_active = true;
+        if (refusal == 5) leaves[0].flags = VM_DEVICE | VM_WRITE;
+        if (refusal == 6) leaves[0].frame++;
+        value = ~0U;
+        CHECK(!polaris_mmio_read_held(&hold, hold_id + (refusal == 7), &owner, 0U,
+            POLARIS_REG_CRTC_CONTROL, &value) && !value && load_calls == 90U);
+        load_interrupts = true; wrong_context = exited = false;
+        assignment.state = PCI_ASSIGNMENT_ASSIGNED; assignment.dma_gate_active = false;
+        leaves[0].flags = VM_DEVICE;
+        if (refusal == 6) leaves[0].frame--;
+    }
+    CHECK(!polaris_mmio_read_held(&hold, hold_id, &owner, 6U, POLARIS_REG_CRTC_CONTROL, &value));
+    CHECK(!polaris_mmio_read_held(&hold, hold_id, &owner, 0U, POLARIS_DISPLAY_REGISTER_COUNT, &value));
+    CHECK(!polaris_mmio_read_held((void *)1, hold_id, &owner, 0U, POLARIS_REG_CRTC_CONTROL, &value));
+    CHECK(load_calls == 90U);
     copied_hold = hold;
     CHECK(!polaris_mmio_hold_release(&copied_hold, hold_id));
     u64 rejected_id = ~0ULL;
@@ -276,6 +399,6 @@ int main(int argc, char **argv) {
     CHECK(reset()); assignment.dma_gate_active = true;
     CHECK(!polaris_mmio_prepare(&b, &boot, &assignment, &owner, 17U) && empty() && !config_reads);
     puts("PASS: complete BAR5/D0 plan; all map-failure boundaries; retained rollback/release pins;"
-         " owner fault/quarantine; stale identity/context/leaf; alias/RAM refusal; inherited DMA history; bounded holds/close/drain/incarnation.");
+         " owner fault/quarantine; stale identity/context/leaf; alias/RAM refusal; inherited DMA history; bounded holds/close/drain/incarnation; guarded semantic load routes and refusals.");
     return 0;
 }

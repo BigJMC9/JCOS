@@ -53,6 +53,35 @@ details. Local keyboard commands plus serial output establish capture only;
 entering commands from the capture host also exercises input/control. Native
 GPU failure independence still requires its own physical acceptance run.
 
+## Observed physical serial session
+
+On 2026-11-06, a Windows host controlled the Z390 Gaming X / i7-9700K /
+BIOS F10 system through an FTDI USB serial adapter on COM7 at 38400 8N1.
+The target used the RX 570 candidate (1002:67DF rev EF, subsystem 1458:2310)
+and its retained firmware framebuffer. The operator identified the running
+image as the finite-capture build; the corresponding retained artifact is
+SHA-256 `17741b91141d3455d2037ad500ea8ec2d5877d7c79e4e5e3623f363e1405b822`.
+The flashed bytes were not independently hashed.
+
+The host entered `monitor`, captured firmware/display/readiness reports,
+and ran `display-probe`, `polaris-read-profile`, `display-lease`,
+`display-service`, `device-register-reader` and `display-surface`
+diagnostics. Each individual standard suite passed 1/1, six total with no
+failed tests. Continuous diagnostic capture retained 22,806 raw received bytes
+and thirteen deliberate Ring3 invalid-opcode faults. A fresh host-issued
+`serialinfo` succeeded after the fault/recovery tests; before/after UART
+reports both showed zero drops/timeouts and no stalled transmitter.
+The operator confirmed readable output and the monitor prompt afterward.
+
+This establishes serial input/output and diagnostic continuity through the
+tested CPU-process faults, copied-RAM reader hang and firmware display-service
+recovery on this setup. Boot output before connection was not captured.
+No native GPU register access, modeset, reset, DMA/interrupt isolation or
+interconnect/GPU-hang recovery was tested. The retained firmware scanout was
+not disrupted. Native recovery and other connections/platforms require their
+own evidence. Local UART detection and readiness output remain observational;
+the recorded serial session does not automatically grant physical GPU access.
+
 ## QEMU
 
 The existing run targets now save one timestamped COM1 log per launch while

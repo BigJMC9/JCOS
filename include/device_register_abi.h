@@ -6,6 +6,9 @@
 /* The physical profile has no constructor in the current implementation.
  * Test resources cannot be promoted or relabelled as physical resources. */
 #define JCOS_REGISTER_PROFILE_POLARIS_DCE112       1U
+/* Immutable copied observation delivered by a trusted kernel producer.
+ * Reads return retained RAM, never live MMIO or hardware authority. */
+#define JCOS_REGISTER_PROFILE_POLARIS_DCE112_OBSERVATION 2U
 #define JCOS_REGISTER_PROFILE_POLARIS_DCE112_TEST  0x80000001U
 /* Finite copied-RAM capture: distinct from both physical and unlimited test. */
 #define JCOS_REGISTER_PROFILE_POLARIS_DCE112_CAPTURE_TEST 0x80000002U

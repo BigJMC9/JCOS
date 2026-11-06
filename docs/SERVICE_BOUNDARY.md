@@ -127,8 +127,9 @@ The older capability-checked `DISPLAY_INFO`/`DISPLAY_PRESENT` and `AUDIO_INFO`/`
 ## Device authority and recovery
 
 A versioned semantic register-read syscall now checks a dedicated READ-only,
-owner-bound resource and exact resource identity. Its implemented provider is a
-kernel-owned diagnostic bank; no physical register resource can be constructed.
+owner-bound resource and exact resource identity. It reads protected RAM,
+including immutable snapshots copied after a separate physical experiment;
+no syscall performs live MMIO and no live per-register resource can be constructed.
 The [Polaris reference](AMD_POLARIS_DISPLAY.md) defines its enforced interface
 and the remaining physical binding requirements.
 
@@ -163,8 +164,11 @@ Tests cover launch/rollback, IPC terminal ordering, capability lifetime, service
 
 The privileged Polaris BAR5 preparation lifecycle can stage four supervisor-only
 RO/NX/UC pages from the exact complete firmware extent while retaining assignment
-lifetime/access pins. It has no userspace constructor, register-load entry point
-or physical reader grant. Failed cleanup retains its ledger; inherited bus
+lifetime/access pins, with a separately guarded fifth page for two location
+fields. It has no userspace constructor or live physical reader grant. The
+default-off monitor experiment uses kernel-only semantic loads with exact holds
+and enabled interrupts, then closes/unmaps before dispatching a copied snapshot
+to Ring3. Normal vendor modesetting policy is not implemented by this controller. Failed cleanup retains its ledger; inherited bus
 mastering sets sticky exposure history and prevents ordinary release.
 See [the Polaris backend](AMD_POLARIS_DISPLAY.md) for preconditions and the
 distinction between page-table preparation and qualified physical access.
@@ -174,13 +178,25 @@ thirty ordered reads before permanent closure, with admission expiry of at
 most two seconds. Values remain copied protected RAM. Expiry does not reap
 resources or cancel hardware transactions; cap references survive owner failure.
 The readiness report is observational and cannot issue authority. Physical
-register safety, independent serial control and physical capture remain
-unqualified; see [finite capture admission](AMD_POLARIS_DISPLAY.md#finite-capture-admission-and-readiness).
+register safety, independent serial control and physical capture remain blocked
+in that report's policy model. Actual experiment evidence is recorded separately;
+the report does not auto-authorize access. See [finite capture admission](AMD_POLARIS_DISPLAY.md#finite-capture-admission-and-readiness).
 
 The prepared Polaris BAR5 binding supports bounded kernel operation holds with
 independent binding/token identities. Cleanup closes new admission before
 waiting for holds and retains leaf mappings plus assignment pins until they
-drain. These holds expose no register-load operation or userspace grant.
+drain. Holds alone authorize no transaction or userspace grant; the privileged
+experiment checks its fixed semantic allowlist, owner and mapped leaf separately.
 Release requires trusted evidence that the retained CPU operation stopped;
 it does not certify hardware completion or DMA quiescence. Readiness reports
 selected-pipe power as unresolved independently of PCI D0.
+
+
+The native/rescue active-output lifecycle is a separate kernel mechanism from
+boot metadata and CPU ownership. A privileged provider can publish only after
+firmware retirement, writer draining and KERNEL lease reclamation, within the
+exact retained-buffer layout. It must supply the hardware validation separately.
+Native direct handoff binds a fresh descriptor generation to the existing lease;
+revocation during handoff prevents commit, and stale generations cannot revoke
+a replacement. Legacy firmware services/presentation cannot use that descriptor.
+There is no public constructor, native GPU write broker or automatic takeover.

@@ -2,11 +2,11 @@
 
 The display service links a userspace register reader and decoder in
 [user/drivers/amd_polaris_display.c](../user/drivers/amd_polaris_display.c).
-Its current integration uses synthetic register fixtures only. The protected
-adapter in user/drivers/amd_polaris_reader.c also executes the real read syscall
-against a kernel-owned bank through a dedicated Ring3 diagnostic process. It does not
-install an MMIO reader, claim a physical GPU, change scanout, or restore native
-output.
+Normal display-service diagnostics use synthetic fixtures. A separate, default-off
+kernel-monitor experiment can sample physical registers on the exact selected
+RX 570 candidate. It closes and unmaps live access before a dedicated Ring3
+process decodes immutable copied values. No native modesetting, reset, connector
+programming or independent native rescue is implemented by this path.
 
 ## Register contract
 
@@ -41,12 +41,19 @@ monitor mode. AMD's [display programming implementation](https://github.com/torv
 programs those separately.
 
 Observations report depth, format, array mode, pitch and restrictions. Only the
-narrow zero-offset, progressive, untranslated, linear 32-bit format subset can
+narrow zero-offset, progressive, untranslated, linear-general or linear-aligned
+32-bit format subset can
 produce a linear byte-span calculation. Unsupported controls, tiling, swapping,
 geometry, reserved bits and address overflow suppress that span. The range
 remains a GPU-space arithmetic result: a zero restriction mask is not a
 validated allocation, CPU mapping, connector identity or permission to reuse
 scanout. Color/LUT/viewport/link validation remains outside this decoder.
+AMD's [DCE array enum](https://github.com/torvalds/linux/blob/adc218676eef25575469234709c2d87185ca223a/drivers/gpu/drm/amd/include/asic_reg/dce/dce_11_2_enum.h#L5107)
+defines linear aligned as array mode 1. That layout permits bank/pipe metadata
+without interpreting the surface as tiled. The accepted aligned subset requires
+256-byte row alignment; privilege, Z, microtile and untranslated-format limits
+remain enforced. A replay of the measured GRPH_CONTROL=0x0A10800A,
+primary=0xF400000000, pitch1024, extent1024x768 yields a 0x300000 byte span.
 
 A physical read broker must independently bind the selected device and
 incarnation, validate the real BAR and power/read preconditions, enforce its
@@ -100,7 +107,11 @@ Both copy a fixed-size bank into protected RAM and install no hardware callback
 or mapping. The distinct physical profile identifier is refused; no flag, userspace request or serial connection can turn
 a test bank into physical authority. This is a working capability/syscall
 mechanism. The separate kernel BAR5 preparation path below does not activate
-this physical profile or attach a read backend.
+this physical syscall profile or attach a live read backend.
+The kernel-only observation constructor uses a separate profile identifier 2,
+copies a completed physical snapshot into RAM and grants exactly thirty ordered
+RAM reads. Test constructors cannot create or relabel that profile. No syscall
+executes MMIO; profile 1 (live per-register access) still has no constructor.
 
 `test device-register-reader` launches `registerprobe.elf` with IPC
 endpoints, then issues the READ-only test resource to that process. The Polaris
@@ -122,8 +133,8 @@ separate implementation and hardware qualification work.
 It accepts the currently observed board candidate 1002:67DF revision EF,
 subsystem 1458:2310, the exact selected GOP PCI provenance, a live exclusive
 assignment and its owner capability. This candidate identity is not a reviewed
-hardware-read or recovery profile. No normal service, syscall or shell command
-calls the preparation constructor.
+hardware-read or recovery profile. Only the explicit opt-in monitor experiment
+described below calls this constructor; normal services and syscalls cannot.
 
 Preparation requires a nonprefetchable 32-bit BAR5 of 256 KiB. It reparses the
 complete 48-byte, single-descriptor firmware resource list and checks both
@@ -131,7 +142,12 @@ saved audits against the decoded result. Inventory-only truncated prefixes and
 multi-descriptor responses cannot authorize this first mapping. The firmware
 query index remains distinct from the physical BAR index. A plan must cover
 all ninety semantic selectors using exactly four 4 KiB pages at BAR offsets
-0x6000, 0x7000, 0x10000 and 0x11000.
+0x6000, 0x7000, 0x10000 and 0x11000. Address-correlation profile 2 can separately
+prepare a fifth RO/NX/UC page at BAR5 offset 0x2000, under the same pins and
+ledger, for exactly MC_VM_FB_LOCATION and HDP_NONSURFACE_BASE. It is not part
+of the four-page pipe plan. Preparation refuses active holds, stale identity,
+aliases, RAM conflicts and changed configuration. Cleanup removes the optional
+leaf before the pipe leaves and retains/poisons inconsistent cleanup state.
 
 The live preparation checks bounded standard PCI configuration, PM capability
 version 1-3, D0 and memory decode before mapping, then checks identity, power,
@@ -168,10 +184,14 @@ cleanup cannot erase it. This observation neither enables DMA nor isolates the
 device. Ordinary release remains refused; quarantine needs an independent
 quiescence/recovery proof before reuse.
 
-This pass supplies no register-load function, physical reader capability,
-driver activation, reset or scanout change. Preparing page tables alone performs
-no CPU MMIO transaction. Mapping staging must not be treated as safe-read
-qualification, DMA containment or native display recovery.
+Preparing page tables alone performs no CPU MMIO transaction. Separate
+kernel-only semantic load entry points require an exact retained hold, live
+owner, active kernel CR3, unchanged RO/NX/UC leaf and enabled interrupts. They
+accept named pipe fields or the two location selectors, never a raw offset.
+A fenced aligned DWORD load executes with interrupts enabled. The experiment
+controller limits ordering and total operations; holds alone grant no access.
+This does not establish general safe-read qualification, DMA containment or
+native display recovery.
 
 `make -f Makefile.msys2 test-polaris-mmio` tests the production planner,
 descriptor decoders, mapping/cleanup lifecycle and VMM page-table code. Hosted
@@ -216,67 +236,85 @@ nor creates a mapping or reader. Missing/duplicate provenance and invalid
 config/power/extent observations stay blocked.
 
 Register-read safety, selected-pipe/display-domain accessibility, independent
-serial control and physical capture evidence are immutable unresolved conditions in this implementation. Even a complete
+serial control and physical capture evidence stay unresolved in this report's
+policy model. Separately retained physical evidence does not automatically
+change its blockers or turn the report into an access grant. Even a complete
 set of successful local observations cannot remove them. A UART responding
 locally does not demonstrate communication with another computer, physical
 serial input, independent recovery control or survival during a GPU failure.
 The report is data, never an authorization token or activation command.
 
-## Proposed first physical operation
+## Explicit physical observation experiment
 
-The operation remains unqualified and unavailable. Its proposed scope is one
-explicit pipe, two ordered samples of the existing fifteen named fields, no
-automatic retry, no writes, and at most thirty DWORD loads. A completed pair
-would be decoded in Ring3 and logged as an observation. Equal samples would
-not prove an atomic snapshot or that this pipe drives DisplayPort/HDMI.
-The software admission deadline is not a timeout for a bus transaction.
+Build with `POLARIS_LIVE_CAPTURE=1` to enable `polaris-capture` in the
+kernel monitor. The default is 0. A build-directory content stamp tracks mode
+changes; invalid values fail. There is no boot-time activation. Unsupported
+targets refuse before assignment or MMIO. The exact selected GOP/board, complete
+BAR5, D0/memory decode, CPU/cache conditions, working UART, enabled preemption
+and exclusive kernel framebuffer lease must match the fixed 1024x768 profile.
+Independent serial control is a separate operator-established prerequisite.
 
-| Semantic fields | Proposed observation | Physical review still required |
-| --- | --- | --- |
-| CRTC control, blank, interlace | Pipe state | Read side effects and powered/reset-state preconditions |
-| Graphics enable, control, swap | Surface layout controls | Safe access and reserved/unsupported states |
-| Primary surface low/high | GPU-space address observation | Split-read consistency and applicable translation state |
-| Pitch, offsets, start/end coordinates | Surface geometry | Safe access and geometry interpretation |
+The controller queries only the six CRTC_CONTROL fields first, following the
+inspected DCE enabled-state discovery pattern. Exactly one pipe must be both
+requested and currently running, with read requests enabled. Other state is
+refused. It samples fifteen fields twice on that pipe. Profile 2 also reads
+MC_VM_FB_LOCATION (byte0x2024) and HDP_NONSURFACE_BASE (byte0x2C04) before and
+after those samples: at most forty DWORD loads, no retry, once per boot after
+preflight. Each transaction is journaled before the load. A two-second admission
+limit cannot interrupt or cancel a stalled device/interconnect transaction.
 
-AMD's pinned [DCE11.2 definitions](https://github.com/torvalds/linux/blob/v6.12/drivers/gpu/drm/amd/include/asic_reg/dce/dce_11_2_d.h)
-supply register locations. The
-[legacy display implementation](https://github.com/torvalds/linux/blob/v6.12/drivers/gpu/drm/amd/amdgpu/dce_v11_0.c)
-contains CRTC-control reads; its use is evidence about that driver, not proof
-for firmware-inherited access here. AMD's
-[memory-input implementation](https://github.com/torvalds/linux/blob/v6.12/drivers/gpu/drm/amd/display/dc/dce/dce_mem_input.c)
-illustrates separate geometry/address programming. No vendor implementation
-or firmware binary is imported by this slice, and these sources do not
-establish a safe-read qualification for the selected board.
+The experiment assumes operational accessible hardware, unchanged inherited
+scanout and no firmware, hotplug, power or reset transition during the capture.
+Requested/current CRTC state is a limited witness, not general display-domain
+power proof. Equal samples do not establish atomicity or connector identity.
+No PCI/GPU writes, BAR sizing, ROM execution, new interrupts or DMA grants occur.
 
-An eventual physical provider must retain the exact binding while operations
-are in flight, revalidate its selected profile/state and use an appropriate
-device-access/ordering primitive. The current short IRQ-masked RAM read path
-must not simply be replaced with potentially stalling MMIO. Software admission
-and preemption do not make an interconnect stall interruptible.
-No scanout-address programming, GPU translation, command submission, power/
-reset control, interrupts, ROM, BAR sizing, modeset or framebuffer retirement
-is part of this proposed first capture.
+All live mappings close and drain before an immutable snapshot is copied to
+the READ-only observation resource for Ring3 decoding. The scalar protocol
+uses the existing four-word IPC transport and incarnation checks. Oversized
+pipe selectors refuse before narrowing; metadata queries bind the resource ID.
+The reader and decoder process drain afterward. Inherited bus-master exposure
+keeps the parent assignment quarantined; CPU cleanup never asserts GPU reset,
+DMA quiescence or safe reassignment.
 
-`make -f Makefile.msys2 test-polaris-read-profile` checks actual policy/evaluator
-code, every expiry boundary, all six pipe sequences, tick wrap and clock/selector
-refusals. A second hosted fixture runs the production probe and report with
-simulated selected/other PCI functions, PM states and CPU/UART/scanout facts.
-It links no assignment, MMIO mapping/load or PCI-write operations.
+`kernel/polaris_vram.c` independently checks the fixed measured layout and
+the unchanged MC/HDP pair against verified current BAR0/GOP provenance. Its
+conservative correlation requires HDP base equal to MC VRAM start and the
+observed GPU primary equal to that base plus the GOP's offset within BAR0.
+CPU aperture, GPU VRAM and surface spans must all contain the existing GOP
+allocation without overflow. Different translations/layouts refuse. This
+observes the existing firmware allocation; it neither reserves other VRAM nor
+grants new access. The mapping hypothesis follows AMD's
+[GMC implementation](https://github.com/torvalds/linux/blob/adc218676eef25575469234709c2d87185ca223a/drivers/gpu/drm/amd/amdgpu/gmc_v8_0.c#L405).
+HDP has definition/initialization-write evidence in that source, rather than
+a general read-side-effect guarantee. Physical profile 2 has now completed on the target: forty journaled loads,
+MC_VM_FB_LOCATION=0xF5FFF400 and HDP_NONSURFACE_BASE=0xF4000000 unchanged
+before/after, and the independently checked CPU0x50000000/GPU0xF400000000
+correlation for the existing0x300000-byte allocation. Ring3 reports no decoder
+restrictions. The programmed MC extent is not a measurement of physical VRAM
+capacity. Post-capture serial commands and firmware-service recovery completed;
+the operator confirmed readable monitor output. This remains a finite
+inherited-scanout observation, without native register programming or rescue.
 
-`test polaris-read-profile` runs the deterministic models in JA OS.
-`test device-register-reader` now also checks actual Ring3 finite capture,
-factory bounds, completion/no rearm, wrong-order and all-ones closure. A probe
-spins after its first read while an independent Ring3 console service completes
-new work; the kernel checks deadline refusal, retained references, bounded
-forced stop and restored object/page baselines. A fresh probe faults after a
-partial finite capture. These are software containment tests with copied RAM,
-not physical GPU-hang or native-rescue qualification.
+The first physical experiment (profile 1, thirty-six loads) completed over
+independent serial control on the selected RX 570 with unchanged firmware
+scanout. Pipe0 alone was running; both samples matched and reported primary
+GPU address0xF400000000, pitch1024 and extent1024x768. A post-capture firmware
+service fault/restart passed and the operator confirmed readable monitor output.
+This establishes that finite read observation on that boot. It does not
+qualify native modesetting, reset, native-driver failure recovery or HDMI.
+
+Host checks cover the production controller's success and 72 failure/refusal
+boundaries, optional-page rollback/poison retention, exact location selectors,
+address arithmetic/changed samples and decoder replay. Ordinary JA OS tests
+continue to use RAM; QEMU cannot emulate a qualifying Polaris target and must
+refuse the physical command before any load.
 
 ## Source review and operation retention
 
 The source-review result is **layout/field agreement established; physical
 read qualification remains open**. The machine-readable
-[review contract](POLARIS_REGISTER_REVIEW.json) pins thirteen complete reference
+[review contract](POLARIS_REGISTER_REVIEW.json) pins nineteen complete reference
 files to Linux commit `adc218676eef25575469234709c2d87185ca223a` (v6.12)
 and SHA-256 values. Vendor files remain a separate ignored build cache with
 their original notices; no vendor implementation or firmware is linked into
@@ -284,7 +322,7 @@ JA OS.
 
 The offline audit compiles the production register helper and named decoder
 masks. It compares all ninety byte offsets, fifteen semantic selector values,
-twenty-two masks/shifts and the four-page footprint against the pinned AMD
+thirty-six field/enum/location facts and the four-page pipe footprint against the pinned AMD
 definitions. It refuses changed source bytes, wrong offsets/selectors/masks
 and duplicate probe rows. This checks source facts, not access types or
 hardware behavior.
@@ -333,7 +371,7 @@ allowed read set.
 Readiness report version 2 retains a separate unresolved pipe-power condition
 and explicitly prints that limitation. The syscall request remains version 1.
 The new field names in `include/amd_polaris_registers.h` replace decoder magic
-numbers with the audited facts while preserving the existing decoding policy.
+numbers with the audited facts and the linear-aligned observation policy is checked separately.
 
 Kernel operation holds close a separate lifetime gap. Acquisition requires a
 prepared binding, its exact identity, current live owner, ASSIGNED parent and
@@ -354,8 +392,8 @@ No normal process or syscall can create these holds.
 The host binding fixture checks retention through attempted cleanup, permanent
 closure, owner death/quarantine, stale binding/token identities, copied tokens,
 duplicate acquisition, capacity exhaustion and complete draining. No mapped
-MMIO leaf is accessed. These are mechanisms for a future qualified provider;
-the provider and its supervisor wiring remain unavailable.
+MMIO leaf is accessed by these host tests. The physical experiment is separate
+from a general userspace provider or normal supervisor policy.
 
 With the exact files from the review contract cached locally:
 
@@ -367,5 +405,24 @@ make -f Makefile.msys2 test-polaris-mmio test-polaris-read-profile test-amd-pola
 The audit downloads nothing and fails if a cached source hash differs.
 It writes its compiled facts and detailed JSON report under the chosen BUILD
 directory. Completing this audit does not remove physical qualification
-blockers or activate the GPU. The existing firmware image can remain the
-hardware baseline while serial input/output is established.
+blockers or activate the GPU. Keep image identity, raw serial bytes, counters,
+post-capture commands and visual output confirmation with each physical run.
+
+
+## Native output handoff mechanism
+
+The [graphics recovery contract](GRAPHICS_RECOVERY.md#active-nativerescue-descriptor-lifecycle)
+now separates immutable boot metadata from a privileged native/rescue active
+descriptor. Publication requires retired firmware fallback, drained kernel
+writers and the existing KERNEL lease; the first storage profile preserves
+the exact retained aperture, format and geometry. Every publication has a new
+identity; revocation closes drawing admission, retains quarantine metadata and
+prevents a stale identity from affecting a replacement. Native direct handoff
+checks that same generation at prepare and commit. Firmware services and
+legacy presentation stay blocked.
+
+These mechanisms do not program the RX570, establish hardware readiness or
+start a rescue backend. The future constrained physical provider must prove
+operational output before publication and remove failed Ring3 mappings before
+replacement. Host fixtures supply simulated descriptors only; no automatic
+diagnostic labels the live GPU output native or rescue.

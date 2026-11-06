@@ -3,6 +3,7 @@
 #include "display_probe.h"
 #include "pci_assignment.h"
 #include "vmm.h"
+#include "amd_polaris_registers.h"
 
 #define POLARIS_MMIO_PAGE_COUNT 4U
 #define POLARIS_MMIO_BINDING_CAPACITY 4U
@@ -32,6 +33,7 @@ typedef struct {
     PolarisMmioPlan plan;
     u32 mapped_pages;
     u32 active_holds;
+    bool location_mapped;
     bool child_pinned;
     bool access_pinned;
     bool prepared;
@@ -57,6 +59,24 @@ bool polaris_mmio_hold_acquire(PolarisMmioHold *hold, PolarisMmioBinding *bindin
     u64 expected_binding_identity, Process *owner, u64 *out_identity);
 bool polaris_mmio_hold_release(PolarisMmioHold *hold, u64 expected_hold_identity);
 u32 polaris_mmio_hold_count(void);
+/* Kernel-only bring-up semantic load under an exact retained hold. Requires
+ * active kernel CR3 and enabled interrupts; no raw offset or user mapping.
+ * The experiment controller owns pipe selection/state and total read budget. */
+bool polaris_mmio_read_held(PolarisMmioHold *hold, u64 expected_hold_identity,
+    Process *owner, u32 pipe, PolarisDisplayRegister field, u32 *out);
+
+/* Optional fifth RO/NX/UC page, for the two fixed GMC/HDP location fields.
+ * Separate from the four-page pipe plan. No hold may exist during preparation. */
+typedef enum {
+    POLARIS_LOCATION_MC_FB = 0,
+    POLARIS_LOCATION_HDP_BASE,
+    POLARIS_LOCATION_COUNT
+} PolarisLocationRegister;
+bool polaris_mmio_prepare_location(PolarisMmioBinding *binding, const BootInfo *boot,
+    Process *owner, u64 expected_binding_identity);
+bool polaris_mmio_read_location_held(PolarisMmioHold *hold, u64 expected_hold_identity,
+    Process *owner, PolarisLocationRegister field, u32 *out);
+
 /* Permanent admission closure; safe without active kernel CR3. Cleanup also
  * closes admission before attempting teardown and refuses while holds remain. */
 bool polaris_mmio_close(PolarisMmioBinding *binding);

@@ -142,12 +142,36 @@ int main(void) {
         CHECK(polaris_display_decode(&r.fixture, &o));
         CHECK((o.restrictions & unsupported[i].restriction) && !o.linear_span_bytes);
     }
-    for (unsigned layout = 1; layout < 16; ++layout) {
+    for (unsigned layout = 2; layout < 16; ++layout) {
         setup(&r, 0);
         r.fixture.values[POLARIS_REG_GRPH_CONTROL] |= layout << 20;
         CHECK(polaris_display_decode(&r.fixture, &o));
         CHECK((o.restrictions & POLARIS_OBSERVATION_TILED) && !o.linear_span_bytes);
     }
+    /* Exact first physical RX570 observation, replayed without device access.
+     * GPU F400000000 remains distinct from CPU aperture 50000000. */
+    setup(&r, 0);
+    r.fixture.values[POLARIS_REG_CRTC_CONTROL] = 0x80410311U;
+    r.fixture.values[POLARIS_REG_GRPH_CONTROL] = 0x0A10800AU;
+    r.fixture.values[POLARIS_REG_PRIMARY_HIGH] = 0xF4U;
+    r.fixture.values[POLARIS_REG_PRIMARY_LOW] = 0;
+    CHECK(polaris_display_decode(&r.fixture, &o) && !o.restrictions &&
+        o.array_mode == POLARIS_ARRAY_LINEAR_ALIGNED && o.linear_span_bytes == 0x300000ULL &&
+        o.surface_gpu_address == 0xF400000000ULL);
+    r.fixture.values[POLARIS_REG_PITCH] = 1087;
+    CHECK(polaris_display_decode(&r.fixture, &o) &&
+        (o.restrictions & POLARIS_OBSERVATION_GEOMETRY) && !o.linear_span_bytes);
+    r.fixture.values[POLARIS_REG_PITCH] = 1088;
+    CHECK(polaris_display_decode(&r.fixture, &o) && !o.restrictions);
+    const unsigned forbidden_aligned[] = {0x10U, 0x20000U, 0x20000000U, 0x40000000U};
+    for (unsigned i=0; i<sizeof(forbidden_aligned)/sizeof(forbidden_aligned[0]); ++i) {
+        r.fixture.values[POLARIS_REG_GRPH_CONTROL] = 0x0A10800AU | forbidden_aligned[i];
+        CHECK(polaris_display_decode(&r.fixture, &o) &&
+            (o.restrictions & POLARIS_OBSERVATION_CONTROL) && !o.linear_span_bytes);
+    }
+    r.fixture.values[POLARIS_REG_GRPH_CONTROL] = 0x0A11800AU;
+    CHECK(polaris_display_decode(&r.fixture, &o) &&
+        (o.restrictions & POLARIS_OBSERVATION_TRANSLATED) && !o.linear_span_bytes);
     for (unsigned format = 1; format < 8; ++format) {
         setup(&r, 0);
         r.fixture.values[POLARIS_REG_GRPH_CONTROL] |= format << 8;

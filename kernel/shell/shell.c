@@ -7,6 +7,7 @@
 #include "pci.h"
 #include "display_probe.h"
 #include "polaris_read_profile.h"
+#include "polaris_live_capture.h"
 #include "pmm.h"
 #include "vmm.h"
 #include "address_space.h"
@@ -5678,6 +5679,8 @@ static void command_display_firmware(void) {
     display_probe_firmware_print(g_boot);
 }
 
+static void command_polaris_capture(void) { polaris_live_capture_run(g_boot); }
+
 static void command_display_readiness(void) {
     polaris_read_profile_print(g_boot);
 }
@@ -6608,6 +6611,8 @@ static void shell_registry_init(void) {
     shell_add_command("power", "power", "show shutdown/reboot readiness", SHELL_GROUP_SYSTEM, command_power, 0, true);
     shell_add_command("acpi", "acpi", "show ACPI discovery results", SHELL_GROUP_HARDWARE, command_acpi, 0, true);
     shell_add_command("pci", "pci", "list discovered PCI devices", SHELL_GROUP_HARDWARE, command_pci, 0, true);
+    shell_add_command("polaris-capture", "polaris-capture", "explicit RX 570 read experiment; separate build profile",
+        SHELL_GROUP_HARDWARE, command_polaris_capture, 0, true);
     shell_add_command("display-readiness", "display-readiness", "RX 570 read qualification blockers; no GPU access",
         SHELL_GROUP_HARDWARE, command_display_readiness, 0, true);
     shell_add_command("displayprobe", "displayprobe", "read-only display PCI/GOP inventory; no native takeover",

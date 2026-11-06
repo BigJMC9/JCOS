@@ -18,7 +18,8 @@ static bool valid_locked(const DeviceRegisterReader *r) {
     /* Membership precedes dereference, including objects obtained from a cap. */
     return r && object_storage_find(g_readers, DEVICE_REGISTER_READER_CAPACITY, r) <
         DEVICE_REGISTER_READER_CAPACITY && r->initialized && r->owner_process_id &&
-        (r->profile == JCOS_REGISTER_PROFILE_POLARIS_DCE112_TEST ||
+        (r->profile == JCOS_REGISTER_PROFILE_POLARIS_DCE112_OBSERVATION ||
+         r->profile == JCOS_REGISTER_PROFILE_POLARIS_DCE112_TEST ||
          r->profile == JCOS_REGISTER_PROFILE_POLARIS_DCE112_CAPTURE_TEST) &&
         device_resource_valid(&r->resource) && r->resource.kind == DEVICE_RESOURCE_REGISTER_READER;
 }
@@ -45,7 +46,8 @@ static bool create_bank(DeviceRegisterReader *r, Process *owner,
     if (!out) return false;
     *out = CAPABILITY_INVALID_HANDLE;
     if (!r || !values || count != DEVICE_REGISTER_TEST_VALUES ||
-        (profile != JCOS_REGISTER_PROFILE_POLARIS_DCE112_TEST &&
+        (profile != JCOS_REGISTER_PROFILE_POLARIS_DCE112_OBSERVATION &&
+         profile != JCOS_REGISTER_PROFILE_POLARIS_DCE112_TEST &&
          profile != JCOS_REGISTER_PROFILE_POLARIS_DCE112_CAPTURE_TEST)) return false;
     u64 flags = irq_save();
     bool created = false;
@@ -98,6 +100,23 @@ bool device_register_reader_create_test_capture(DeviceRegisterReader *r, Process
     irq_restore(flags);
     return created;
 }
+bool device_register_reader_create_observation(DeviceRegisterReader *r, Process *owner,
+    u32 pipe, const u32 *values, u64 duration, CapabilityHandle *out) {
+    if (out) *out = CAPABILITY_INVALID_HANDLE;
+    if (!values || pipe >= POLARIS_DISPLAY_PIPE_COUNT) return false;
+    u32 bank[DEVICE_REGISTER_TEST_VALUES];
+    k_memset(bank, 0, sizeof(bank));
+    k_memcpy(bank + pipe * POLARIS_DISPLAY_REGISTER_COUNT, values,
+        POLARIS_DISPLAY_REGISTER_COUNT * sizeof(u32));
+    u64 flags = irq_save();
+    PolarisCaptureBudget budget;
+    bool valid = timer_initialized() && polaris_capture_budget_init(&budget, pipe,
+        timer_frequency(), timer_ticks(), duration);
+    bool created = valid && create_bank(r, owner, JCOS_REGISTER_PROFILE_POLARIS_DCE112_OBSERVATION,
+        bank, DEVICE_REGISTER_TEST_VALUES, &budget, out);
+    irq_restore(flags);
+    return created;
+}
 bool device_register_reader_revoke(DeviceRegisterReader *r) {
     u64 flags = irq_save();
     bool revoked = valid_locked(r);
@@ -140,14 +159,15 @@ bool device_register_reader_read(Process *owner, CapabilityHandle handle,
     DeviceRegisterReader *r = (DeviceRegisterReader *)object;
     if (!valid_locked(r) || r->revoked || r->owner_process_id != owner->id ||
         r->resource.id != expected_identity) goto done;
-    bool finite = r->profile == JCOS_REGISTER_PROFILE_POLARIS_DCE112_CAPTURE_TEST;
+    bool finite = r->profile == JCOS_REGISTER_PROFILE_POLARIS_DCE112_CAPTURE_TEST ||
+        r->profile == JCOS_REGISTER_PROFILE_POLARIS_DCE112_OBSERVATION;
     if (finite && (!timer_initialized() || !polaris_capture_budget_admit(&r->capture,
             pipe, field, timer_frequency(), timer_ticks()))) {
         r->revoked = true;
         polaris_capture_budget_close(&r->capture);
         goto done;
     }
-    /* Both constructible profiles still read protected copied RAM only.
+    /* All constructible profiles read protected copied RAM only.
      * Admission bounds future operations; it does not qualify MMIO access. */
     u32 value = r->values[pipe * POLARIS_DISPLAY_REGISTER_COUNT + field];
     if (finite && value == ~0U) {

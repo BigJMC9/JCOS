@@ -43,6 +43,8 @@ void jcos_main(const JcosProgramStartup *startup) {
         startup->flags || startup->environment_count || startup->capability_count != 2U ||
         startup->argument_count != 1U || !startup->arguments[0] ||
         !startup->capabilities[0] || !startup->capabilities[1]) jcos_thread_exit();
+    PolarisDisplayObservation retained_observation;
+    JcosU64 retained_identity = 0;
     for (;;) {
         JcosIpcMessage request;
         clear_message(&request);
@@ -55,6 +57,34 @@ void jcos_main(const JcosProgramStartup *startup) {
         if (request.word_count == 4U && request.words[0] == REGISTER_PROBE_CHECK) {
             reply.words[2] = check_reader(request.words[1], request.words[2],
                 request.words[3], startup->capabilities[0]);
+        } else if (request.word_count == 4U && request.words[0] == REGISTER_PROBE_CAPTURE) {
+            retained_identity = 0;
+            PolarisDisplaySnapshot snapshot;
+            PolarisCaptureResult result = POLARIS_CAPTURE_INVALID;
+            if (request.words[3] < POLARIS_DISPLAY_PIPE_COUNT)
+                result = polaris_display_capture_protected(request.words[1], request.words[2],
+                    (JcosU32)request.words[3], 0x40000ULL, &snapshot);
+            int decoded = result == POLARIS_CAPTURE_OK && polaris_display_decode(&snapshot, &retained_observation);
+            reply.words[2] = (JcosU64)result;
+            if (decoded) {
+                retained_identity = request.words[2];
+                reply.words[2] |= REGISTER_PROBE_CAPTURE_DECODED | ((JcosU64)retained_observation.restrictions << 32);
+                reply.words[3] = retained_observation.surface_gpu_address;
+            }
+        } else if (request.word_count == 4U && request.words[0] == REGISTER_PROBE_OBSERVATION) {
+            if (retained_identity && request.words[1] == retained_identity &&
+                request.words[2] < 4U && !request.words[3]) {
+                reply.words[2] = request.words[2] + 1ULL;
+                switch (request.words[2]) {
+                case 0: reply.words[3] = retained_observation.linear_span_bytes; break;
+                case 1: reply.words[3] = ((JcosU64)retained_observation.surface_width << 32) |
+                    retained_observation.surface_height; break;
+                case 2: reply.words[3] = retained_observation.pitch_pixels; break;
+                case 3: reply.words[3] = retained_observation.depth |
+                    ((JcosU64)retained_observation.format << 8) |
+                    ((JcosU64)retained_observation.array_mode << 16); break;
+                }
+            }
         } else if (request.word_count == 4U && request.words[0] == REGISTER_PROBE_READ) {
             JcosU32 value = ~0U;
             reply.words[2] = jcos_device_register_read(request.words[1], request.words[2],

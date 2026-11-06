@@ -220,6 +220,47 @@ void device_register_reader_test_run(void) {
     if (!remove_reader(owner)) goto fail;
     fixture(values);
     u64 duration = (u64)timer_frequency() * POLARIS_CAPTURE_MAX_SECONDS;
+    /* Exercise the observation transport and actual Ring3 decoder with a
+     * model vector. This does not fabricate physical capture evidence. */
+    rejected = ~0ULL;
+    bool observation_bounds = !device_register_reader_create_observation(&g_reader, owner, 6U,
+        values, duration, &rejected) && !rejected &&
+        !device_register_reader_create_observation(&g_reader, owner, 3U, values, 0, &rejected) &&
+        !rejected && !device_register_reader_create_test_bank(&g_reader, owner,
+            JCOS_REGISTER_PROFILE_POLARIS_DCE112_OBSERVATION, values, DEVICE_REGISTER_TEST_VALUES, &rejected) &&
+        !rejected;
+    report("OBSERVATION FACTORY / BOUNDS / TEST PROFILE RELABEL REFUSED", observation_bounds);
+    if (!observation_bounds || !device_register_reader_create_observation(&g_reader, owner, 3U,
+            values + 3U * POLARIS_DISPLAY_REGISTER_COUNT, duration, &g_cap)) goto fail;
+    values[3U * POLARIS_DISPLAY_REGISTER_COUNT + POLARIS_REG_PITCH] = 7U;
+    IpcMessage observation_request;
+    k_memset(&observation_request, 0, sizeof(observation_request));
+    observation_request.word_count = 4U;
+    observation_request.words[0] = REGISTER_PROBE_CAPTURE;
+    observation_request.words[1] = g_cap;
+    observation_request.words[2] = g_reader.resource.id;
+    observation_request.words[3] = (1ULL << 32) | 3ULL;
+    bool selector = managed_service_call(&g_probe, &connection, &observation_request, &reply) &&
+        reply.word_count == 4U && reply.words[0] == REGISTER_PROBE_REPLY &&
+        reply.words[1] == connection.incarnation && reply.words[2] == 1ULL &&
+        !g_reader.successful_reads && !g_reader.revoked;
+    report("OBSERVATION CAPTURE / OVERSIZED PIPE REFUSED WITHOUT READ", selector);
+    if (!selector) goto fail;
+    observation_request.words[3] = 3U;
+    bool observation = managed_service_call(&g_probe, &connection, &observation_request, &reply) &&
+        reply.word_count == 4U && reply.words[0] == REGISTER_PROBE_REPLY &&
+        reply.words[1] == connection.incarnation && reply.words[2] == REGISTER_PROBE_CAPTURE_DECODED &&
+        reply.words[3] == 0x100200000ULL && g_reader.successful_reads == 30ULL && g_reader.revoked &&
+        request(&connection, REGISTER_PROBE_OBSERVATION, g_reader.resource.id + 1ULL, 0, 0, &reply) &&
+        !reply.words[2] && !reply.words[3];
+    const u64 observation_expected[4] = {0x300000ULL, (1024ULL << 32) | 768ULL, 1024ULL, 2ULL};
+    for (u32 i = 0; observation && i < 4U; ++i)
+        observation = request(&connection, REGISTER_PROBE_OBSERVATION, g_reader.resource.id, i, 0, &reply) &&
+            reply.words[2] == i + 1ULL && reply.words[3] == observation_expected[i];
+
+    report("IMMUTABLE OBSERVATION / RING3 DECODE / THIRTY RAM READS (MODEL)", observation);
+    if (!observation || !remove_reader(owner)) goto fail;
+    fixture(values);
     rejected = ~0ULL;
     bool limits = !device_register_reader_create_test_capture(&g_reader, owner, 3U, values,
         DEVICE_REGISTER_TEST_VALUES, 0ULL, &rejected) && !rejected &&

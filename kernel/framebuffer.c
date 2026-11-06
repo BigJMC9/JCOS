@@ -11,7 +11,11 @@
 #define FRAMEBUFFER_MEMORY_TYPE_MIXED       0xFFFFFFFEU
 #define FRAMEBUFFER_MEMORY_TYPE_UNDESCRIBED 0xFFFFFFFFU
 
-static FramebufferInfo g_framebuffer;
+static FramebufferInfo g_framebuffer; /* Immutable boot descriptor. */
+static FramebufferInfo g_output;
+static FramebufferOutputKind g_output_kind;
+static u64 g_output_identity, g_next_output_identity = 1ULL;
+static bool g_output_valid;
 static bool g_ready; /* Immutable boot metadata remains ready after retirement. */
 static FramebufferScanoutState g_scanout;
 static u32 g_kernel_writers;
@@ -44,7 +48,7 @@ bool framebuffer_firmware_valid(void) {
 
 bool framebuffer_write_begin(void) {
     u64 flags = framebuffer_irq_save();
-    bool allowed = g_scanout == FRAMEBUFFER_SCANOUT_FIRMWARE &&
+    bool allowed = g_output_valid &&
         display_kernel_framebuffer_writable() && g_kernel_writers != ~0U;
     if (allowed) ++g_kernel_writers;
     framebuffer_irq_restore(flags);
@@ -68,8 +72,11 @@ bool framebuffer_writers_idle(void) {
 
 bool framebuffer_firmware_retire(void) {
     u64 flags = framebuffer_irq_save();
-    if (g_scanout == FRAMEBUFFER_SCANOUT_FIRMWARE)
+    if (g_scanout == FRAMEBUFFER_SCANOUT_FIRMWARE) {
         g_scanout = FRAMEBUFFER_SCANOUT_RETIRING;
+        g_output_valid = false;
+        g_output_kind = FRAMEBUFFER_OUTPUT_NONE;
+    }
     if (g_scanout == FRAMEBUFFER_SCANOUT_RETIRING && !g_kernel_writers)
         g_scanout = FRAMEBUFFER_SCANOUT_RETIRED;
     bool drained = g_scanout == FRAMEBUFFER_SCANOUT_RETIRED;
@@ -226,6 +233,9 @@ bool framebuffer_init(const BootInfo *boot) {
     g_framebuffer.reserved_mask = boot->framebuffer_reserved_mask;
     g_ready = true;
     g_scanout = FRAMEBUFFER_SCANOUT_FIRMWARE;
+    g_output = g_framebuffer;
+    g_output_kind = FRAMEBUFFER_OUTPUT_FIRMWARE;
+    g_output_valid = true;
     return true;
 }
 
@@ -237,52 +247,130 @@ bool framebuffer_info(FramebufferInfo *out) {
     return true;
 }
 
+void framebuffer_output_status(FramebufferOutputStatus *out) {
+    if (!out) return;
+    u64 flags = framebuffer_irq_save();
+    out->kind = g_output_kind;
+    out->identity = g_output_identity;
+    out->kernel_writers = g_kernel_writers;
+    out->valid = g_output_valid;
+    framebuffer_irq_restore(flags);
+}
+bool framebuffer_output_valid(void) {
+    u64 flags = framebuffer_irq_save();
+    bool valid = g_output_valid;
+    framebuffer_irq_restore(flags);
+    return valid;
+}
+bool framebuffer_output_matches(u64 identity) {
+    u64 flags = framebuffer_irq_save();
+    bool matches = g_output_valid && g_output_identity == identity;
+    framebuffer_irq_restore(flags);
+    return matches;
+}
+bool framebuffer_output_info(FramebufferInfo *out) {
+    if (!out) return false;
+    k_memset(out, 0, sizeof(*out));
+    u64 flags = framebuffer_irq_save();
+    bool valid = g_output_valid;
+    if (valid) *out = g_output;
+    framebuffer_irq_restore(flags);
+    return valid;
+}
+static bool retained_output_valid(const FramebufferInfo *info) {
+    /* The provider owns the hardware proof. This generic boundary additionally
+     * prevents it from replacing the retained aperture with arbitrary memory.
+     * New allocations/formats need a separate retained-storage contract. */
+    return info && g_ready && g_framebuffer.direct_map_safe &&
+        info->physical_base == g_framebuffer.physical_base && info->size == g_framebuffer.size &&
+        info->mapping_physical_base == g_framebuffer.mapping_physical_base &&
+        info->mapping_size == g_framebuffer.mapping_size && info->page_offset == g_framebuffer.page_offset &&
+        info->memory_type == g_framebuffer.memory_type && info->direct_map_safe &&
+        info->pixel_format == g_framebuffer.pixel_format && info->pixel_format <= 1U &&
+        info->red_mask == g_framebuffer.red_mask && info->green_mask == g_framebuffer.green_mask &&
+        info->blue_mask == g_framebuffer.blue_mask && info->reserved_mask == g_framebuffer.reserved_mask &&
+        info->width == g_framebuffer.width && info->height == g_framebuffer.height &&
+        info->pixels_per_scanline == g_framebuffer.pixels_per_scanline &&
+        info->width && info->height && info->pixels_per_scanline >= info->width &&
+        (u64)info->pixels_per_scanline <= info->size / 4ULL / info->height;
+}
+bool framebuffer_native_install(const FramebufferInfo *info, bool rescue, u64 *out_identity) {
+    if (!out_identity) return false;
+    *out_identity = 0;
+    u64 flags = framebuffer_irq_save();
+    bool installed = false;
+    if (!g_next_output_identity || g_scanout != FRAMEBUFFER_SCANOUT_RETIRED ||
+        g_output_valid || g_kernel_writers || display_direct_state() != DISPLAY_LEASE_KERNEL ||
+        !retained_output_valid(info)) goto done;
+    g_output = *info;
+    g_output_identity = g_next_output_identity++;
+    g_output_kind = rescue ? FRAMEBUFFER_OUTPUT_RESCUE : FRAMEBUFFER_OUTPUT_NATIVE;
+    g_output_valid = true;
+    *out_identity = g_output_identity;
+    installed = true;
+done:
+    framebuffer_irq_restore(flags);
+    return installed;
+}
+bool framebuffer_output_revoke(u64 expected_identity) {
+    if (!expected_identity) return false;
+    u64 flags = framebuffer_irq_save();
+    bool revoked = g_output_identity == expected_identity &&
+        (g_output_kind == FRAMEBUFFER_OUTPUT_NATIVE || g_output_kind == FRAMEBUFFER_OUTPUT_RESCUE ||
+         g_output_kind == FRAMEBUFFER_OUTPUT_QUARANTINED);
+    if (revoked) {
+        g_output_valid = false;
+        g_output_kind = FRAMEBUFFER_OUTPUT_QUARANTINED;
+    }
+    framebuffer_irq_restore(flags);
+    return revoked;
+}
+
 u32 framebuffer_rgb(u8 r, u8 g, u8 b) {
     if (!g_ready) return 0;
-    if (g_framebuffer.pixel_format == 0)
+    if (g_output.pixel_format == 0)
         return (u32)r | ((u32)g << 8) | ((u32)b << 16);
-    if (g_framebuffer.pixel_format == 1)
+    if (g_output.pixel_format == 1)
         return (u32)b | ((u32)g << 8) | ((u32)r << 16);
-    return channel(r, g_framebuffer.red_mask) |
-           channel(g, g_framebuffer.green_mask) |
-           channel(b, g_framebuffer.blue_mask);
+    return channel(r, g_output.red_mask) |
+           channel(g, g_output.green_mask) |
+           channel(b, g_output.blue_mask);
 }
 
 void framebuffer_pixel(u32 x, u32 y, u32 color) {
-    if (!g_ready || x >= g_framebuffer.width || y >= g_framebuffer.height ||
-        !framebuffer_write_begin()) return;
-    volatile u32 *fb = (volatile u32 *)(u64)g_framebuffer.physical_base;
-    fb[(u64)y * g_framebuffer.pixels_per_scanline + x] = color;
+    if (!framebuffer_write_begin()) return;
+    if (x >= g_output.width || y >= g_output.height) { framebuffer_write_end(); return; }
+    volatile u32 *fb = (volatile u32 *)(u64)g_output.physical_base;
+    fb[(u64)y * g_output.pixels_per_scanline + x] = color;
     framebuffer_write_end();
 }
 
 void framebuffer_fill(u32 color) {
     if (!framebuffer_write_begin()) return;
-    u32 *fb = (u32 *)(u64)g_framebuffer.physical_base;
-    u32 pitch = g_framebuffer.pixels_per_scanline;
-    for (u32 y = 0; y < g_framebuffer.height; ++y) {
+    u32 *fb = (u32 *)(u64)g_output.physical_base;
+    u32 pitch = g_output.pixels_per_scanline;
+    for (u32 y = 0; y < g_output.height; ++y) {
         u32 *row = fb + (u64)y * pitch;
         u32 x = 0;
         if (((u64)row & 7ULL) == 0) {
             u64 *wide = (u64 *)(void *)row;
             u64 pair = (u64)color | ((u64)color << 32);
-            for (; x + 1U < g_framebuffer.width; x += 2U) wide[x >> 1] = pair;
+            for (; x + 1U < g_output.width; x += 2U) wide[x >> 1] = pair;
         }
-        for (; x < g_framebuffer.width; ++x) row[x] = color;
+        for (; x < g_output.width; ++x) row[x] = color;
     }
     framebuffer_write_end();
 }
 
 void framebuffer_fill_rect(u32 x, u32 y, u32 width, u32 height, u32 color) {
-    if (!g_ready || !width || !height ||
-        x >= g_framebuffer.width || y >= g_framebuffer.height ||
-        !framebuffer_write_begin()) return;
+    if (!width || !height || !framebuffer_write_begin()) return;
+    if (x >= g_output.width || y >= g_output.height) { framebuffer_write_end(); return; }
     u32 x_end = x + width;
     u32 y_end = y + height;
-    if (x_end < x || x_end > g_framebuffer.width) x_end = g_framebuffer.width;
-    if (y_end < y || y_end > g_framebuffer.height) y_end = g_framebuffer.height;
-    u32 *fb = (u32 *)(u64)g_framebuffer.physical_base;
-    u32 pitch = g_framebuffer.pixels_per_scanline;
+    if (x_end < x || x_end > g_output.width) x_end = g_output.width;
+    if (y_end < y || y_end > g_output.height) y_end = g_output.height;
+    u32 *fb = (u32 *)(u64)g_output.physical_base;
+    u32 pitch = g_output.pixels_per_scanline;
     for (u32 row = y; row < y_end; ++row) {
         u32 *line = fb + (u64)row * pitch + x;
         u32 col = x;
@@ -297,16 +385,12 @@ void framebuffer_fill_rect(u32 x, u32 y, u32 width, u32 height, u32 color) {
 }
 
 void framebuffer_scroll_up(u32 rows, u32 fill_color) {
-    if (!g_ready || rows == 0) return;
-    if (rows >= g_framebuffer.height) {
-        framebuffer_fill(fill_color);
-        return;
-    }
-    if (!framebuffer_write_begin()) return;
-    volatile u32 *fb = (volatile u32 *)(u64)g_framebuffer.physical_base;
-    u32 pitch = g_framebuffer.pixels_per_scanline;
-    u32 height = g_framebuffer.height;
-    u32 width = g_framebuffer.width;
+    if (!rows || !framebuffer_write_begin()) return;
+    if (rows > g_output.height) rows = g_output.height;
+    volatile u32 *fb = (volatile u32 *)(u64)g_output.physical_base;
+    u32 pitch = g_output.pixels_per_scanline;
+    u32 height = g_output.height;
+    u32 width = g_output.width;
     for (u32 y = 0; y < height - rows; ++y)
         for (u32 x = 0; x < width; ++x)
             fb[(u64)y * pitch + x] = fb[(u64)(y + rows) * pitch + x];
@@ -318,12 +402,11 @@ void framebuffer_scroll_up(u32 rows, u32 fill_color) {
 
 void framebuffer_blit_rgb332_row(u32 x, u32 y, u32 width,
     const u8 *source, u32 source_width) {
-    if (!g_ready || !source || !source_width || !width ||
-        x >= g_framebuffer.width || y >= g_framebuffer.height ||
-        !framebuffer_write_begin()) return;
-    if (width > g_framebuffer.width - x) width = g_framebuffer.width - x;
-    volatile u32 *fb = (volatile u32 *)(u64)g_framebuffer.physical_base;
-    volatile u32 *row = fb + (u64)y * g_framebuffer.pixels_per_scanline + x;
+    if (!source || !source_width || !width || !framebuffer_write_begin()) return;
+    if (x >= g_output.width || y >= g_output.height) { framebuffer_write_end(); return; }
+    if (width > g_output.width - x) width = g_output.width - x;
+    volatile u32 *fb = (volatile u32 *)(u64)g_output.physical_base;
+    volatile u32 *row = fb + (u64)y * g_output.pixels_per_scanline + x;
     for (u32 column = 0; column < width; ++column) {
         u32 source_x = (u32)(((u64)column * source_width) / width);
         u8 pixel = source[source_x];
@@ -335,5 +418,5 @@ void framebuffer_blit_rgb332_row(u32 x, u32 y, u32 width,
     framebuffer_write_end();
 }
 
-u32 framebuffer_width(void) { return g_ready ? g_framebuffer.width : 0; }
-u32 framebuffer_height(void) { return g_ready ? g_framebuffer.height : 0; }
+u32 framebuffer_width(void) { return g_ready ? g_output.width : 0; }
+u32 framebuffer_height(void) { return g_ready ? g_output.height : 0; }

@@ -37,6 +37,7 @@ FFMPEG ?= ffmpeg
 READELF ?= llvm-readelf
 OBJDUMP ?= llvm-objdump
 QEMU ?= qemu-system-x86_64
+POLARIS_LIVE_CAPTURE ?= 0
 FRAMEBUFFER_WIDTH ?= 0
 FRAMEBUFFER_HEIGHT ?= 0
 OVMF_CODE ?= /mingw64/share/qemu/edk2-x86_64-code.fd
@@ -574,6 +575,17 @@ $(BUILD)/%.o: %.c $(KERNEL_HEADERS) | $(BUILD)
 	mkdir -p $(dir $@)
 	$(CLANG) $(KERNEL_CFLAGS) $(KERNEL_CPPFLAGS) -c $< -o $@
 
+# Track mode changes even when a build directory is reused.
+.PHONY: polaris-capture-config-force
+polaris-capture-config-force:
+$(BUILD)/polaris-capture-config: polaris-capture-config-force | $(BUILD)
+	@case "$(POLARIS_LIVE_CAPTURE)" in 0|1) ;; *) echo "POLARIS_LIVE_CAPTURE must be 0 or 1" >&2; exit 1 ;; esac
+	@printf '%s\n' "$(POLARIS_LIVE_CAPTURE)" > "$@.tmp"
+	@cmp -s "$@.tmp" "$@" || cp "$@.tmp" "$@"
+	@rm -f "$@.tmp"
+$(BUILD)/kernel/polaris_live_capture.o: $(BUILD)/polaris-capture-config
+$(BUILD)/kernel/polaris_live_capture.o: KERNEL_CPPFLAGS += -DJCOS_POLARIS_LIVE_CAPTURE=$(POLARIS_LIVE_CAPTURE)
+
 $(KERNEL): $(BUILD)/arch.o $(KERNEL_C_OBJECTS) kernel/linker.ld Makefile.msys2
 	$(LD) -m elf_x86_64 -pie -Bsymbolic --no-dynamic-linker --no-undefined -nostdlib \
 	      -T kernel/linker.ld -o $@ $(BUILD)/arch.o $(KERNEL_C_OBJECTS)
@@ -646,3 +658,8 @@ POLARIS_SOURCE_DIR ?= build/rx570-source-review
 .PHONY: audit-polaris-registers
 audit-polaris-registers:
 	$(PYTHON) tools/audit_polaris_registers.py --source-dir $(POLARIS_SOURCE_DIR) --cc $(CLANG) --build-dir $(BUILD)/register-audit --check-refusals
+
+
+.PHONY: test-display-surface-wait
+test-display-surface-wait:
+	$(PYTHON) tools/test_display_surface_wait.py --cc $(CLANG) --build-dir $(BUILD)/host-tests

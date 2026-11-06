@@ -17,6 +17,7 @@ static u64 g_owner_process_id;
 static DisplayLeaseState g_direct_state;
 static u64 g_direct_owner_process_id;
 static bool g_restore_terminal_render;
+static u64 g_direct_output_identity;
 
 static u64 display_irq_save(void) {
     u64 flags;
@@ -53,8 +54,10 @@ bool display_retire_firmware_scanout(void) {
     /* Reclaim first, after the service's borrowed mapping has been removed.
      * A state flag cannot revoke stores through a live Ring3 alias. */
     FramebufferScanoutStatus status;
+    FramebufferOutputStatus output;
     framebuffer_scanout_status(&status);
-    if (g_direct_state != DISPLAY_LEASE_KERNEL ||
+    framebuffer_output_status(&output);
+    if (output.identity || g_direct_state != DISPLAY_LEASE_KERNEL ||
         status.state == FRAMEBUFFER_SCANOUT_UNAVAILABLE) {
         display_irq_restore(flags);
         return false;
@@ -89,19 +92,19 @@ u64 display_direct_owner_process_id(void) {
     return owner;
 }
 
-bool display_direct_prepare(u64 user_virtual_base, ProgramBorrowedMappingSpec *out_mapping, FramebufferInfo *out_info, u64 *out_user_framebuffer) {
+static bool prepare_output(u64 output_identity, u64 user_virtual_base, ProgramBorrowedMappingSpec *out_mapping, FramebufferInfo *out_info, u64 *out_user_framebuffer) {
     if (!out_mapping || !out_info || !out_user_framebuffer) return false;
     k_memset(out_mapping, 0, sizeof(*out_mapping));
     k_memset(out_info, 0, sizeof(*out_info));
     *out_user_framebuffer = 0ULL;
 
-    if (!display_available() ||
+    if (!device_resource_valid(&g_display) || !framebuffer_output_matches(output_identity) ||
         (user_virtual_base & (VM_PAGE_SIZE - 1ULL)) ||
         user_virtual_base < ADDRESS_SPACE_USER_BASE ||
         user_virtual_base >= ADDRESS_SPACE_USER_LIMIT) return false;
 
     FramebufferInfo info;
-    if (!framebuffer_info(&info) || !info.physical_base || !info.size ||
+    if (!framebuffer_output_info(&info) || !info.physical_base || !info.size ||
         !info.direct_map_safe || !info.mapping_physical_base || !info.mapping_size ||
         info.page_offset >= VM_PAGE_SIZE ||
         info.mapping_size > ADDRESS_SPACE_USER_LIMIT - user_virtual_base ||
@@ -115,7 +118,7 @@ bool display_direct_prepare(u64 user_virtual_base, ProgramBorrowedMappingSpec *o
     mapping.flags = VM_WRITE | VM_UNCACHED;
 
     u64 flags = display_irq_save();
-    if (g_direct_state != DISPLAY_LEASE_KERNEL || !framebuffer_firmware_valid() ||
+    if (g_direct_state != DISPLAY_LEASE_KERNEL || !framebuffer_output_matches(output_identity) ||
         !framebuffer_writers_idle()) {
         display_irq_restore(flags);
         return false;
@@ -124,6 +127,7 @@ bool display_direct_prepare(u64 user_virtual_base, ProgramBorrowedMappingSpec *o
     /* HANDOFF blocks the legacy kernel-mediated presenter before the direct
      * mapping can become runnable. Preserve deep-suite quiet rendering state. */
     g_direct_state = DISPLAY_LEASE_HANDOFF;
+    g_direct_output_identity = output_identity;
     g_direct_owner_process_id = 0ULL;
     g_owner_process_id = 0ULL;
     g_restore_terminal_render = terminal_render_enabled();
@@ -136,13 +140,28 @@ bool display_direct_prepare(u64 user_virtual_base, ProgramBorrowedMappingSpec *o
     return true;
 }
 
+bool display_direct_prepare(u64 user_virtual_base, ProgramBorrowedMappingSpec *out_mapping,
+    FramebufferInfo *out_info, u64 *out_user_framebuffer) {
+    return prepare_output(0ULL, user_virtual_base, out_mapping, out_info, out_user_framebuffer);
+}
+bool display_direct_prepare_native(u64 expected_output_identity, u64 user_virtual_base,
+    ProgramBorrowedMappingSpec *out_mapping, FramebufferInfo *out_info, u64 *out_user_framebuffer) {
+    if (!expected_output_identity) {
+        if (out_mapping) k_memset(out_mapping, 0, sizeof(*out_mapping));
+        if (out_info) k_memset(out_info, 0, sizeof(*out_info));
+        if (out_user_framebuffer) *out_user_framebuffer = 0;
+        return false;
+    }
+    return prepare_output(expected_output_identity, user_virtual_base, out_mapping, out_info, out_user_framebuffer);
+}
+
 bool display_direct_commit(Process *process) {
     if (!process || !process_storage_in_use(process) || !process->initialized ||
         process->kernel || !process->id) return false;
 
     u64 flags = display_irq_save();
     bool committed = g_direct_state == DISPLAY_LEASE_HANDOFF &&
-        framebuffer_firmware_valid();
+        framebuffer_output_matches(g_direct_output_identity);
     if (committed) {
         g_direct_owner_process_id = process->id;
         g_direct_state = DISPLAY_LEASE_USER;
@@ -162,6 +181,7 @@ static bool display_direct_restore_kernel(DisplayLeaseState expected, u64 owner_
     }
 
     g_direct_state = DISPLAY_LEASE_RECLAIM;
+    g_direct_output_identity = 0;
     g_direct_owner_process_id = 0ULL;
     g_owner_process_id = 0ULL;
     restore_render = g_restore_terminal_render;
@@ -170,7 +190,7 @@ static bool display_direct_restore_kernel(DisplayLeaseState expected, u64 owner_
 
     /* Keep legacy presentation blocked while the terminal reconstructs its
      * viewport. Serial logging remains independent throughout the handoff. */
-    if (restore_render && framebuffer_firmware_valid()) terminal_set_render_enabled(true);
+    if (restore_render && framebuffer_output_valid()) terminal_set_render_enabled(true);
 
     flags = display_irq_save();
     if (g_direct_state != DISPLAY_LEASE_RECLAIM) {
@@ -200,7 +220,7 @@ static bool display_authorized(Process *process, CapabilityHandle handle) {
 
 bool display_present_user(Process *process, CapabilityHandle handle, u64 pixels,
     u32 width, u32 height) {
-    if (display_direct_state() != DISPLAY_LEASE_KERNEL) return false;
+    if (!framebuffer_firmware_valid() || display_direct_state() != DISPLAY_LEASE_KERNEL) return false;
     if (!display_authorized(process, handle) || !pixels || !width || !height ||
         width > JCOS_MEDIA_MAX_WIDTH || height > JCOS_MEDIA_MAX_HEIGHT) return false;
 

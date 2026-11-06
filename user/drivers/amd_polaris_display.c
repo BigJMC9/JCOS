@@ -68,15 +68,26 @@ int polaris_display_decode(const PolarisDisplaySnapshot *snapshot,
         !(v[POLARIS_REG_GRPH_ENABLE] & POLARIS_GRPH_ENABLE_MASK) ||
         (v[POLARIS_REG_CRTC_BLANK] & (POLARIS_CRTC_CURRENT_BLANK_STATE_MASK | POLARIS_CRTC_BLANK_DATA_EN_MASK)))
         out->restrictions |= POLARIS_OBSERVATION_INACTIVE;
-    /* Bank/pipe/privilege/Z and other unmodelled controls stay unsupported,
-     * even when their effect could be irrelevant to a particular linear mode. */
-    if (control & ~(POLARIS_GRPH_DEPTH_MASK | POLARIS_GRPH_FORMAT_MASK |
-            POLARIS_GRPH_ARRAY_MODE_MASK | POLARIS_GRPH_ADDRESS_TRANSLATION_ENABLE_MASK |
-            POLARIS_GRPH_COLOR_EXPANSION_MODE_MASK))
+    /* DCE11.2 ARRAY_LINEAR_ALIGNED is linear, not a tiled layout. Firmware
+     * retains bank/pipe tiling metadata in this mode; these fields do not enter
+     * the linear byte-offset calculation. Z/privilege/microtile remain refused.
+     * Keep the older linear-general profile's conservative control policy. */
+    JcosU32 allowed = POLARIS_GRPH_DEPTH_MASK | POLARIS_GRPH_FORMAT_MASK |
+        POLARIS_GRPH_ARRAY_MODE_MASK | POLARIS_GRPH_ADDRESS_TRANSLATION_ENABLE_MASK |
+        POLARIS_GRPH_COLOR_EXPANSION_MODE_MASK;
+    if (out->array_mode == POLARIS_ARRAY_LINEAR_ALIGNED)
+        allowed |= POLARIS_GRPH_NUM_BANKS_MASK | POLARIS_GRPH_BANK_WIDTH_MASK |
+            POLARIS_GRPH_BANK_HEIGHT_MASK | POLARIS_GRPH_TILE_SPLIT_MASK |
+            POLARIS_GRPH_MACRO_TILE_ASPECT_MASK | POLARIS_GRPH_PIPE_CONFIG_MASK;
+    if (control & ~allowed)
         out->restrictions |= POLARIS_OBSERVATION_CONTROL;
     if (v[POLARIS_REG_GRPH_ENABLE] & ~(POLARIS_GRPH_ENABLE_MASK | POLARIS_GRPH_KEYER_ALPHA_SEL_MASK))
         out->restrictions |= POLARIS_OBSERVATION_RESERVED;
-    if (out->array_mode) out->restrictions |= POLARIS_OBSERVATION_TILED;
+    if (out->array_mode > POLARIS_ARRAY_LINEAR_ALIGNED)
+        out->restrictions |= POLARIS_OBSERVATION_TILED;
+    /* This profile accepts only a conservative 256-byte row alignment. */
+    if (out->array_mode == POLARIS_ARRAY_LINEAR_ALIGNED && (out->pitch_pixels & 63U))
+        out->restrictions |= POLARIS_OBSERVATION_GEOMETRY;
     if (control & POLARIS_GRPH_ADDRESS_TRANSLATION_ENABLE_MASK) out->restrictions |= POLARIS_OBSERVATION_TRANSLATED;
     if (out->depth != 2U || out->format || v[POLARIS_REG_GRPH_SWAP] ||
         (control & POLARIS_GRPH_COLOR_EXPANSION_MODE_MASK) || (v[POLARIS_REG_GRPH_ENABLE] & POLARIS_GRPH_KEYER_ALPHA_SEL_MASK))

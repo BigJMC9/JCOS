@@ -213,3 +213,42 @@ quarantine. No MMIO leaf is read.
 `display-readiness` version 2 explicitly retains a selected-pipe/display-power
 blocker: observed PCI D0 does not prove the chosen pipe's power/clock state.
 This report change does not alter the version-1 register-read syscall.
+
+
+The default-off `POLARIS_LIVE_CAPTURE=1` build enables a separate monitor
+experiment, `polaris-capture`. It is excluded from automatic tests and boot.
+QEMU must refuse its unsupported target before any load. The host MMIO suite
+also covers the production forty-read controller, 72 failure/refusal cases,
+optional global-page cleanup/poisoning, GMC/HDP/GOP correlation arithmetic and
+replay of the measured linear-aligned snapshot. No host test accesses MMIO.
+
+For a physical run, establish independent serial command/output control first;
+record the exact image and selected profile, raw bytes and last-read journal.
+Capture serial counters and a fresh command after the operation. Confirm new
+readable monitor output separately. The once-per-boot controller retains the
+bus-master-tainted parent quarantine even after CPU mappings and the Ring3
+decoder drain. Do not treat its two-second software admission as a hardware
+transaction timeout or its observation as native output/reset/recovery.
+
+The Ring3 reader test additionally checks immutable observation-profile
+construction, test-profile relabel refusal, oversized selectors without reads,
+thirty RAM reads and four-word metadata queries bound to the reader identity.
+
+
+The framebuffer host suite additionally checks privileged native/rescue output
+publication against simulated framebuffer storage: irrevocable GOP retirement,
+retained-range/cache/format/geometry constraints, monotonic descriptor identities,
+stale generation refusal, revocation during handoff and admitted drawing,
+replacement only after draining and lease reclamation, and refusal of legacy
+firmware presentation on native output. The simulated provider supplies no real
+hardware proof; automatic tests never publish a fictitious native descriptor
+over the running QEMU/physical framebuffer.
+
+
+`make -f Makefile.msys2 test-display-surface-wait` reproduces completion
+between the focused-client diagnostic's queue and thread observations. The
+wait now observes and schedules under the same UP interrupt discipline as the
+supervisor/service waits. Its deterministic cases cover that preemption
+boundary, already-dead and scheduled completion, blocked IPC, timeout, scheduler
+failure and malformed queue/thread state. It does not lengthen deadlines or
+rerun a failed hardware operation.

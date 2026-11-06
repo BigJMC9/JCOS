@@ -33,8 +33,9 @@ Keep these independent as the native backend is added:
 
 The existing DisplayLeaseState represents the first item only. The framebuffer
 now tracks boot scanout as unavailable, firmware-valid, retiring or retired.
-Native/rescue output descriptors and device isolation remain separate future
-work. A native transaction must retire firmware fallback **before granting
+A separate active-output descriptor tracks firmware, native, rescue or
+quarantined output and a monotonic generation. Its publication and revocation
+mechanisms exist; a native hardware provider and device isolation remain open. A native transaction must retire firmware fallback **before granting
 authority capable of disturbing scanout**, including a writable mapping,
 reset/power/translation operation or the first destructive write, even if the
 transaction later fails. Process exit, lease reclamation and timeout cannot
@@ -66,8 +67,10 @@ The admission critical sections preserve local interrupt state; drawing itself
 does not disable interrupts. This synchronization applies to the current UP
 profile and needs replacement before SMP.
 
-framebuffer_info() and geometry accessors continue to describe the immutable
-boot resource after retirement. Their success is not permission to touch it.
+framebuffer_info() continues to describe the immutable boot resource after
+retirement or replacement. framebuffer_output_info() returns only a valid
+active descriptor; geometry helpers describe the most recent output and grant
+no write access. Neither metadata path is a hardware-readiness proof.
 All kernel framebuffer primitives, legacy presentation, direct prepare/commit
 and terminal re-enable honor validity. Reinitializing from saved BootInfo is
 refused after successful initialization. Reservations and device resources
@@ -78,6 +81,43 @@ Normal boot and diagnostic commands do not retire the live framebuffer. The
 retirement entry has no userspace syscall or monitor command; a future qualified
 native-grant transaction must call it before exposing disruptive authority.
 The current image keeps firmware scanout active on the RX 570.
+
+## Active native/rescue descriptor lifecycle
+
+The privileged `framebuffer_native_install()` entry publishes a descriptor
+only after firmware retirement, drained kernel writers and a KERNEL CPU lease.
+Its caller must independently validate actual operational scanout first. The
+constructor performs no hardware operation and accepts no userspace request.
+No normal boot, monitor command or automatic test calls it on a live output.
+
+The first RGB/BGR32 storage profile retains exactly the boot allocation,
+mapping/cache attributes, pixel format/masks, dimensions and stride. It cannot substitute
+arbitrary physical memory, widen the aperture, allocate other VRAM or advertise
+a different mode. A new allocation/layout needs a separate validated storage
+contract. Keeping the same buffer does not make expired GOP callable or
+reactivate firmware fallback.
+
+Each native/rescue publication has a fresh nonzero identity. Revocation
+immediately closes new kernel-writer admission and retains the descriptor and
+generation as quarantined. Existing admitted primitives pin that descriptor
+until completion; replacement refuses outstanding writers. This API does not
+remove Ring3 mappings or establish GPU/DMA quiescence. The provider must stop/
+reap the old owner and remove its mapping before reclaiming the CPU lease.
+
+`display_direct_prepare_native()` checks the expected active generation and
+uses the existing HANDOFF/USER/RECLAIM lease. Commit rechecks that same identity.
+Revocation during handoff prevents commit. A stale revoke cannot affect a fresh
+rescue generation. The firmware display-service constructor and legacy
+DISPLAY_PRESENT capabilities remain firmware-only after native publication.
+Kernel terminal re-enable requires a valid active output; old GOP state remains
+permanently retired.
+
+Host fixtures exercise these production paths using simulated framebuffer RAM,
+including malformed descriptors, early publication, generation mismatch,
+revocation during handoff and active writes, stale replacement requests and
+firmware-capability refusal. They establish lifecycle behavior only, not a
+native modeset or physical rescue. Native/rescue hardware qualification still
+requires the sequence below.
 
 ## Native failure and rescue sequence
 

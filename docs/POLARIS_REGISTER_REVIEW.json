@@ -70,6 +70,36 @@
       "path": "drivers/gpu/drm/amd/display/dc/hwss/dce112/dce112_hwseq.c",
       "file": "dce112_hwseq.c",
       "sha256": "afd4f61b3686352f0f8441815d386435b908de5c8545c6fa7fc0e841290c709d"
+    },
+    {
+      "path": "drivers/gpu/drm/amd/amdgpu/gmc_v8_0.c",
+      "file": "gmc_v8_0.c",
+      "sha256": "51cd840a0d08e980502f572f2327f326a46559e0cd3237442b30684d39197a6a"
+    },
+    {
+      "path": "drivers/gpu/drm/amd/include/asic_reg/dce/dce_11_2_enum.h",
+      "file": "dce_11_2_enum.h",
+      "sha256": "6e42e75d6bb306d580aeafe22f203cb93c6deff76bf6c5d186dd6d84a7686157"
+    },
+    {
+      "path": "drivers/gpu/drm/amd/include/asic_reg/gmc/gmc_8_1_d.h",
+      "file": "gmc_8_1_d.h",
+      "sha256": "aa9fb82a5fcc372b8ecd3d9a5edadf0aa974318554997754187f68b4311da2bf"
+    },
+    {
+      "path": "drivers/gpu/drm/amd/include/asic_reg/gmc/gmc_8_1_sh_mask.h",
+      "file": "gmc_8_1_sh_mask.h",
+      "sha256": "19b550a86634bc3bdaff0dd92738fe5a453048a1b29995fc6b8fca42f5238e2f"
+    },
+    {
+      "path": "drivers/gpu/drm/amd/include/asic_reg/oss/oss_3_0_d.h",
+      "file": "oss_3_0_d.h",
+      "sha256": "4769d032f6c15ddff2277bff0ca430dbaac86d3aed4e2f6ea05c453d166b3c37"
+    },
+    {
+      "path": "drivers/gpu/drm/amd/include/asic_reg/oss/oss_3_0_sh_mask.h",
+      "file": "oss_3_0_sh_mask.h",
+      "sha256": "fb0126a6ebbd4f35d64d12c98bf1a2ba91f41344f893548302dcae6d35db3a7d"
     }
   ],
   "offset_source": "dce_11_2_d.h",
@@ -85,7 +115,21 @@
         "file": "dce110_timing_generator.c",
         "function": "dce110_is_tg_enabled",
         "line": 2103
-      }
+      },
+      "additional_source_access_evidence": [
+        {
+          "kind": "six_control_queries_before_enabled_filter",
+          "file": "dce_v11_0.c",
+          "function": "dce_v11_0_is_display_hung",
+          "line": 435
+        },
+        {
+          "kind": "control_query_before_crtc_disable",
+          "file": "dce_v11_0.c",
+          "function": "dce_v11_0_disable_dce",
+          "line": 512
+        }
+      ]
     },
     {
       "selector": "POLARIS_REG_CRTC_BLANK",
@@ -341,15 +385,85 @@
     {
       "local": "POLARIS_GRPH_Y_END_MASK",
       "upstream": "GRPH_Y_END__GRPH_Y_END_MASK"
+    },
+    {
+      "local": "POLARIS_GRPH_NUM_BANKS_MASK",
+      "upstream": "GRPH_CONTROL__GRPH_NUM_BANKS_MASK"
+    },
+    {
+      "local": "POLARIS_GRPH_BANK_WIDTH_MASK",
+      "upstream": "GRPH_CONTROL__GRPH_BANK_WIDTH_MASK"
+    },
+    {
+      "local": "POLARIS_GRPH_BANK_HEIGHT_MASK",
+      "upstream": "GRPH_CONTROL__GRPH_BANK_HEIGHT_MASK"
+    },
+    {
+      "local": "POLARIS_GRPH_TILE_SPLIT_MASK",
+      "upstream": "GRPH_CONTROL__GRPH_TILE_SPLIT_MASK"
+    },
+    {
+      "local": "POLARIS_GRPH_MACRO_TILE_ASPECT_MASK",
+      "upstream": "GRPH_CONTROL__GRPH_MACRO_TILE_ASPECT_MASK"
+    },
+    {
+      "local": "POLARIS_GRPH_PIPE_CONFIG_MASK",
+      "upstream": "GRPH_CONTROL__GRPH_PIPE_CONFIG_MASK"
+    },
+    {
+      "local": "POLARIS_ARRAY_LINEAR_GENERAL",
+      "upstream": "ARRAY_LINEAR_GENERAL",
+      "source": "dce_11_2_enum.h",
+      "scale": 1
+    },
+    {
+      "local": "POLARIS_ARRAY_LINEAR_ALIGNED",
+      "upstream": "ARRAY_LINEAR_ALIGNED",
+      "source": "dce_11_2_enum.h",
+      "scale": 1
+    },
+    {
+      "local": "POLARIS_MC_VM_FB_LOCATION_BYTE",
+      "upstream": "mmMC_VM_FB_LOCATION",
+      "source": "gmc_8_1_d.h",
+      "scale": 4
+    },
+    {
+      "local": "POLARIS_HDP_NONSURFACE_BASE_BYTE",
+      "upstream": "mmHDP_NONSURFACE_BASE",
+      "source": "oss_3_0_d.h",
+      "scale": 4
+    },
+    {
+      "local": "POLARIS_MC_FB_BASE_MASK",
+      "upstream": "MC_VM_FB_LOCATION__FB_BASE_MASK",
+      "source": "gmc_8_1_sh_mask.h",
+      "scale": 1
+    },
+    {
+      "local": "POLARIS_MC_FB_TOP_MASK",
+      "upstream": "MC_VM_FB_LOCATION__FB_TOP_MASK",
+      "source": "gmc_8_1_sh_mask.h",
+      "scale": 1
+    },
+    {
+      "local": "POLARIS_MC_FB_TOP_SHIFT",
+      "upstream": "MC_VM_FB_LOCATION__FB_TOP__SHIFT",
+      "source": "gmc_8_1_sh_mask.h",
+      "scale": 1
+    },
+    {
+      "local": "POLARIS_HDP_NONSURFACE_BASE_MASK",
+      "upstream": "HDP_NONSURFACE_BASE__NONSURF_BASE_MASK",
+      "source": "oss_3_0_sh_mask.h",
+      "scale": 1
     }
   ],
   "scope": "Source layout/field audit only; does not grant or qualify physical GPU access",
   "unresolved": [
-    "per-register hardware read-side-effect contract",
-    "selected pipe/display power-domain accessibility",
-    "firmware power/clock/reset transition exclusion",
-    "physical serial input/output/control",
-    "physical first-capture evidence"
+    "general per-register hardware read-side-effect contract outside the provisional inherited-scanout experiment",
+    "general selected-pipe display power/clock accessibility and firmware transition exclusion",
+    "physical serial continuity during native GPU/interconnect failure"
   ],
   "review_findings": [
     "Five fields have explicit reads, read-modify-write calls, or post-write readback examples in the reviewed source set; this does not certify read side effects in JA OS firmware state.",
@@ -357,6 +471,64 @@
     "DCE11.2 hardware sequencing includes controller-specific display power gating; PCI D0 does not establish the chosen display-pipe power/clock state.",
     "Primary-surface low writes trigger an update in the reviewed page-flip path; no write to the capture fields is permitted.",
     "Do not blindly probe all six pipes or infer the active pipe from GOP address/geometry.",
-    "BAR5 operation retention requires stable binding/token identities, permanent close-before-drain, and retained mapping/assignment pins until all CPU holds return."
-  ]
+    "BAR5 operation retention requires stable binding/token identities, permanent close-before-drain, and retained mapping/assignment pins until all CPU holds return.",
+    "The explicit read-only bring-up experiment narrows discovery to six CRTC_CONTROL queries, as inspected in dce_v11_0_is_display_hung; only a uniquely requested-and-current running pipe may supply the thirty-field capture. Its firmware-state assumptions remain provisional until hardware evidence.",
+    "ARRAY_LINEAR_ALIGNED=1 is a linear layout. The first physical profile1 sample reported GRPH_CONTROL=0x0a10800a, GPU primary=0xf400000000, pitch1024 and extent1024x768; its raw evidence is retained separately. Bank/pipe metadata does not enter the linear offset calculation; this is no permission to reuse VRAM."
+  ],
+  "bringup_experiment": {
+    "profile": 2,
+    "build_flag": "POLARIS_LIVE_CAPTURE=1",
+    "default_enabled": false,
+    "entry": "polaris-capture kernel-monitor command; no boot activation",
+    "candidate": "selected GOP /1002:67df rev ef/subsystem1458:2310; known1024x768,stride1024,format1",
+    "sequence": "six CRTC_CONTROL queries; exactly one requested-and-current running pipe; MC_VM_FB_LOCATION and HDP_NONSURFACE_BASE before and after fifteen semantic pipe fields sampled twice",
+    "maximum_loads": 40,
+    "maximum_software_admission_seconds": 2,
+    "retry": "none; one attempt per boot after local preflight",
+    "read_primitive": "one aligned supervisor UC DWORD load with fences, interrupts enabled, exact retained hold and leaf checks",
+    "data_handoff": "close/unmap BAR5 first, then immutable copied observation profile2; INT80 readers remain RAM-only; four-word scalar metadata IPC",
+    "cleanup": "drain CPU holds/mappings; stop/reap Ring3 decoder and its RAM reader; keep sticky inherited-DMA parent quarantine, never assert reset completion",
+    "assumptions": [
+      "operational accessible board",
+      "unchanged firmware-established scanout and live monitor",
+      "no firmware/hotplug/power/reset transition during finite observation",
+      "CRTC control queries accessible as in inspected DCE11 read patterns",
+      "ordinary configuration fields readable on the witnessed running pipe"
+    ],
+    "qualification": "controlled bring-up experiment; not a generic safe-read certificate or native output/recovery profile",
+    "limits": [
+      "no GPU writes, native mode, scanout change, reset, new IRQ/DMA or arbitrary offset",
+      "enabled/current CRTC state is an observation, not general display-domain power proof",
+      "software admission cannot cancel a stalled device/bus transaction"
+    ],
+    "address_correlation": "fixed measured GRPH layout only; unchanged GMC/HDP pair; require HDP base == MC VRAM start and GPU primary == HDP base + (GOP CPU physical - verified BAR0 base), with all spans bounded; no new allocation or authority"
+  },
+  "location_fields": [
+    {
+      "local": "POLARIS_MC_VM_FB_LOCATION_BYTE",
+      "file": "gmc_8_1_d.h",
+      "upstream": "mmMC_VM_FB_LOCATION",
+      "read_evidence": "gmc_v8_0.c:gmc_v8_0_vram_gtt_location reads this field before VRAM location setup; address units inferred from that implementation"
+    },
+    {
+      "local": "POLARIS_HDP_NONSURFACE_BASE_BYTE",
+      "file": "oss_3_0_d.h",
+      "upstream": "mmHDP_NONSURFACE_BASE",
+      "read_evidence": "definition and SR-IOV initialization write example in gmc_v8_0.c; no general read-side-effect guarantee; provisional unchanged firmware experiment only"
+    }
+  ],
+  "physical_observation": {
+    "date": "2026-11-06",
+    "profile": 2,
+    "candidate": "1002:67df rev ef/subsystem1458:2310; selected GOP",
+    "scope": "Forty finite read-only loads; unique running pipe0; unchanged firmware scanout",
+    "mc_vm_fb_location": "0xf5fff400",
+    "hdp_nonsurface_base": "0xf4000000",
+    "existing_surface_cpu": "0x50000000",
+    "existing_surface_gpu": "0xf400000000",
+    "existing_surface_bytes": 3145728,
+    "ring3_decode_restrictions": 0,
+    "post_checks": "Independent host serial commands, firmware-service process fault/restart and operator-readable monitor confirmation",
+    "limits": "Observation only; no native programming/reset/rescue or general read-side-effect/power certificate; programmed MC range is not measured DRAM capacity"
+  }
 }
