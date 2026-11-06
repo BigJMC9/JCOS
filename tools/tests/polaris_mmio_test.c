@@ -240,6 +240,44 @@ int main(int argc, char **argv) {
         CHECK(polaris_mmio_cleanup(&b) && empty());
     }
     CHECK(reset());
+    CHECK(polaris_mmio_prepare(&b,&boot,&assignment,&owner,17U));
+    PolarisMmioHold witness_hold;
+    u64 witness_hold_id=0;
+    CHECK(polaris_mmio_hold_acquire(&witness_hold,&b,polaris_mmio_binding_identity(&b),&owner,&witness_hold_id));
+    const u32 witness_offset[6][3]={
+        {0x6844,0x6848,0x6E98},{0x7044,0x7048,0x7698},{0x7844,0x7848,0x7E98},
+        {0x10044,0x10048,0x10698},{0x10844,0x10848,0x10E98},{0x11044,0x11048,0x11698}};
+    u32 witness_value=~0U;
+    for (u32 pipe=0;pipe<6;++pipe) for (u32 field=0;field<3;++field) {
+        u32 offset=0;
+        CHECK(jcos_polaris_witness_offset(pipe,(PolarisPlaneWitnessRegister)field,0x40000,&offset) &&
+            offset==witness_offset[pipe][field]);
+        CHECK(!jcos_polaris_witness_offset(pipe,(PolarisPlaneWitnessRegister)field,offset+3ULL,&offset) &&
+            !offset);
+        u32 slot=0;
+        while (slot<b.plan.page_count && b.plan.page_offsets[slot]!=(witness_offset[pipe][field]&~0xFFFU)) ++slot;
+        CHECK(polaris_mmio_read_witness_held(&witness_hold,witness_hold_id,&owner,pipe,
+            (PolarisPlaneWitnessRegister)field,&witness_value) && witness_value==0x12345678U &&
+            load_address==b.virtual_base+(u64)slot*VM_PAGE_SIZE+(witness_offset[pipe][field]&0xFFFU));
+    }
+    CHECK(load_calls==18);
+    CHECK(!polaris_mmio_read_witness_held(&witness_hold,witness_hold_id,&owner,6,
+        POLARIS_WITNESS_UPDATE,&witness_value) && !witness_value && load_calls==18);
+    CHECK(!polaris_mmio_read_witness_held(&witness_hold,witness_hold_id,&owner,0,
+        (PolarisPlaneWitnessRegister)~0U,&witness_value) && !witness_value && load_calls==18);
+    load_interrupts=false;
+    CHECK(!polaris_mmio_read_witness_held(&witness_hold,witness_hold_id,&owner,0,
+        POLARIS_WITNESS_UPDATE,&witness_value) && !witness_value && load_calls==18);
+    load_interrupts=true; leaves[0].flags=VM_DEVICE|VM_WRITE;
+    CHECK(!polaris_mmio_read_witness_held(&witness_hold,witness_hold_id,&owner,0,
+        POLARIS_WITNESS_UPDATE,&witness_value) && !witness_value && load_calls==18);
+    leaves[0].flags=VM_DEVICE;
+    CHECK(polaris_mmio_close(&b));
+    CHECK(!polaris_mmio_read_witness_held(&witness_hold,witness_hold_id,&owner,0,
+        POLARIS_WITNESS_UPDATE,&witness_value) && !witness_value && load_calls==18);
+    CHECK(polaris_mmio_hold_release(&witness_hold,witness_hold_id) && polaris_mmio_cleanup(&b) && empty());
+    load_calls=0;
+    CHECK(reset());
     CHECK(polaris_mmio_prepare(&b, &boot, &assignment, &owner, 17U));
     CHECK(polaris_mmio_binding_prepared(&b) && map_calls == 4U &&
         assignment.child_resource_count == 1U && assignment.active_access_count == 1U);

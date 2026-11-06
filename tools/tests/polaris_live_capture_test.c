@@ -7,12 +7,14 @@
 #include "polaris_live_capture.h"
 #include "polaris_read_profile.h"
 #include "polaris_observation.h"
+#include "polaris_plane.h"
 #include "device_register_reader.h"
 #include "managed_service.h"
 #include "display.h"
 #include "register_probe_protocol.h"
 static int fault;
-static u32 location_loads, inventory_reads, loads, grants, release_calls, metadata_calls, tick_calls, frequency_calls;
+static bool pending_profile;
+static u32 witness_loads,witness_calls,recipe_calls,location_loads, inventory_reads, loads, grants, release_calls, metadata_calls, tick_calls, frequency_calls;
 static bool binding_live, held, reader_live, assignment_live, attempted_message;
 static u64 owner_id;
 static PciAssignmentState parent_state;
@@ -71,6 +73,28 @@ bool polaris_mmio_read_location_held(PolarisMmioHold *h,u64 id,Process *p,
     *out=field==POLARIS_LOCATION_MC_FB ? 0xF4FFF400U : 0xF4000000U;
     if ((fault==63 && location_loads==3) || (fault==64 && location_loads==4)) *out^=1;
     if (fault==65) *out=~0U;
+    return true;
+}
+bool polaris_mmio_read_witness_held(PolarisMmioHold *h,u64 id,Process *p,u32 pipe,
+    PolarisPlaneWitnessRegister field,u32 *out) {
+    (void)h; (void)p; ++witness_loads;
+    if (!held || id!=23 || pipe!=3 || field>=POLARIS_PLANE_WITNESS_COUNT ||
+        (witness_loads<=3 ? loads!=6 : loads!=36) ||
+        (fault>=73 && fault<=78 && witness_loads==(u32)(fault-72))) return false;
+    *out=field==POLARIS_WITNESS_FRAME_COUNT ? (witness_loads<=3 ? 100U : 101U) : 0U;
+    if (field==POLARIS_WITNESS_FLIP_CONTROL && pending_profile) *out=0x20;
+    if (fault==101 && witness_loads==2) *out=0x20;
+    if (fault==102 && field==POLARIS_WITNESS_FLIP_CONTROL) *out=0x21;
+    if (fault==103 && field==POLARIS_WITNESS_FLIP_CONTROL) *out=0x30;
+    if (fault>=79 && fault<=84 && witness_loads==(u32)(fault-78)) *out=~0U;
+    if (fault==85 && witness_loads==1) *out=4;
+    if (fault==86 && witness_loads==4) *out=0x10000;
+    if (fault==87 && witness_loads==2) *out=0x10;
+    if (fault==88 && witness_loads==6) *out=100;
+    if (fault==89 && witness_loads==6) *out=99;
+    if (fault==90 && witness_loads==4) *out=1;
+    if (fault==91 && witness_loads==4) *out=0x100;
+    if (fault==100 && witness_loads==6) *out=0x1000065;
     return true;
 }
 bool managed_service_start(ManagedService *s,const ManagedServiceSpec *spec) {
@@ -156,6 +180,23 @@ bool managed_service_call(ManagedService *s,const ManagedServiceConnection *c,co
         if (q->words[1]!=31 || q->words[2]!=29 || q->words[3]!=3) return false;
         reader->successful_reads=30; reader->revoked=true;
         r->words[2]=REGISTER_PROBE_CAPTURE_DECODED; r->words[3]=fault==68 ? 0x100200000ULL : 0xF400000000ULL;
+    } else if (q->words[0]==REGISTER_PROBE_PLANE_WITNESS) {
+        if (fault==92 || q->words[1]!=29 || q->words[2]!=(pending_profile ? (0x20ULL<<32) : 0ULL) || (q->words[3]>>32)!=witness_calls ||
+            (u32)q->words[3]!=100U+witness_calls) return false;
+        ++witness_calls; r->words[2]=witness_calls+(fault==93);
+    } else if (q->words[0]==REGISTER_PROBE_PLANE_STEP) {
+        if (fault==94 || q->words[1]!=29 || q->words[2]!=recipe_calls || q->words[3] ||
+            recipe_calls>=5 || witness_calls!=2) return false;
+        static const u32 op[5]={1,1,2,3,4};
+        static const u32 field[5]={7,6,6,0,2};
+        static const u32 value[5]={0xF4,0,0,0,101};
+        r->words[2]=jcos_polaris_plane_tag(recipe_calls,op[recipe_calls],3,field[recipe_calls]);
+        r->words[3]=value[recipe_calls++];
+        if (fault==95) r->words[2]^=1ULL<<63;
+        if (fault==96) r->words[3]^=1;
+        if (fault==97) r->words[1]++;
+        if (fault==98) r->word_count=3;
+        if (fault==99) r->words[2]^=1ULL<<24;
     } else {
         if (fault==49 || q->words[0]!=REGISTER_PROBE_OBSERVATION || q->words[1]!=29 || q->words[2]>3) return false;
         ++metadata_calls; r->words[2]=q->words[2]+1;
@@ -165,13 +206,14 @@ bool managed_service_call(ManagedService *s,const ManagedServiceConnection *c,co
     return true;
 }
 int main(int argc,char **argv) {
+    pending_profile=argc>1 && !strcmp(argv[1],"pending-mode");
     fault=argc>1 ? atoi(argv[1]) : 0;
     boot.framebuffer_base=0x50000000; boot.framebuffer_size=0x300000;
     boot.framebuffer_width=1024; boot.framebuffer_height=768;
     boot.framebuffer_pixels_per_scanline=1024; boot.framebuffer_pixel_format=1;
     polaris_live_capture_run(&boot);
-    CHECK(loads<=36 && location_loads<=4 && loads+location_loads<=40);
-    if (!fault) CHECK(complete_message && loads==36 && location_loads==4 && grants==1 && metadata_calls==4 && release_calls==1);
+    CHECK(loads<=36 && location_loads<=4 && witness_loads<=6 && loads+location_loads+witness_loads<=46);
+    if (!fault) CHECK(complete_message && loads==36 && location_loads==4 && witness_loads==6 && witness_calls==2 && recipe_calls==5 && grants==1 && metadata_calls==4 && release_calls==1);
     else CHECK(!complete_message);
     if (fault==1 || fault==53 || fault==54) CHECK(!assignment_live && !loads && !grants);
     if (fault==2 || fault==3 || fault==4 || fault==5 || fault==66 || fault==70) CHECK(!assignment_live && !loads && !grants);

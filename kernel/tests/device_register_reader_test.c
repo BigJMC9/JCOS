@@ -13,6 +13,7 @@
 #include "thread.h"
 #include "timer.h"
 #include "register_probe_protocol.h"
+#include "polaris_plane.h"
 
 static ManagedService g_probe;
 static DeviceRegisterReader g_reader;
@@ -259,7 +260,49 @@ void device_register_reader_test_run(void) {
             reply.words[2] == i + 1ULL && reply.words[3] == observation_expected[i];
 
     report("IMMUTABLE OBSERVATION / RING3 DECODE / THIRTY RAM READS (MODEL)", observation);
-    if (!observation || !remove_reader(owner)) goto fail;
+    if (!observation) goto fail;
+    u64 observation_id=g_reader.resource.id;
+    bool recipe=request(&connection,REGISTER_PROBE_PLANE_STEP,observation_id,0,0,&reply) &&
+        !reply.words[2] && !reply.words[3] &&
+        request(&connection,REGISTER_PROBE_PLANE_WITNESS,observation_id,0,(1ULL<<32)|110ULL,&reply) &&
+        !reply.words[2];
+    PolarisPlaneWitness witness;
+    k_memset(&witness,0,sizeof(witness));
+    witness.values[0][POLARIS_WITNESS_FRAME_COUNT]=100U;
+    witness.values[1][POLARIS_WITNESS_FRAME_COUNT]=110U;
+    witness.values[0][POLARIS_WITNESS_FLIP_CONTROL]=0x20U;
+    witness.values[1][POLARIS_WITNESS_FLIP_CONTROL]=0x20U;
+    for (u32 sample=0; recipe && sample<2U; ++sample)
+        recipe=request(&connection,REGISTER_PROBE_PLANE_WITNESS,observation_id,0x20ULL<<32,
+            ((u64)sample<<32)|witness.values[sample][POLARIS_WITNESS_FRAME_COUNT],&reply) &&
+            reply.words[2]==sample+1ULL && !reply.words[3];
+    recipe=recipe && request(&connection,REGISTER_PROBE_PLANE_WITNESS,observation_id,0,100ULL,&reply) &&
+        !reply.words[2] &&
+        request(&connection,REGISTER_PROBE_PLANE_STEP,observation_id+1ULL,0,0,&reply) &&
+        !reply.words[2] && !reply.words[3] &&
+        request(&connection,REGISTER_PROBE_PLANE_STEP,observation_id,1ULL<<32,0,&reply) &&
+        !reply.words[2] &&
+        request(&connection,REGISTER_PROBE_PLANE_STEP,observation_id,POLARIS_PLANE_RECIPE_STEPS,0,&reply) &&
+        !reply.words[2] &&
+        request(&connection,REGISTER_PROBE_PLANE_STEP,observation_id,0,1,&reply) &&
+        !reply.words[2];
+    PolarisPlanePreview preview;
+    recipe=recipe && polaris_plane_preview_init(&preview,connection.incarnation,observation_id,
+        0x100200000ULL,3U,&witness);
+    for (u32 i=0; recipe && i<POLARIS_PLANE_RECIPE_STEPS; ++i)
+        recipe=request(&connection,REGISTER_PROBE_PLANE_STEP,observation_id,i,0,&reply) &&
+            polaris_plane_preview_accept(&preview,reply.words[1],observation_id,reply.words[2],reply.words[3]);
+    recipe=recipe && preview.closed && preview.next==POLARIS_PLANE_RECIPE_STEPS &&
+        g_reader.successful_reads==30ULL;
+    /* A failed new capture invalidates the retained recipe instead of exposing
+     * data from the preceding observation or manufacturing a new generation. */
+    recipe=recipe && request(&connection,REGISTER_PROBE_CAPTURE,g_cap,observation_id,1ULL<<32,&reply) &&
+        reply.words[2]==1ULL; /* invalid capture, no RAM reads */
+    recipe=recipe && request(&connection,REGISTER_PROBE_PLANE_STEP,observation_id,0,0,&reply) &&
+        !reply.words[2] && !reply.words[3];
+    report("RING3 REBIND RECIPE / ORDER / STALE DATA REFUSALS (PREVIEW)",recipe);
+    report("INHERITED PENDING MODE 0x20 PRESERVED IN RECIPE (MODEL)",recipe);
+    if (!recipe || !remove_reader(owner)) goto fail;
     fixture(values);
     rejected = ~0ULL;
     bool limits = !device_register_reader_create_test_capture(&g_reader, owner, 3U, values,

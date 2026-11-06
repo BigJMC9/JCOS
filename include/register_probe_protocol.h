@@ -16,6 +16,12 @@
  * OBSERVATION request: op,expected resource ID,metadata selector,reserved0.
  * Reply: header,incarnation,selector+1,value (zero tag on refusal).
  * Metadata 0=span,1=width<<32|height,2=pitch,3=depth|format<<8|array<<16. */
+#define REGISTER_PROBE_PLANE_WITNESS REGISTER_PROBE_HEADER(8ULL)
+#define REGISTER_PROBE_PLANE_STEP REGISTER_PROBE_HEADER(9ULL)
+/* WITNESS request: op,observation ID,update|flip<<32,frame|sample<<32.
+ * Exactly samples0 then1, once per retained capture; reply tag=sample+1.
+ * STEP request: op,observation ID,index,reserved0.
+ * Reply header,incarnation,versioned semantic tag,value. Data only: no GPU grant. */
 #define REGISTER_PROBE_REPLY    0x52454750524F4245ULL
 #define REGISTER_PROBE_STOPPED  0x52454753544F5050ULL
 #define REGISTER_PROBE_EXPECTED 0xFFULL

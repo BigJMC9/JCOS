@@ -6,6 +6,7 @@
 #if JCOS_POLARIS_LIVE_CAPTURE
 #include "polaris_observation.h"
 #include "polaris_vram.h"
+#include "polaris_plane.h"
 #include "polaris_mmio.h"
 #include "polaris_read_profile.h"
 #include "device_mmio.h"
@@ -64,21 +65,36 @@ static bool admitted(u64 start, u32 frequency) {
         framebuffer_firmware_valid();
 }
 static bool capture_location(Process *owner, u64 start, u32 frequency,
-    u32 pipe_reads, u32 *location_reads, u32 values[2]) {
+    u32 pipe_reads, u32 *extra_reads, u32 values[2]) {
     for (u32 field=0; field<POLARIS_LOCATION_COUNT; ++field) {
         if (!admitted(start,frequency)) return false;
-        terminal_write("GPU READ #"); terminal_write_u64(pipe_reads+*location_reads+1U);
+        terminal_write("GPU READ #"); terminal_write_u64(pipe_reads+*extra_reads+1U);
         terminal_write(" LOCATION="); terminal_write_u64(field); terminal_putchar('\n');
         if (!polaris_mmio_read_location_held(&g_capture_hold,g_capture_hold_id,owner,
                 (PolarisLocationRegister)field,&values[field])) return false;
-        ++*location_reads;
+        ++*extra_reads;
+        pair("  VALUE=",values[field]); terminal_putchar('\n');
+        if (values[field]==~0U) return false;
+    }
+    return true;
+}
+static bool capture_witness(Process *owner,u64 start,u32 frequency,u32 pipe,
+    u32 pipe_reads,u32 *extra_reads,u32 values[POLARIS_PLANE_WITNESS_COUNT]) {
+    for (u32 field=0;field<POLARIS_PLANE_WITNESS_COUNT;++field) {
+        if (!admitted(start,frequency)) return false;
+        terminal_write("GPU READ #"); terminal_write_u64(pipe_reads+*extra_reads+1U);
+        terminal_write(" PIPE="); terminal_write_u64(pipe);
+        terminal_write(" WITNESS="); terminal_write_u64(field); terminal_putchar('\n');
+        if (!polaris_mmio_read_witness_held(&g_capture_hold,g_capture_hold_id,owner,pipe,
+                (PolarisPlaneWitnessRegister)field,&values[field])) return false;
+        ++*extra_reads;
         pair("  VALUE=",values[field]); terminal_putchar('\n');
         if (values[field]==~0U) return false;
     }
     return true;
 }
 void polaris_live_capture_run(const BootInfo *boot) {
-    terminal_writeln("POLARIS INHERITED-SCANOUT CAPTURE / EXPERIMENTAL BUILD PROFILE 2");
+    terminal_writeln("POLARIS INHERITED-SCANOUT CAPTURE / EXPERIMENTAL BUILD PROFILE 3");
     terminal_writeln("READ-ONLY GPU REGISTER EXPERIMENT; NOT NATIVE MODESETTING OR RESET.");
     if (g_capture_attempted) {
         terminal_writeln("REFUSED: ONE ATTEMPT PER BOOT; RETAINED ASSIGNMENT MUST NOT BE REUSED.");
@@ -108,8 +124,9 @@ void polaris_live_capture_run(const BootInfo *boot) {
     g_capture_attempted = true; /* Includes failed preparation: no silent retry. */
     terminal_writeln("ASSUMPTIONS: OPERATIONAL GPU, UNCHANGED FIRMWARE SCANOUT; NO HOTPLUG/POWER/RESET.");
     terminal_writeln("PLAN: SIX CRTC CONTROL QUERIES; UNIQUE RUNNING PIPE; TWO FIFTEEN-FIELD SAMPLES.");
-    terminal_writeln("MAXIMUM 40 DWORD LOADS; TWO-SECOND ADMISSION; NO BUS-TRANSACTION TIMEOUT.");
+    terminal_writeln("MAXIMUM 46 DWORD LOADS; TWO-SECOND ADMISSION; NO BUS-TRANSACTION TIMEOUT.");
     terminal_writeln("MC/HDP LOCATION PAIR BEFORE/AFTER PIPE SAMPLES; VERIFIED BAR0/GOP CORRELATION ONLY.");
+    terminal_writeln("PLANE WITNESSES: UPDATE, FLIP CONTROL, FRAME COUNT BEFORE/AFTER; RECIPE PREVIEW ONLY.");
     bool success = false;
     BootDisplayBar aperture;
     DisplayProbeInfo inventory;
@@ -139,16 +156,18 @@ void polaris_live_capture_run(const BootInfo *boot) {
     polaris_observation_init(&batch);
     u32 frequency = timer_frequency();
     u64 start = timer_ticks();
-    u32 location_before[2], location_after[2], location_reads=0;
+    u32 location_before[2], location_after[2], extra_reads=0;
+    PolarisPlaneWitness witness;
     while (!batch.complete) {
         if (batch.reads==POLARIS_DISPLAY_PIPE_COUNT &&
-            !capture_location(owner,start,frequency,batch.reads,&location_reads,location_before)) goto finish;
+            (!capture_location(owner,start,frequency,batch.reads,&extra_reads,location_before) ||
+             !capture_witness(owner,start,frequency,batch.pipe,batch.reads,&extra_reads,witness.values[0]))) goto finish;
         u32 pipe, field, value;
         if (!admitted(start,frequency) ||
             !polaris_observation_next(&batch, &pipe, &field)) goto finish;
         /* Journal before the transaction so a platform stall has a last known
          * operation in the independently retained host serial log. */
-        terminal_write("GPU READ #"); terminal_write_u64(batch.reads + location_reads + 1U);
+        terminal_write("GPU READ #"); terminal_write_u64(batch.reads + extra_reads + 1U);
         terminal_write(" PIPE="); terminal_write_u64(pipe);
         terminal_write(" FIELD="); terminal_write_u64(field); terminal_putchar('\n');
         if (!polaris_mmio_read_held(&g_capture_hold, g_capture_hold_id, owner,
@@ -159,8 +178,9 @@ void polaris_live_capture_run(const BootInfo *boot) {
             goto finish;
         }
     }
-    if (!capture_location(owner,start,frequency,batch.reads,&location_reads,location_after)) goto finish;
-    terminal_write("PHYSICAL GPU CAPTURE COMPLETE: READS="); terminal_write_u64(batch.reads+location_reads);
+    if (!capture_witness(owner,start,frequency,batch.pipe,batch.reads,&extra_reads,witness.values[1]) ||
+        !capture_location(owner,start,frequency,batch.reads,&extra_reads,location_after)) goto finish;
+    terminal_write("PHYSICAL GPU CAPTURE COMPLETE: READS="); terminal_write_u64(batch.reads+extra_reads);
     terminal_write(" PIPE="); terminal_write_u64(batch.pipe); terminal_putchar('\n');
     /* Stop live access before dispatching immutable data to Ring3. The INT80
      * reader remains RAM-only; no potentially stalling load runs IRQ-masked. */
@@ -220,6 +240,36 @@ void polaris_live_capture_run(const BootInfo *boot) {
         terminal_writeln("REFUSED: RING3 DECODE DISAGREES WITH FIXED PHYSICAL CORRELATION PROFILE.");
         goto finish;
     }
+    u32 blockers=polaris_plane_blockers(&witness);
+    pair("PLANE PREFLIGHT BLOCKERS=",blockers); terminal_putchar('\n');
+    if (blockers) {
+        terminal_writeln("PLANE REBIND PREVIEW: REFUSED; UPDATE/FLIP/FRAME STATE REQUIRES QUALIFICATION.");
+        goto finish;
+    }
+    PolarisPlanePreview preview;
+    if (!polaris_plane_preview_init(&preview,connection.incarnation,g_capture_reader.resource.id,
+            vram.surface_gpu_address,batch.pipe,&witness)) goto finish;
+    for (u32 sample=0;sample<2U;++sample) {
+        request.words[0]=REGISTER_PROBE_PLANE_WITNESS;
+        request.words[1]=g_capture_reader.resource.id;
+        request.words[2]=(u64)witness.values[sample][POLARIS_WITNESS_UPDATE] |
+            ((u64)witness.values[sample][POLARIS_WITNESS_FLIP_CONTROL]<<32);
+        request.words[3]=(u64)witness.values[sample][POLARIS_WITNESS_FRAME_COUNT] | ((u64)sample<<32);
+        if (!managed_service_call(&g_capture_service,&connection,&request,&reply) ||
+            reply.word_count!=4U || reply.words[0]!=REGISTER_PROBE_REPLY ||
+            reply.words[1]!=connection.incarnation || reply.words[2]!=sample+1ULL || reply.words[3]) goto finish;
+    }
+    for (u32 index=0;index<POLARIS_PLANE_RECIPE_STEPS;++index) {
+        request.words[0]=REGISTER_PROBE_PLANE_STEP; request.words[1]=g_capture_reader.resource.id;
+        request.words[2]=index; request.words[3]=0;
+        if (!managed_service_call(&g_capture_service,&connection,&request,&reply) ||
+            reply.word_count!=4U || reply.words[0]!=REGISTER_PROBE_REPLY ||
+            !polaris_plane_preview_accept(&preview,reply.words[1],g_capture_reader.resource.id,
+                reply.words[2],reply.words[3])) goto finish;
+        terminal_write("RING3 REBIND STEP "); terminal_write_u64(index);
+        pair(" TAG=",reply.words[2]); pair(" VALUE=",reply.words[3]); terminal_putchar('\n');
+    }
+    terminal_writeln("PLANE REBIND RECIPE: FIVE STEPS VALIDATED / PREVIEW ONLY; NO EXECUTOR OR WRITE GRANT.");
     success = true;
 finish:
     {

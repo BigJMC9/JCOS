@@ -457,13 +457,46 @@
       "upstream": "HDP_NONSURFACE_BASE__NONSURF_BASE_MASK",
       "source": "oss_3_0_sh_mask.h",
       "scale": 1
+    },
+    {
+      "local": "POLARIS_GRPH_MODE_UPDATE_PENDING_MASK",
+      "upstream": "GRPH_UPDATE__GRPH_MODE_UPDATE_PENDING_MASK"
+    },
+    {
+      "local": "POLARIS_GRPH_MODE_UPDATE_TAKEN_MASK",
+      "upstream": "GRPH_UPDATE__GRPH_MODE_UPDATE_TAKEN_MASK"
+    },
+    {
+      "local": "POLARIS_GRPH_SURFACE_UPDATE_PENDING_MASK",
+      "upstream": "GRPH_UPDATE__GRPH_SURFACE_UPDATE_PENDING_MASK"
+    },
+    {
+      "local": "POLARIS_GRPH_SURFACE_UPDATE_TAKEN_MASK",
+      "upstream": "GRPH_UPDATE__GRPH_SURFACE_UPDATE_TAKEN_MASK"
+    },
+    {
+      "local": "POLARIS_GRPH_UPDATE_LOCK_MASK",
+      "upstream": "GRPH_UPDATE__GRPH_UPDATE_LOCK_MASK"
+    },
+    {
+      "local": "POLARIS_GRPH_SURFACE_UPDATE_IMMEDIATE_EN_MASK",
+      "upstream": "GRPH_FLIP_CONTROL__GRPH_SURFACE_UPDATE_IMMEDIATE_EN_MASK"
+    },
+    {
+      "local": "POLARIS_CRTC_FRAME_COUNT_MASK",
+      "upstream": "CRTC_STATUS_FRAME_COUNT__CRTC_FRAME_COUNT_MASK"
+    },
+    {
+      "local": "POLARIS_GRPH_SURFACE_UPDATE_PENDING_MODE_MASK",
+      "upstream": "GRPH_FLIP_CONTROL__GRPH_SURFACE_UPDATE_PENDING_MODE_MASK"
     }
   ],
   "scope": "Source layout/field audit only; does not grant or qualify physical GPU access",
   "unresolved": [
     "general per-register hardware read-side-effect contract outside the provisional inherited-scanout experiment",
     "general selected-pipe display power/clock accessibility and firmware transition exclusion",
-    "physical serial continuity during native GPU/interconnect failure"
+    "physical serial continuity during native GPU/interconnect failure",
+    "physical profile3 update/flip/frame witnesses and constrained recipe preview on the target"
   ],
   "review_findings": [
     "Five fields have explicit reads, read-modify-write calls, or post-write readback examples in the reviewed source set; this does not certify read side effects in JA OS firmware state.",
@@ -473,16 +506,18 @@
     "Do not blindly probe all six pipes or infer the active pipe from GOP address/geometry.",
     "BAR5 operation retention requires stable binding/token identities, permanent close-before-drain, and retained mapping/assignment pins until all CPU holds return.",
     "The explicit read-only bring-up experiment narrows discovery to six CRTC_CONTROL queries, as inspected in dce_v11_0_is_display_hung; only a uniquely requested-and-current running pipe may supply the thirty-field capture. Its firmware-state assumptions remain provisional until hardware evidence.",
-    "ARRAY_LINEAR_ALIGNED=1 is a linear layout. The first physical profile1 sample reported GRPH_CONTROL=0x0a10800a, GPU primary=0xf400000000, pitch1024 and extent1024x768; its raw evidence is retained separately. Bank/pipe metadata does not enter the linear offset calculation; this is no permission to reuse VRAM."
+    "ARRAY_LINEAR_ALIGNED=1 is a linear layout. The first physical profile1 sample reported GRPH_CONTROL=0x0a10800a, GPU primary=0xf400000000, pitch1024 and extent1024x768; its raw evidence is retained separately. Bank/pipe metadata does not enter the linear offset calculation; this is no permission to reuse VRAM.",
+    "The proposed address-rebind recipe follows high-before-low and post-read ordering from the pinned page-flip path. Programming policy is Ring3; scalar preview validation executes no MMIO and proves neither scanout completion nor recovery.",
+    "Measured profile3 update0,flip control0x20,frames0x2102..0x211a; v15 zero-control preflight refused as designed. The audited0x20 field is pending-mode; dce_v11_0_page_flip preserves it via RMW of immediate enable. Stable0x20 is accepted by the subsequent data-only preview; no physical completion semantics or GPU write grant is inferred."
   ],
   "bringup_experiment": {
-    "profile": 2,
+    "profile": 3,
     "build_flag": "POLARIS_LIVE_CAPTURE=1",
     "default_enabled": false,
     "entry": "polaris-capture kernel-monitor command; no boot activation",
     "candidate": "selected GOP /1002:67df rev ef/subsystem1458:2310; known1024x768,stride1024,format1",
-    "sequence": "six CRTC_CONTROL queries; exactly one requested-and-current running pipe; MC_VM_FB_LOCATION and HDP_NONSURFACE_BASE before and after fifteen semantic pipe fields sampled twice",
-    "maximum_loads": 40,
+    "sequence": "six CRTC controls;MC/HDP and update/flip/frame witnesses;30 unique-pipe fields;update/flip/frame and MC/HDP again",
+    "maximum_loads": 46,
     "maximum_software_admission_seconds": 2,
     "retry": "none; one attempt per boot after local preflight",
     "read_primitive": "one aligned supervisor UC DWORD load with fences, interrupts enabled, exact retained hold and leaf checks",
@@ -501,7 +536,9 @@
       "enabled/current CRTC state is an observation, not general display-domain power proof",
       "software admission cannot cancel a stalled device/bus transaction"
     ],
-    "address_correlation": "fixed measured GRPH layout only; unchanged GMC/HDP pair; require HDP base == MC VRAM start and GPU primary == HDP base + (GOP CPU physical - verified BAR0 base), with all spans bounded; no new allocation or authority"
+    "address_correlation": "fixed measured GRPH layout only; unchanged GMC/HDP pair; require HDP base == MC VRAM start and GPU primary == HDP base + (GOP CPU physical - verified BAR0 base), with all spans bounded; no new allocation or authority",
+    "recipe_preview": "five scalar Ring3 steps:primary high,primary low,post-read low,check update idle,check later frame;independent kernel comparison against retained GPU surface;no executor or write grant",
+    "preflight": "only update-taken status bits allowed;flip control stable0 or0x20(pending-mode preserved);nonzero modular24-bit frame delta at most512;data-only preview,not hardware completion proof"
   },
   "location_fields": [
     {
@@ -530,5 +567,57 @@
     "ring3_decode_restrictions": 0,
     "post_checks": "Independent host serial commands, firmware-service process fault/restart and operator-readable monitor confirmation",
     "limits": "Observation only; no native programming/reset/rescue or general read-side-effect/power certificate; programmed MC range is not measured DRAM capacity"
+  },
+  "witnesses": [
+    {
+      "selector": "POLARIS_WITNESS_UPDATE",
+      "family": "DCP",
+      "register": "GRPH_UPDATE",
+      "source_access_evidence": {
+        "file": "dce_mem_input.c",
+        "function": "dce_mi_is_flip_pending",
+        "line": 827
+      }
+    },
+    {
+      "selector": "POLARIS_WITNESS_FLIP_CONTROL",
+      "family": "DCP",
+      "register": "GRPH_FLIP_CONTROL",
+      "source_access_evidence": {
+        "file": "dce_v11_0.c",
+        "function": "dce_v11_0_page_flip",
+        "line": 268
+      }
+    },
+    {
+      "selector": "POLARIS_WITNESS_FRAME_COUNT",
+      "family": "CRTC",
+      "register": "CRTC_STATUS_FRAME_COUNT",
+      "source_access_evidence": {
+        "file": "dce_v11_0.c",
+        "function": "dce_v11_0_vblank_get_counter",
+        "line": 226
+      }
+    }
+  ],
+  "physical_observation_profile3": {
+    "date": "2026-11-07",
+    "profile": 3,
+    "scope": "46read-only loads; stable pipe0 and MC/HDP/GOP correlation; CPU/service/serial recovery and operator-readable monitor",
+    "update_before_after": [
+      "0x0",
+      "0x0"
+    ],
+    "flip_control_before_after": [
+      "0x20",
+      "0x20"
+    ],
+    "frame_count_before_after": [
+      "0x2102",
+      "0x211a"
+    ],
+    "frame_delta24": 24,
+    "v15_recipe_result": "REFUSED; blocker4 under exact-zero flip rule; no five-step recipe physically exchanged; no GPU writes",
+    "limits": "No native modeset/reset/rescue or general power/read-safety certificate; later policy acceptance must be distinguished from actual v15 result"
   }
 }

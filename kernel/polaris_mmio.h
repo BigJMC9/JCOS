@@ -65,6 +65,9 @@ u32 polaris_mmio_hold_count(void);
 bool polaris_mmio_read_held(PolarisMmioHold *hold, u64 expected_hold_identity,
     Process *owner, u32 pipe, PolarisDisplayRegister field, u32 *out);
 
+bool polaris_mmio_read_witness_held(PolarisMmioHold *hold,u64 expected_hold_identity,
+    Process *owner,u32 pipe,PolarisPlaneWitnessRegister field,u32 *out);
+
 /* Optional fifth RO/NX/UC page, for the two fixed GMC/HDP location fields.
  * Separate from the four-page pipe plan. No hold may exist during preparation. */
 typedef enum {

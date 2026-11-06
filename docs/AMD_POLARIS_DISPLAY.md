@@ -187,7 +187,9 @@ quiescence/recovery proof before reuse.
 Preparing page tables alone performs no CPU MMIO transaction. Separate
 kernel-only semantic load entry points require an exact retained hold, live
 owner, active kernel CR3, unchanged RO/NX/UC leaf and enabled interrupts. They
-accept named pipe fields or the two location selectors, never a raw offset.
+accept named pipe fields, the two location selectors or the three plane
+witness selectors, never a raw offset. Witness reads use the existing four
+pipe pages and the same owner/hold/leaf/interrupt checks.
 A fenced aligned DWORD load executes with interrupts enabled. The experiment
 controller limits ordering and total operations; holds alone grant no access.
 This does not establish general safe-read qualification, DMA containment or
@@ -257,11 +259,15 @@ Independent serial control is a separate operator-established prerequisite.
 The controller queries only the six CRTC_CONTROL fields first, following the
 inspected DCE enabled-state discovery pattern. Exactly one pipe must be both
 requested and currently running, with read requests enabled. Other state is
-refused. It samples fifteen fields twice on that pipe. Profile 2 also reads
+refused. It samples fifteen fields twice on that pipe. Profile 2 added
 MC_VM_FB_LOCATION (byte0x2024) and HDP_NONSURFACE_BASE (byte0x2C04) before and
-after those samples: at most forty DWORD loads, no retry, once per boot after
-preflight. Each transaction is journaled before the load. A two-second admission
-limit cannot interrupt or cancel a stalled device/interconnect transaction.
+after those samples, for forty loads. Current experimental profile 3 additionally
+samples GRPH_UPDATE, GRPH_FLIP_CONTROL and CRTC_STATUS_FRAME_COUNT before and
+after the pipe samples. Its maximum is forty-six DWORD loads: six pipe queries,
+two location reads, three witnesses, thirty pipe reads, three witnesses and
+two final location reads. It permits one attempt per boot, with no retry.
+Each transaction is journaled before the load. A two-second admission limit
+cannot interrupt or cancel a stalled device/interconnect transaction.
 
 The experiment assumes operational accessible hardware, unchanged inherited
 scanout and no firmware, hotplug, power or reset transition during the capture.
@@ -321,8 +327,9 @@ their original notices; no vendor implementation or firmware is linked into
 JA OS.
 
 The offline audit compiles the production register helper and named decoder
-masks. It compares all ninety byte offsets, fifteen semantic selector values,
-thirty-six field/enum/location facts and the four-page pipe footprint against the pinned AMD
+masks. It compares ninety pipe byte offsets, eighteen witness byte offsets,
+fifteen pipe selectors, three witness selectors, forty-four field/enum/location
+facts and the unchanged four-page pipe footprint against the pinned AMD
 definitions. It refuses changed source bytes, wrong offsets/selectors/masks
 and duplicate probe rows. This checks source facts, not access types or
 hardware behavior.
@@ -344,6 +351,9 @@ hardware behavior.
 | Graphics Y start | 0x6830 | Write with a supplied initial value |
 | Graphics X end | 0x6834 | Write with a supplied initial value |
 | Graphics Y end | 0x6838 | Write with a supplied initial value |
+| Plane update witness | 0x6844 | Flip-pending read |
+| Flip control witness | 0x6848 | Page-flip read/modify/write |
+| Frame counter witness | 0x6E98 | Vblank-counter read (24-bit field) |
 
 AMD's [timing-generator implementation](https://github.com/torvalds/linux/blob/adc218676eef25575469234709c2d87185ca223a/drivers/gpu/drm/amd/display/dc/dce110/dce110_timing_generator.c#L1968)
 contains the blank/enabled queries. Its
@@ -399,7 +409,7 @@ With the exact files from the review contract cached locally:
 
 ~~~sh
 make -f Makefile.msys2 audit-polaris-registers POLARIS_SOURCE_DIR=build/rx570-source-review
-make -f Makefile.msys2 test-polaris-mmio test-polaris-read-profile test-amd-polaris-display
+make -f Makefile.msys2 test-polaris-plane test-polaris-mmio test-polaris-read-profile test-amd-polaris-display
 ~~~
 
 The audit downloads nothing and fails if a cached source hash differs.
@@ -408,6 +418,97 @@ directory. Completing this audit does not remove physical qualification
 blockers or activate the GPU. Keep image identity, raw serial bytes, counters,
 post-capture commands and visual output confirmation with each physical run.
 
+
+## Ring3 plane rebind preview
+
+[user/drivers/amd_polaris_plane.c](../user/drivers/amd_polaris_plane.c)
+constructs a version-1 scalar recipe for rebinding the same inherited
+1024x768, pitch1024, 32-bit linear surface. This preserves the inherited
+timing/link; a successful preview is not DP/HDMI link training or a modeset.
+
+The proposed sequence writes PRIMARY_SURFACE_ADDRESS_HIGH first, writes LOW
+to trigger the update, reads LOW back, checks update idle and checks a later
+frame against the retained counter. The order follows AMD's
+[page-flip implementation](https://github.com/torvalds/linux/blob/adc218676eef25575469234709c2d87185ca223a/drivers/gpu/drm/amd/amdgpu/dce_v11_0.c#L257).
+Pending/update and frame-counter reads have separate evidence in the pinned
+[memory-input implementation](https://github.com/torvalds/linux/blob/adc218676eef25575469234709c2d87185ca223a/drivers/gpu/drm/amd/display/dc/dce/dce_mem_input.c#L827)
+and [vblank-counter path](https://github.com/torvalds/linux/blob/adc218676eef25575469234709c2d87185ca223a/drivers/gpu/drm/amd/amdgpu/dce_v11_0.c#L221).
+These examples establish source semantics, not an execution qualification on
+firmware-inherited hardware.
+
+Profile 3 takes two copied sets of update/flip/frame witnesses. Both update
+values may contain only the two read-only TAKEN flags; pending, lock and
+unmodelled controls refuse. Flip control must be identical in both samples
+and contain only the audited pending-mode bit (stable0 or0x20). Immediate,
+horizontal-retrace, stereo and unknown controls refuse. This does not change
+the hardware bit or establish what clears pending status. Frame counters must
+fit the audited 24-bit mask and advance by 1 through 512 modulo 2^24.
+This finite progress check is not a measured refresh rate, atomic snapshot or
+proof that a later programming operation will complete.
+
+The existing four-word probe protocol adds witness and step messages.
+Witnesses bind the retained observation ID and accept samples0 then1 once.
+Step queries return a semantic tag and a DWORD value; they accept no raw
+offset, CPU address, pointer, capability or executable grant. A new capture
+invalidates the preceding retained recipe, even when that capture fails.
+
+[kernel/polaris_plane.c](../kernel/polaris_plane.c) independently validates
+the witnesses and all five ordered replies against the kernel's retained
+GPU surface address, pipe, observation ID and service incarnation. A mismatch
+permanently closes that preview. The final step seals it; replay cannot reopen it.
+Ring3 cannot choose a different framebuffer by returning a plausible address.
+
+The controller unmaps all live access before sending witnesses or requesting
+recipe steps. There is no write executor, writable BAR5 mapping, polling loop,
+GOP retirement or native output publication in this path. Implementing those
+requires separate authority, failure/drain and physical completion contracts.
+
+`make -f Makefile.msys2 test-polaris-plane` links the real Ring3 planner and
+independent kernel validator. It checks all six pipes, every tag/payload bit
+tamper at each step, stale identities, replay, invalid snapshots and 24-bit
+wrap/refusal boundaries. The MMIO host suite routes all eighteen witness
+selectors through the production guards and exercises the production
+forty-six-read controller with zero/pending-mode success and103 refusal/failure cases. The actual
+`test device-register-reader` runs the witness/recipe exchange in Ring3
+using protected RAM, including malformed, reordered and stale requests.
+None of these software tests executes a GPU write.
+
+## Measured pending-mode replay
+
+The physical profile3 run completed all46 read-only loads with equal pipe and
+MC/HDP samples. Update status was0 before/after; flip control was0x20 before/
+after; the24-bit frame counter advanced0x2102 to0x211A (24frames). The original
+exact-zero flip rule correctly refused recipe qualification with blocker4.
+No five-step recipe was exchanged in that physical run. CPU mappings and the
+reader/service drained, the tainted parent remained quarantined, subsequent
+serial commands and firmware-service tests passed, and the operator confirmed
+readable monitor output. This is a capture plus controlled refusal, not a
+physical recipe or native-programming pass.
+
+The audited0x20 field is GRPH_SURFACE_UPDATE_PENDING_MODE, separate from the
+GRPH_UPDATE pending-status bit. The reviewed page-flip path modifies immediate
+enable using read/modify/write and leaves pending-mode unchanged. The later
+data-only planner/validator therefore accepts stable0x20 without writing or
+clearing it; a mode change between samples still refuses. This preservation
+policy grants no physical completion or recovery qualification.
+
+`tools/replay_polaris_plane.py` reads one complete profile3 raw journal,
+checks ordering and sample equality, then compiles its scalar values into
+a host fixture. It runs actual unique-pipe discovery, Ring3 decoding/planning,
+kernel MC/HDP/GOP correlation and independent recipe validation. It opens no
+device or serial port. The preserved original policy reproduces blocker4;
+the corrected policy validates five proposed steps using the same bytes.
+Changed/partial journals, immediate flip and changing pending-mode refuse.
+
+~~~sh
+python tools/replay_polaris_plane.py --raw-log path/to/serial.raw.log --build-dir build/polaris-replay
+~~~
+
+Keep recorded-data replay separate from new hardware execution. The next
+physical write still requires an independently constrained executor, permanent
+GOP retirement before writable authority, bounded completion/failure handling
+and a separately qualified fresh rescue entry. Clearing pending-mode merely
+to pass a preflight is not part of this implementation.
 
 ## Native output handoff mechanism
 

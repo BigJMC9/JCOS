@@ -200,3 +200,20 @@ Native direct handoff binds a fresh descriptor generation to the existing lease;
 revocation during handoff prevents commit, and stale generations cannot revoke
 a replacement. Legacy firmware services/presentation cannot use that descriptor.
 There is no public constructor, native GPU write broker or automatic takeover.
+
+
+The Ring3 Polaris plane module now proposes a five-step versioned same-surface
+rebind recipe. Its witness/step messages carry copied scalar data only. An
+independent kernel preview checks exact ordering, incarnation, observation,
+pipe and the kernel-pinned surface value; any mismatch closes it permanently.
+The controller closes/unmaps live read access before this exchange.
+There is no write executor or GPU programming grant. A valid preview does not
+retire GOP, publish a native descriptor, prove completion or restore a display.
+See [the plane preview contract](AMD_POLARIS_DISPLAY.md#ring3-plane-rebind-preview).
+
+
+Stable inherited flip pending-mode0x20 is now accepted as copied preview data,
+alongside0. Unknown bits and changes between witness samples refuse. This is
+a preservation policy: it neither writes that control nor supplies a GPU
+completion certificate. Actual physical capture refusal and later offline
+recipe replay remain distinct evidence.

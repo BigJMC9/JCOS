@@ -55,6 +55,20 @@ def compare(contract, offsets, masks, rows):
             pages.add(actual & ~4095)
             result.append({"pipe": pipe, "selector": field["selector"], "byte_offset": actual,
                 "upstream_macro": macro, "upstream_line": source["line"]})
+    witnesses = contract.get("witnesses", [])
+    for selector, field in enumerate(witnesses):
+        if rows.pop(("S", len(fields)+selector), None) != selector:
+            raise ValueError("compiled witness selector mismatch")
+    for pipe in range(6):
+        for selector, field in enumerate(witnesses):
+            actual = rows.pop(("W", pipe, selector), None)
+            macro = "mm"+field["family"]+str(pipe)+"_"+field["register"]
+            source = offsets.get(macro)
+            if not source or actual != source["value"]*4 or actual%4 or actual+4>0x40000:
+                raise ValueError("witness offset mismatch: "+macro)
+            pages.add(actual & ~4095)
+            result.append({"pipe":pipe,"selector":field["selector"],"byte_offset":actual,
+                "kind":"plane_witness","upstream_macro":macro,"upstream_line":source["line"]})
     checked_masks = []
     for mask in contract["masks"]:
         local = mask["local"]
@@ -78,8 +92,8 @@ def read_rows(output):
         words = line.split()
         if len(words) == 3 and words[0] == "C":
             key, value = "C", [int(words[1]), int(words[2])]
-        elif len(words) == 4 and words[0] == "R":
-            key, value = ("R", int(words[1]), int(words[2])), int(words[3])
+        elif len(words) == 4 and words[0] in ("R", "W"):
+            key, value = (words[0], int(words[1]), int(words[2])), int(words[3])
         elif len(words) == 3 and words[0] == "S":
             key, value = ("S", int(words[1])), int(words[2])
         elif len(words) == 3 and words[0] == "M":
@@ -123,6 +137,19 @@ def main():
         source.append('printf("S '+str(index)+' %u\\n", (unsigned)'+field["selector"]+');')
         if field["family"] not in ("CRTC", "DCP") or not IDENTIFIER.fullmatch(field["register"]):
             raise ValueError("invalid source register name")
+    witnesses = contract.get("witnesses", [])
+    if witnesses:
+        source.append('if (POLARIS_PLANE_WITNESS_COUNT != '+str(len(witnesses))+') return 3;')
+        source += ['for (unsigned p=0;p<POLARIS_DISPLAY_PIPE_COUNT;++p) {',
+            'for (unsigned f=0;f<POLARIS_PLANE_WITNESS_COUNT;++f) {',
+            'JcosU32 offset=0; if (!jcos_polaris_witness_offset(p,(PolarisPlaneWitnessRegister)f,0x40000ULL,&offset)) return 4;',
+            'printf("W %u %u %u\\n",p,f,offset); }}']
+        for i, field in enumerate(witnesses):
+            if not IDENTIFIER.fullmatch(field["selector"]) or not field["selector"].startswith("POLARIS_WITNESS_"):
+                raise ValueError("invalid witness selector")
+            if field["family"] not in ("CRTC","DCP") or not IDENTIFIER.fullmatch(field["register"]):
+                raise ValueError("invalid witness register")
+            source.append('printf("S '+str(len(contract["fields"])+i)+' %u\\n", (unsigned)'+field["selector"]+');')
     for mask in contract["masks"]:
         local = mask["local"]
         if not IDENTIFIER.fullmatch(local) or not local.startswith("POLARIS_"):
@@ -161,6 +188,11 @@ def main():
             bad = dict(rows); bad[("M", local)] ^= 1
             must_refuse("changed enum/location fact " + local,
                         lambda bad=bad: compare(contract, offsets, masks, bad))
+        if witnesses:
+            bad = dict(rows); bad[("W",5,2)] += 4
+            must_refuse("changed compiled witness offset", lambda: compare(contract, offsets, masks, bad))
+            bad = dict(rows); bad[("S",len(contract["fields"]))] = 1
+            must_refuse("changed compiled witness selector", lambda: compare(contract, offsets, masks, bad))
         must_refuse("duplicate compiled row", lambda: read_rows(output + output.splitlines()[0]+"\n"))
     report = {"result": "PASS", "scope": contract["scope"], "upstream": contract["upstream"],
         "contract_sha256": hashlib.sha256(args.contract.read_bytes()).hexdigest(),

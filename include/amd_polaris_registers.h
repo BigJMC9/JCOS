@@ -16,6 +16,14 @@
 #define POLARIS_CRTC_INTERLACE_ENABLE_MASK 0x1U
 #define POLARIS_GRPH_ENABLE_MASK 0x1U
 #define POLARIS_GRPH_KEYER_ALPHA_SEL_MASK 0x2U
+#define POLARIS_CRTC_FRAME_COUNT_MASK 0xFFFFFFU
+#define POLARIS_GRPH_MODE_UPDATE_PENDING_MASK 0x1U
+#define POLARIS_GRPH_MODE_UPDATE_TAKEN_MASK 0x2U
+#define POLARIS_GRPH_SURFACE_UPDATE_PENDING_MASK 0x4U
+#define POLARIS_GRPH_SURFACE_UPDATE_TAKEN_MASK 0x8U
+#define POLARIS_GRPH_UPDATE_LOCK_MASK 0x10000U
+#define POLARIS_GRPH_SURFACE_UPDATE_IMMEDIATE_EN_MASK 0x10U
+#define POLARIS_GRPH_SURFACE_UPDATE_PENDING_MODE_MASK 0x20U
 #define POLARIS_GRPH_DEPTH_MASK 0x3U
 #define POLARIS_GRPH_FORMAT_MASK 0x700U
 #define POLARIS_GRPH_FORMAT_SHIFT 0x8U
@@ -80,6 +88,25 @@ static inline int jcos_polaris_register_offset(JcosU32 pipe, PolarisDisplayRegis
     JcosU32 offset = (base[pipe] + delta[field]) * 4U;
     if (mmio_span < 4ULL || offset > mmio_span - 4ULL) return 0;
     *out_byte_offset = offset;
+    return 1;
+}
+/* Separate kernel-only witnesses; the 15-field syscall ABI remains unchanged. */
+typedef enum {
+    POLARIS_WITNESS_UPDATE = 0,
+    POLARIS_WITNESS_FLIP_CONTROL,
+    POLARIS_WITNESS_FRAME_COUNT,
+    POLARIS_PLANE_WITNESS_COUNT
+} PolarisPlaneWitnessRegister;
+static inline int jcos_polaris_witness_offset(JcosU32 pipe, PolarisPlaneWitnessRegister field,
+    JcosU64 span, JcosU32 *out) {
+    if (!out) return 0;
+    *out = 0;
+    if (pipe >= POLARIS_DISPLAY_PIPE_COUNT || (JcosU32)field >= POLARIS_PLANE_WITNESS_COUNT) return 0;
+    JcosU32 base;
+    if (!jcos_polaris_register_offset(pipe, POLARIS_REG_GRPH_ENABLE, span, &base)) return 0;
+    const JcosU32 delta[POLARIS_PLANE_WITNESS_COUNT] = {0x44U,0x48U,0x698U};
+    if (span < 4ULL || base + delta[field] > span - 4ULL) return 0;
+    *out = base + delta[field];
     return 1;
 }
 #endif

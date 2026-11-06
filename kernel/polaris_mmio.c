@@ -225,6 +225,17 @@ bool polaris_mmio_read_held(PolarisMmioHold *hold, u64 expected_hold_identity,
     if (slot == b->plan.page_count) return false;
     return read_leaf(b, page, slot, offset, out);
 }
+bool polaris_mmio_read_witness_held(PolarisMmioHold *hold,u64 expected_hold_identity,
+    Process *owner,u32 pipe,PolarisPlaneWitnessRegister field,u32 *out) {
+    if (!out) return false;
+    *out=0;
+    PolarisMmioBinding *b=held_binding(hold,expected_hold_identity,owner);
+    u32 offset;
+    if (!b || !jcos_polaris_witness_offset(pipe,field,b->plan.bar.size,&offset)) return false;
+    u32 page=offset&~0xFFFU,slot=0;
+    while (slot<b->plan.page_count && b->plan.page_offsets[slot]!=page) ++slot;
+    return slot<b->plan.page_count && read_leaf(b,page,slot,offset,out);
+}
 bool polaris_mmio_read_location_held(PolarisMmioHold *hold, u64 expected_hold_identity,
     Process *owner, PolarisLocationRegister field, u32 *out) {
     if (!out) return false;

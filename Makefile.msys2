@@ -198,12 +198,15 @@ $(USER_DISPLAY_SERVICE): $(BUILD)/user_crt0_startup.o \
 $(BUILD)/user_amd_polaris_reader.o: user/drivers/amd_polaris_reader.c user/drivers/amd_polaris_display.h include/amd_polaris_registers.h include/device_register_abi.h include/user_abi.h user/lib/syscall.h | $(BUILD)
 	$(CLANG) $(USER_CFLAGS) -c $< -o $@
 
-$(BUILD)/user_register_probe.o: user/register_reader_probe.c user/lib/syscall.h user/drivers/amd_polaris_display.h include/amd_polaris_registers.h include/device_register_abi.h include/register_probe_protocol.h include/program_startup.h include/user_abi.h | $(BUILD)
+$(BUILD)/user_amd_polaris_plane.o: user/drivers/amd_polaris_plane.c user/drivers/amd_polaris_plane.h user/drivers/amd_polaris_display.h include/polaris_plane_protocol.h include/amd_polaris_registers.h include/user_abi.h | $(BUILD)
 	$(CLANG) $(USER_CFLAGS) -c $< -o $@
 
-$(USER_REGISTER_PROBE): $(BUILD)/user_crt0_startup.o $(BUILD)/user_syscall.o $(BUILD)/user_register_probe.o $(BUILD)/user_amd_polaris_reader.o $(BUILD)/user_amd_polaris_display.o user/display_service.ld Makefile.msys2
+$(BUILD)/user_register_probe.o: user/register_reader_probe.c user/drivers/amd_polaris_plane.h include/polaris_plane_protocol.h user/lib/syscall.h user/drivers/amd_polaris_display.h include/amd_polaris_registers.h include/device_register_abi.h include/register_probe_protocol.h include/program_startup.h include/user_abi.h | $(BUILD)
+	$(CLANG) $(USER_CFLAGS) -c $< -o $@
+
+$(USER_REGISTER_PROBE): $(BUILD)/user_crt0_startup.o $(BUILD)/user_syscall.o $(BUILD)/user_register_probe.o $(BUILD)/user_amd_polaris_reader.o $(BUILD)/user_amd_polaris_display.o $(BUILD)/user_amd_polaris_plane.o user/display_service.ld Makefile.msys2
 	mkdir -p $(dir $@)
-	$(LD) -m elf_x86_64 -nostdlib -static -T user/display_service.ld -o $@ $(BUILD)/user_crt0_startup.o $(BUILD)/user_syscall.o $(BUILD)/user_register_probe.o $(BUILD)/user_amd_polaris_reader.o $(BUILD)/user_amd_polaris_display.o
+	$(LD) -m elf_x86_64 -nostdlib -static -T user/display_service.ld -o $@ $(BUILD)/user_crt0_startup.o $(BUILD)/user_syscall.o $(BUILD)/user_register_probe.o $(BUILD)/user_amd_polaris_reader.o $(BUILD)/user_amd_polaris_display.o $(BUILD)/user_amd_polaris_plane.o
 	$(CHECK_ELF_RELOCATIONS)
 
 $(BUILD)/user_compositor_service.o: user/compositor_service.c \
@@ -663,3 +666,7 @@ audit-polaris-registers:
 .PHONY: test-display-surface-wait
 test-display-surface-wait:
 	$(PYTHON) tools/test_display_surface_wait.py --cc $(CLANG) --build-dir $(BUILD)/host-tests
+
+.PHONY: test-polaris-plane
+test-polaris-plane:
+	$(PYTHON) tools/test_polaris_plane.py --cc $(CLANG) --build-dir $(BUILD)/host-tests

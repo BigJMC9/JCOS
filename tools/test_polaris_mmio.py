@@ -18,7 +18,7 @@ def main():
             "kernel/display_probe.c", "kernel/tests/polaris_mmio_plan_test.c", "kernel/physmap.c"],
         "vmm-device": ["tools/tests/vmm_device_test.c", "kernel/vmm.c"],
         "polaris-live-controller": ["tools/tests/polaris_live_capture_test.c",
-            "kernel/polaris_live_capture.c", "kernel/polaris_observation.c", "kernel/polaris_vram.c"],
+            "kernel/polaris_live_capture.c", "kernel/polaris_observation.c", "kernel/polaris_vram.c", "kernel/polaris_plane.c"],
         "polaris-vram": ["tools/tests/polaris_vram_test.c", "kernel/polaris_vram.c"],
         "polaris-observation": ["tools/tests/polaris_observation_test.c", "kernel/polaris_observation.c"],
     }
@@ -35,9 +35,10 @@ def main():
             subprocess.run([str(exe), "poison"], check=True)
             subprocess.run([str(exe), "location-poison"], check=True)
         if name == "polaris-live-controller":
-            for case in range(1, 73):
+            subprocess.run([str(exe), "pending-mode"], check=True)
+            for case in range(1, 104):
                 subprocess.run([str(exe), str(case)], check=True)
-            print("PASS: production live controller, success and 72 refusal/failure boundaries; retained quarantine, incomplete ledgers, no retry or device access.")
+            print("PASS: production live controller, zero/pending-mode success and 103 refusal/failure boundaries; retained quarantine, incomplete ledgers, no retry or device access.")
 
 if __name__ == "__main__":
     main()

@@ -218,7 +218,7 @@ This report change does not alter the version-1 register-read syscall.
 The default-off `POLARIS_LIVE_CAPTURE=1` build enables a separate monitor
 experiment, `polaris-capture`. It is excluded from automatic tests and boot.
 QEMU must refuse its unsupported target before any load. The host MMIO suite
-also covers the production forty-read controller, 72 failure/refusal cases,
+also covers the production forty-six-read controller, 103 failure/refusal cases,
 optional global-page cleanup/poisoning, GMC/HDP/GOP correlation arithmetic and
 replay of the measured linear-aligned snapshot. No host test accesses MMIO.
 
@@ -252,3 +252,36 @@ supervisor/service waits. Its deterministic cases cover that preemption
 boundary, already-dead and scheduled completion, blocked IPC, timeout, scheduler
 failure and malformed queue/thread state. It does not lengthen deadlines or
 rerun a failed hardware operation.
+
+
+`make -f Makefile.msys2 test-polaris-plane` exercises the real Ring3
+same-surface rebind planner against the independent kernel preview validator:
+all six pipes, five-step ordering, 640 individual tag/payload bit corruptions,
+stale identities/replay, invalid layouts and 24-bit frame progress/wrap.
+The copied-RAM `test device-register-reader` additionally exchanges two
+ordered witness samples and the five recipe steps with the real Ring3 process;
+missing/repeated witnesses, malformed selectors and invalidated observations
+refuse. These tests grant no GPU writes or native output.
+
+Experimental physical capture profile3 adds six update/flip/frame witness reads
+to the existing forty-load batch. The eighteen semantic witness offsets stay
+within the existing four pipe pages; host guards check every route and refusal.
+The source audit now compares108 offsets and44 field/enum/location facts with
+nineteen pinned files, including nine deliberate source/probe corruption checks.
+Physical qualification of this expanded batch requires a new image boot,
+independent serial logging and separate post-capture monitor confirmation.
+
+
+The plane host suite accepts only stable flip control0 or0x20, tests62 unknown
+flip-bit combinations and rejects mode changes in either direction. The real
+Ring3 reader diagnostic includes the observed0x20 witness pair and a separate
+preservation marker. Pending-mode is copied data; no hardware bit is cleared.
+
+`tools/replay_polaris_plane.py --raw-log path/to/serial.raw.log` runs the
+actual discovery/decoder/planner, kernel VRAM correlation and independent
+preview using a complete recorded profile3 journal. It refuses partial/changed
+samples and invalid flip state. The optional preserved policy sources and
+`--expect-refusal` reproduce the original exact-zero preflight. Replay is
+a host test and does not demonstrate a physical recipe exchange, new reads,
+native output or recovery. Keep the physical refusal and subsequent replay
+as separate results.
