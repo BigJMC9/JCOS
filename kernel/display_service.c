@@ -641,6 +641,29 @@ bool display_service_ping(u64 cookie, u64 *out_cookie) {
     return true;
 }
 
+bool display_service_polaris_model_check(u64 model_version, u32 *out_checks) {
+    if (!out_checks) return false;
+    *out_checks = 0U;
+    ManagedServiceConnection connection;
+    k_memset(&connection, 0, sizeof(connection));
+    if (!connect(&connection)) return false;
+    IpcMessage request;
+    IpcMessage reply;
+    k_memset(&request, 0, sizeof(request));
+    k_memset(&reply, 0, sizeof(reply));
+    request.word_count = 3U;
+    request.words[0] = service_header(JCOS_DISPLAY_SERVICE_OP_POLARIS_MODEL);
+    request.words[1] = 0ULL;
+    request.words[2] = model_version;
+    if (!managed_service_call(&g_display_service, &connection, &request, &reply) ||
+        reply.word_count != 4U || reply.words[0] != JCOS_DISPLAY_SERVICE_REPLY_POLARIS_MODEL ||
+        reply.words[1] != connection.incarnation ||
+        reply.words[2] != JCOS_DISPLAY_SERVICE_PROTOCOL_VERSION ||
+        reply.words[3] != JCOS_DISPLAY_POLARIS_MODEL_EXPECTED) return false;
+    *out_checks = (u32)reply.words[3];
+    return true;
+}
+
 bool display_service_redraw(void) {
     ManagedServiceConnection connection;
     k_memset(&connection, 0, sizeof(connection));

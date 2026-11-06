@@ -1,3 +1,4 @@
+#include "display_inventory.h"
 #include "uefi.h"
 #include "elf.h"
 
@@ -37,6 +38,7 @@ __attribute__((used)) static void *g_relocation_anchor = (void *)&efi_main;
 
 static EFI_SYSTEM_TABLE *g_st;
 static EFI_BOOT_SERVICES *g_bs;
+
 static BootInfo g_boot_info;
 
 static void text(CHAR16 *s) {
@@ -358,6 +360,8 @@ static EFI_STATUS get_framebuffer(BootInfo *boot) {
     boot->framebuffer_green_mask = gop->Mode->Info->PixelInformation.GreenMask;
     boot->framebuffer_blue_mask = gop->Mode->Info->PixelInformation.BlueMask;
     boot->framebuffer_reserved_mask = gop->Mode->Info->PixelInformation.ReservedMask;
+    boot->framebuffer_mode = gop->Mode->Mode;
+    loader_capture_display_inventory(g_bs, boot, gop);
     return EFI_SUCCESS;
 }
 

@@ -1,5 +1,7 @@
 #include "framebuffer.h"
 
+#include "display.h"
+#include "interrupts.h"
 #include "lib.h"
 #include "vmm.h"
 
@@ -10,7 +12,70 @@
 #define FRAMEBUFFER_MEMORY_TYPE_UNDESCRIBED 0xFFFFFFFFU
 
 static FramebufferInfo g_framebuffer;
-static bool g_ready;
+static bool g_ready; /* Immutable boot metadata remains ready after retirement. */
+static FramebufferScanoutState g_scanout;
+static u32 g_kernel_writers;
+
+static u64 framebuffer_irq_save(void) {
+    u64 flags;
+    __asm__ volatile ("pushfq; popq %0" : "=r"(flags) : : "memory");
+    interrupts_disable();
+    return flags;
+}
+
+static void framebuffer_irq_restore(u64 flags) {
+    if (flags & (1ULL << 9)) interrupts_enable();
+}
+
+void framebuffer_scanout_status(FramebufferScanoutStatus *out) {
+    if (!out) return;
+    u64 flags = framebuffer_irq_save();
+    out->state = g_scanout;
+    out->kernel_writers = g_kernel_writers;
+    framebuffer_irq_restore(flags);
+}
+
+bool framebuffer_firmware_valid(void) {
+    u64 flags = framebuffer_irq_save();
+    bool valid = g_scanout == FRAMEBUFFER_SCANOUT_FIRMWARE;
+    framebuffer_irq_restore(flags);
+    return valid;
+}
+
+bool framebuffer_write_begin(void) {
+    u64 flags = framebuffer_irq_save();
+    bool allowed = g_scanout == FRAMEBUFFER_SCANOUT_FIRMWARE &&
+        display_kernel_framebuffer_writable() && g_kernel_writers != ~0U;
+    if (allowed) ++g_kernel_writers;
+    framebuffer_irq_restore(flags);
+    return allowed;
+}
+
+void framebuffer_write_end(void) {
+    u64 flags = framebuffer_irq_save();
+    if (g_kernel_writers) --g_kernel_writers;
+    if (!g_kernel_writers && g_scanout == FRAMEBUFFER_SCANOUT_RETIRING)
+        g_scanout = FRAMEBUFFER_SCANOUT_RETIRED;
+    framebuffer_irq_restore(flags);
+}
+
+bool framebuffer_writers_idle(void) {
+    u64 flags = framebuffer_irq_save();
+    bool idle = !g_kernel_writers;
+    framebuffer_irq_restore(flags);
+    return idle;
+}
+
+bool framebuffer_firmware_retire(void) {
+    u64 flags = framebuffer_irq_save();
+    if (g_scanout == FRAMEBUFFER_SCANOUT_FIRMWARE)
+        g_scanout = FRAMEBUFFER_SCANOUT_RETIRING;
+    if (g_scanout == FRAMEBUFFER_SCANOUT_RETIRING && !g_kernel_writers)
+        g_scanout = FRAMEBUFFER_SCANOUT_RETIRED;
+    bool drained = g_scanout == FRAMEBUFFER_SCANOUT_RETIRED;
+    framebuffer_irq_restore(flags);
+    return drained;
+}
 
 static bool direct_span_is_mmio(const BootInfo *boot, u64 start, u64 size, u32 *out_type) {
     if (out_type) *out_type = 0U;
@@ -116,6 +181,8 @@ static u32 channel(u8 value, u32 mask) {
 }
 
 bool framebuffer_init(const BootInfo *boot) {
+    /* Re-reading saved GOP data cannot revalidate disrupted hardware. */
+    if (g_ready) return false;
     g_ready = false;
     k_memset(&g_framebuffer, 0, sizeof(g_framebuffer));
 
@@ -158,6 +225,7 @@ bool framebuffer_init(const BootInfo *boot) {
     g_framebuffer.blue_mask = boot->framebuffer_blue_mask;
     g_framebuffer.reserved_mask = boot->framebuffer_reserved_mask;
     g_ready = true;
+    g_scanout = FRAMEBUFFER_SCANOUT_FIRMWARE;
     return true;
 }
 
@@ -181,13 +249,15 @@ u32 framebuffer_rgb(u8 r, u8 g, u8 b) {
 }
 
 void framebuffer_pixel(u32 x, u32 y, u32 color) {
-    if (!g_ready || x >= g_framebuffer.width || y >= g_framebuffer.height) return;
+    if (!g_ready || x >= g_framebuffer.width || y >= g_framebuffer.height ||
+        !framebuffer_write_begin()) return;
     volatile u32 *fb = (volatile u32 *)(u64)g_framebuffer.physical_base;
     fb[(u64)y * g_framebuffer.pixels_per_scanline + x] = color;
+    framebuffer_write_end();
 }
 
 void framebuffer_fill(u32 color) {
-    if (!g_ready) return;
+    if (!framebuffer_write_begin()) return;
     u32 *fb = (u32 *)(u64)g_framebuffer.physical_base;
     u32 pitch = g_framebuffer.pixels_per_scanline;
     for (u32 y = 0; y < g_framebuffer.height; ++y) {
@@ -200,10 +270,13 @@ void framebuffer_fill(u32 color) {
         }
         for (; x < g_framebuffer.width; ++x) row[x] = color;
     }
+    framebuffer_write_end();
 }
 
 void framebuffer_fill_rect(u32 x, u32 y, u32 width, u32 height, u32 color) {
-    if (!g_ready) return;
+    if (!g_ready || !width || !height ||
+        x >= g_framebuffer.width || y >= g_framebuffer.height ||
+        !framebuffer_write_begin()) return;
     u32 x_end = x + width;
     u32 y_end = y + height;
     if (x_end < x || x_end > g_framebuffer.width) x_end = g_framebuffer.width;
@@ -220,6 +293,7 @@ void framebuffer_fill_rect(u32 x, u32 y, u32 width, u32 height, u32 color) {
         }
         for (; col < x_end; ++col) line[col - x] = color;
     }
+    framebuffer_write_end();
 }
 
 void framebuffer_scroll_up(u32 rows, u32 fill_color) {
@@ -228,6 +302,7 @@ void framebuffer_scroll_up(u32 rows, u32 fill_color) {
         framebuffer_fill(fill_color);
         return;
     }
+    if (!framebuffer_write_begin()) return;
     volatile u32 *fb = (volatile u32 *)(u64)g_framebuffer.physical_base;
     u32 pitch = g_framebuffer.pixels_per_scanline;
     u32 height = g_framebuffer.height;
@@ -238,12 +313,14 @@ void framebuffer_scroll_up(u32 rows, u32 fill_color) {
     for (u32 y = height - rows; y < height; ++y)
         for (u32 x = 0; x < width; ++x)
             fb[(u64)y * pitch + x] = fill_color;
+    framebuffer_write_end();
 }
 
 void framebuffer_blit_rgb332_row(u32 x, u32 y, u32 width,
     const u8 *source, u32 source_width) {
     if (!g_ready || !source || !source_width || !width ||
-        x >= g_framebuffer.width || y >= g_framebuffer.height) return;
+        x >= g_framebuffer.width || y >= g_framebuffer.height ||
+        !framebuffer_write_begin()) return;
     if (width > g_framebuffer.width - x) width = g_framebuffer.width - x;
     volatile u32 *fb = (volatile u32 *)(u64)g_framebuffer.physical_base;
     volatile u32 *row = fb + (u64)y * g_framebuffer.pixels_per_scanline + x;
@@ -255,6 +332,7 @@ void framebuffer_blit_rgb332_row(u32 x, u32 y, u32 width,
         u8 b = (u8)((pixel & 3U) * 255U / 3U);
         row[column] = framebuffer_rgb(r, g, b);
     }
+    framebuffer_write_end();
 }
 
 u32 framebuffer_width(void) { return g_ready ? g_framebuffer.width : 0; }

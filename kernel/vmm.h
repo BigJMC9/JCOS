@@ -19,6 +19,10 @@ typedef u64 vm_flags_t;
 #define VM_USER  (1ULL << 1)
 #define VM_EXEC  (1ULL << 2)
 #define VM_UNCACHED (1ULL << 3)
+/* Strict UC via PAT entry 3 (PCD=PWT=1, PAT=0), only while that entry is UC.
+ * Unlike legacy VM_UNCACHED, this requires a checked CPU cache configuration. */
+#define VM_DEVICE (1ULL << 4)
+bool vmm_device_memory_supported(void);
 
 typedef struct {
     frame_t root_frame;

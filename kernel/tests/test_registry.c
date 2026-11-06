@@ -1,5 +1,8 @@
 #include "test_registry.h"
 #include "display_lease_test.h"
+#include "device_register_reader_test.h"
+#include "display_probe_test.h"
+#include "polaris_read_profile_test.h"
 #include "display_service_test.h"
 #include "display_surface_test.h"
 
@@ -99,12 +102,18 @@ static void kernel_test_set_deep_runs(const char *name, u32 runs) {
 static void kernel_test_registry_init(void) {
     if (g_test_registry_initialized) return;
     g_test_registry_initialized = true;
+    kernel_test_add_live("device-register-reader", "Ring3 semantic register reads, read-only capability, revocation and stale identity refusal",
+        KERNEL_TEST_ACCEPTANCE, device_register_reader_test_run, device_register_reader_test_cleanup_run);
     kernel_test_add("display-lease", "validated GOP resource and exclusive framebuffer ownership handoff",
         KERNEL_TEST_ACCEPTANCE, display_lease_test_run, display_lease_test_cleanup_run);
     kernel_test_add_live("display-service", "Ring3 GOP service direct mapping, fault recovery and restart",
         KERNEL_TEST_ACCEPTANCE, display_service_test_run, display_service_test_cleanup_run);
     kernel_test_add_live("display-surface", "bounded shared RGB332 surface from Ring3 app through display service",
         KERNEL_TEST_ACCEPTANCE, display_surface_test_run, display_surface_test_cleanup_run);
+    kernel_test_add("polaris-read-profile", "finite capture policy and immutable physical qualification refusals",
+        KERNEL_TEST_ACCEPTANCE, polaris_read_profile_test_run, 0);
+    kernel_test_add("display-probe", "read-only PCI display inventory, malformed snapshots and GOP provenance",
+        KERNEL_TEST_ACCEPTANCE, display_probe_test_run, 0);
     kernel_test_add("pci-assignment", "exclusive PCI function ownership, quiesce and quarantine lifecycle",
         KERNEL_TEST_ACCEPTANCE, pci_assignment_test_run, pci_assignment_test_cleanup_run);
     kernel_test_add("pci-config", "serialized PCI config access and non-destructive BAR bounds discovery",
@@ -193,6 +202,7 @@ static void kernel_test_registry_init(void) {
      */
     kernel_test_set_deep_runs("pci-assignment", 4U);
     kernel_test_set_deep_runs("pci-config", 4U);
+    kernel_test_set_deep_runs("display-probe", 4U);
     kernel_test_set_deep_runs("pci-bar-resource", 4U);
     kernel_test_set_deep_runs("pci-bar-access", 4U);
     kernel_test_set_deep_runs("pci-irq-resource", 8U);

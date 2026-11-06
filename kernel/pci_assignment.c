@@ -350,6 +350,18 @@ bool pci_assignment_mark_bus_master_exposed(PciAssignment *assignment,
     return marked;
 }
 
+bool pci_assignment_note_inherited_bus_master(PciAssignment *assignment,
+    u64 owner_process_id) {
+    if (!assignment || !owner_process_id) return false;
+    u64 flags = assignment_irq_save();
+    bool marked = assignment_valid_locked(assignment) &&
+        assignment->state == PCI_ASSIGNMENT_ASSIGNED &&
+        assignment->owner_process_id == owner_process_id;
+    if (marked) assignment->bus_master_exposed = true;
+    assignment_irq_restore(flags);
+    return marked;
+}
+
 bool pci_assignment_begin_quiesce(PciAssignment *assignment, u64 owner_process_id) {
     if (!assignment || !owner_process_id) return false;
     u64 flags = assignment_irq_save();

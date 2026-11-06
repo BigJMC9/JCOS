@@ -83,6 +83,11 @@ void display_lease_test_run(void) {
     report("KERNEL -> HANDOFF / FRAMEBUFFER QUIET", handoff);
     if (!handoff) goto fail;
 
+    bool retirement_refused = !display_retire_firmware_scanout() &&
+        framebuffer_firmware_valid() && display_direct_state() == DISPLAY_LEASE_HANDOFF;
+    report("SCANOUT RETIREMENT REFUSED DURING HANDOFF", retirement_refused);
+    if (!retirement_refused) goto fail;
+
     bool map_contract = mapping.physical_base == before.physical_base &&
         mapping.size == before.size && mapping.virtual_base == DISPLAY_TEST_USER_BASE &&
         mapping.flags == (VM_WRITE | VM_UNCACHED) &&

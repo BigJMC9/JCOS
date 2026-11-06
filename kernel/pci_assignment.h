@@ -84,6 +84,12 @@ bool pci_assignment_dma_gate_release(PciAssignment *assignment, u64 owner_proces
 bool pci_assignment_mark_bus_master_exposed(PciAssignment *assignment,
     u64 owner_process_id);
 
+/* Trusted observer records bus mastering already enabled by firmware.
+ * This only sets the sticky taint; it neither enables DMA nor proves isolation.
+ * Record before preparing access, even if later preparation fails. */
+bool pci_assignment_note_inherited_bus_master(PciAssignment *assignment,
+    u64 owner_process_id);
+
 /* Callers must stop new submissions before entering QUIESCING. Completion is
  * refused while any capability still pins the assignment resource. */
 bool pci_assignment_begin_quiesce(PciAssignment *assignment, u64 owner_process_id);

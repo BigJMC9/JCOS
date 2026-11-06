@@ -15,6 +15,13 @@ typedef enum {
 
 bool display_init(void);
 bool display_available(void);
+/* Used by the framebuffer admission gate with local interrupts disabled.
+ * The existing lease remains the sole CPU ownership ledger. */
+bool display_kernel_framebuffer_writable(void);
+/* Kernel-only precondition for a future native grant. Refuses live direct
+ * leases; callers must stop/reap their owner first. No native access is granted.
+ * False can mean writers are draining: retirement is irreversible once begun. */
+bool display_retire_firmware_scanout(void);
 DeviceResource *display_resource(void);
 bool display_present_user(Process *process, CapabilityHandle handle, u64 pixels,
     u32 width, u32 height);

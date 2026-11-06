@@ -8,6 +8,7 @@
 #include "display.h"
 #include "framebuffer.h"
 #include "timer.h"
+#include "device_register_reader.h"
 
 _Static_assert(IPC_MESSAGE_MAX_WORDS == JCOS_IPC_MESSAGE_MAX_WORDS, "Kernel/userspace IPC ABI mismatch");
 
@@ -206,6 +207,15 @@ InterruptFrame *syscall_dispatch(InterruptFrame *frame) {
         case JCOS_SYSCALL_CLOCK_FREQUENCY:
             frame->rax = timer_frequency();
             return frame;
+
+        case JCOS_SYSCALL_DEVICE_REGISTER_READ: {
+            u32 value = 0U;
+            bool read = device_register_reader_read(syscall_current_process(), frame->rbx,
+                frame->rdx, frame->rcx, &value);
+            frame->rcx = read ? value : 0ULL;
+            frame->rax = read ? SYSCALL_RESULT_OK : SYSCALL_RESULT_FAILED;
+            return frame;
+        }
 
         case JCOS_SYSCALL_DISPLAY_INFO: {
             Process *process = syscall_current_process();

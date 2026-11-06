@@ -44,6 +44,8 @@ u64 display_service_thread_id(void);
 
 bool display_service_ping(u64 cookie, u64 *out_cookie);
 bool display_service_redraw(void);
+/* Exercises the userspace Polaris module with synthetic register data only. */
+bool display_service_polaris_model_check(u64 model_version, u32 *out_checks);
 bool display_service_fault(void);
 bool display_service_last_exit_info(ProcessExitInfo *out);
 

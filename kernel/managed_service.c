@@ -125,13 +125,24 @@ static bool service_wait_ready(ManagedService *service) {
 static bool service_wait_thread_dead(ManagedService *service, u64 timeout) {
     if (!timeout || !timer_initialized()) return false;
     u64 started = timer_ticks();
-    while (!service_thread_dead(service)) {
-        if ((u64)(timer_ticks() - started) >= timeout) return false;
+    for (;;) {
+        /* Match the supervisor wait: completion may race separate state reads.
+         * Observe and schedule atomically under the current UP discipline. */
+        u64 flags = service_irq_save();
+        if (service_thread_dead(service)) {
+            service_irq_restore(flags);
+            return true;
+        }
         Thread *thread = service_thread(service);
-        if (!thread || thread->state != THREAD_STATE_READY || !thread->on_run_queue) return false;
-        if (!service_schedule_once()) return false;
+        if ((u64)(timer_ticks() - started) >= timeout ||
+            !thread || thread->state != THREAD_STATE_READY || !thread->on_run_queue) {
+            service_irq_restore(flags);
+            return false;
+        }
+        bool scheduled = scheduler_yield();
+        service_irq_restore(flags);
+        if (!scheduled) return false;
     }
-    return true;
 }
 
 static bool service_endpoints_idle(const ManagedService *service) {

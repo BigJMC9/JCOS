@@ -367,3 +367,30 @@ jcos_ipc_receive_blocking:
 
 
 .section .note.GNU-stack,"",@progbits
+
+.section .text
+.global jcos_device_register_read
+.type jcos_device_register_read,@function
+jcos_device_register_read:
+    test %rcx, %rcx
+    jz .Lregister_read_null
+    push %rbx
+    push %rcx
+    mov %rdi, %rbx
+    mov %rdx, %rcx
+    mov %rsi, %rdx
+    mov $JCOS_SYSCALL_DEVICE_REGISTER_READ, %eax
+    int $0x80
+    pop %r10
+    pop %rbx
+    cmp $JCOS_SYSCALL_RESULT_OK, %rax
+    jne .Lregister_read_failed
+    mov %ecx, (%r10)
+    mov $1, %eax
+    ret
+.Lregister_read_failed:
+    movl $0, (%r10)
+.Lregister_read_null:
+    xor %eax, %eax
+    ret
+.size jcos_device_register_read, .-jcos_device_register_read

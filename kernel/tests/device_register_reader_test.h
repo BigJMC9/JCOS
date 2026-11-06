@@ -1,0 +1,5 @@
+#ifndef JA_OS_DEVICE_REGISTER_READER_TEST_H
+#define JA_OS_DEVICE_REGISTER_READER_TEST_H
+void device_register_reader_test_run(void);
+void device_register_reader_test_cleanup_run(void);
+#endif

@@ -106,6 +106,9 @@ typedef EFI_STATUS (EFIAPI *EFI_EXIT_BOOT_SERVICES)(EFI_HANDLE, UINTN);
 typedef EFI_STATUS (EFIAPI *EFI_SET_WATCHDOG_TIMER)(UINTN, u64, UINTN, CHAR16 *);
 typedef EFI_STATUS (EFIAPI *EFI_LOCATE_PROTOCOL)(EFI_GUID *, void *, void **);
 
+typedef EFI_STATUS (EFIAPI *EFI_LOCATE_HANDLE_BUFFER)(u32, EFI_GUID *, void *, UINTN *, EFI_HANDLE **);
+typedef EFI_STATUS (EFIAPI *EFI_LOCATE_DEVICE_PATH)(EFI_GUID *, void **, EFI_HANDLE *);
+
 typedef struct EFI_BOOT_SERVICES {
     EFI_TABLE_HEADER Hdr;
     void *RaiseTPL;
@@ -128,7 +131,7 @@ typedef struct EFI_BOOT_SERVICES {
     void *Reserved;
     void *RegisterProtocolNotify;
     void *LocateHandle;
-    void *LocateDevicePath;
+    EFI_LOCATE_DEVICE_PATH LocateDevicePath;
     void *InstallConfigurationTable;
     void *LoadImage;
     void *StartImage;
@@ -144,7 +147,7 @@ typedef struct EFI_BOOT_SERVICES {
     void *CloseProtocol;
     void *OpenProtocolInformation;
     void *ProtocolsPerHandle;
-    void *LocateHandleBuffer;
+    EFI_LOCATE_HANDLE_BUFFER LocateHandleBuffer;
     EFI_LOCATE_PROTOCOL LocateProtocol;
     void *InstallMultipleProtocolInterfaces;
     void *UninstallMultipleProtocolInterfaces;
@@ -245,5 +248,53 @@ typedef struct EFI_GRAPHICS_OUTPUT_PROTOCOL {
     void *Blt;
     EFI_GRAPHICS_OUTPUT_PROTOCOL_MODE *Mode;
 } EFI_GRAPHICS_OUTPUT_PROTOCOL;
+
+/* Optional GOP provenance uses only Pci.Read and GetLocation. Layout follows
+ * UEFI PCI I/O Protocol; no device memory or firmware ROM is accessed. */
+struct EFI_PCI_IO_PROTOCOL;
+typedef EFI_STATUS (EFIAPI *EFI_PCI_IO_CONFIG_ACCESS)(
+    struct EFI_PCI_IO_PROTOCOL *, u32, u32, UINTN, void *);
+typedef struct {
+    EFI_PCI_IO_CONFIG_ACCESS Read;
+    EFI_PCI_IO_CONFIG_ACCESS Write;
+} EFI_PCI_IO_CONFIG;
+typedef EFI_STATUS (EFIAPI *EFI_PCI_IO_GET_LOCATION)(
+    struct EFI_PCI_IO_PROTOCOL *, UINTN *, UINTN *, UINTN *, UINTN *);
+typedef EFI_STATUS (EFIAPI *EFI_PCI_IO_GET_BAR_ATTRIBUTES)(
+    struct EFI_PCI_IO_PROTOCOL *, u8, u64 *, void **);
+
+typedef struct {
+    u32 SizeOfEdid;
+    u8 *Edid;
+} EFI_EDID_ACTIVE_PROTOCOL;
+
+typedef struct EFI_PCI_IO_PROTOCOL {
+    void *PollMem;
+    void *PollIo;
+    void *MemRead;
+    void *MemWrite;
+    void *IoRead;
+    void *IoWrite;
+    EFI_PCI_IO_CONFIG Pci;
+    void *CopyMem;
+    void *Map;
+    void *Unmap;
+    void *AllocateBuffer;
+    void *FreeBuffer;
+    void *Flush;
+    EFI_PCI_IO_GET_LOCATION GetLocation;
+    void *Attributes;
+    EFI_PCI_IO_GET_BAR_ATTRIBUTES GetBarAttributes;
+    void *SetBarAttributes;
+    u64 RomSize;
+    void *RomImage;
+} EFI_PCI_IO_PROTOCOL;
+
+_Static_assert(__builtin_offsetof(EFI_PCI_IO_PROTOCOL, GetBarAttributes) == 128, "PCI BAR attributes offset");
+_Static_assert(__builtin_offsetof(EFI_EDID_ACTIVE_PROTOCOL, Edid) == 8, "EDID pointer offset");
+_Static_assert(__builtin_offsetof(EFI_PCI_IO_PROTOCOL, Pci) == 48, "PCI I/O config offset");
+_Static_assert(__builtin_offsetof(EFI_PCI_IO_PROTOCOL, GetLocation) == 112, "PCI I/O location offset");
+_Static_assert(__builtin_offsetof(EFI_BOOT_SERVICES, LocateDevicePath) == 184, "locate device path offset");
+_Static_assert(__builtin_offsetof(EFI_BOOT_SERVICES, LocateHandleBuffer) == 312, "locate handles offset");
 
 #endif

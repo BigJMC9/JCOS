@@ -19,11 +19,12 @@ USER_RUNTIME_BLOCK_TEST := $(ROOTFS_DIR)/bin/runtimeblocktest.elf
 USER_DISPLAY_SERVICE := $(ROOTFS_DIR)/bin/displayservice.elf
 USER_COMPOSITOR_SERVICE := $(ROOTFS_DIR)/bin/compositorservice.elf
 USER_SURFACE_APP := $(ROOTFS_DIR)/bin/surfaceapp.elf
+USER_REGISTER_PROBE := $(ROOTFS_DIR)/bin/registerprobe.elf
 USER_MEDIA_PLAYER := $(ROOTFS_DIR)/bin/mediaplayer.elf
 .DEFAULT_GOAL := all
 .DELETE_ON_ERROR:
 
-USER_PROGRAMS := $(USER_ELF_TEST) $(USER_SUPERVISOR) $(USER_WORKER_SERVICE) $(USER_ORDINARY_SERVICE) $(USER_ORDINARY_SERVICE_REPLACEMENT) $(USER_CONSOLE_SERVICE) $(USER_HELLO) $(USER_INPUT_ECHO) $(USER_LAUNCH_PROBE) $(USER_PCI_DRIVER_PROBE) $(USER_RUNTIME_TEST) $(USER_RUNTIME_BLOCK_TEST) $(USER_RUNTIME_CANCEL_TEST) $(USER_DISPLAY_SERVICE) $(USER_COMPOSITOR_SERVICE) $(USER_SURFACE_APP) $(USER_MEDIA_PLAYER)
+USER_PROGRAMS := $(USER_ELF_TEST) $(USER_SUPERVISOR) $(USER_WORKER_SERVICE) $(USER_ORDINARY_SERVICE) $(USER_ORDINARY_SERVICE_REPLACEMENT) $(USER_CONSOLE_SERVICE) $(USER_HELLO) $(USER_INPUT_ECHO) $(USER_LAUNCH_PROBE) $(USER_PCI_DRIVER_PROBE) $(USER_RUNTIME_TEST) $(USER_RUNTIME_BLOCK_TEST) $(USER_RUNTIME_CANCEL_TEST) $(USER_DISPLAY_SERVICE) $(USER_COMPOSITOR_SERVICE) $(USER_SURFACE_APP) $(USER_MEDIA_PLAYER) $(USER_REGISTER_PROBE)
 ROOTFS_FILES := $(shell test -d $(ROOTFS_DIR) && find $(ROOTFS_DIR) -type f)
 IMAGE := $(BUILD)/JA-os.img
 
@@ -163,15 +164,24 @@ $(USER_ORDINARY_SERVICE_REPLACEMENT): $(BUILD)/user_crt0_startup.o \
 
 $(BUILD)/user_display_service.o: user/display_service.c \
                                  user/lib/syscall.h \
+                                 user/tests/amd_polaris_display_test.h \
                                  include/user_abi.h \
                                  include/program_startup.h \
                                  include/service_protocol.h \
                                  include/display_service_protocol.h | $(BUILD)
 	$(CLANG) $(USER_CFLAGS) -c $< -o $@
 
+$(BUILD)/user_amd_polaris_display.o: user/drivers/amd_polaris_display.c user/drivers/amd_polaris_display.h include/amd_polaris_registers.h include/user_abi.h | $(BUILD)
+	$(CLANG) $(USER_CFLAGS) -c $< -o $@
+
+$(BUILD)/user_amd_polaris_display_test.o: user/tests/amd_polaris_display_test.c user/tests/amd_polaris_display_test.h user/drivers/amd_polaris_display.h include/amd_polaris_registers.h include/user_abi.h | $(BUILD)
+	$(CLANG) $(USER_CFLAGS) -c $< -o $@
+
 $(USER_DISPLAY_SERVICE): $(BUILD)/user_crt0_startup.o \
                          $(BUILD)/user_syscall.o \
                          $(BUILD)/user_display_service.o \
+                         $(BUILD)/user_amd_polaris_display.o \
+                         $(BUILD)/user_amd_polaris_display_test.o \
                          user/display_service.ld Makefile.msys2
 	mkdir -p $(dir $@)
 	$(LD) -m elf_x86_64 -nostdlib -static \
@@ -179,7 +189,20 @@ $(USER_DISPLAY_SERVICE): $(BUILD)/user_crt0_startup.o \
 	      -o $@ \
 	      $(BUILD)/user_crt0_startup.o \
 	      $(BUILD)/user_syscall.o \
-	      $(BUILD)/user_display_service.o
+	      $(BUILD)/user_display_service.o \
+	      $(BUILD)/user_amd_polaris_display.o \
+	      $(BUILD)/user_amd_polaris_display_test.o
+	$(CHECK_ELF_RELOCATIONS)
+
+$(BUILD)/user_amd_polaris_reader.o: user/drivers/amd_polaris_reader.c user/drivers/amd_polaris_display.h include/amd_polaris_registers.h include/device_register_abi.h include/user_abi.h user/lib/syscall.h | $(BUILD)
+	$(CLANG) $(USER_CFLAGS) -c $< -o $@
+
+$(BUILD)/user_register_probe.o: user/register_reader_probe.c user/lib/syscall.h user/drivers/amd_polaris_display.h include/amd_polaris_registers.h include/device_register_abi.h include/register_probe_protocol.h include/program_startup.h include/user_abi.h | $(BUILD)
+	$(CLANG) $(USER_CFLAGS) -c $< -o $@
+
+$(USER_REGISTER_PROBE): $(BUILD)/user_crt0_startup.o $(BUILD)/user_syscall.o $(BUILD)/user_register_probe.o $(BUILD)/user_amd_polaris_reader.o $(BUILD)/user_amd_polaris_display.o user/display_service.ld Makefile.msys2
+	mkdir -p $(dir $@)
+	$(LD) -m elf_x86_64 -nostdlib -static -T user/display_service.ld -o $@ $(BUILD)/user_crt0_startup.o $(BUILD)/user_syscall.o $(BUILD)/user_register_probe.o $(BUILD)/user_amd_polaris_reader.o $(BUILD)/user_amd_polaris_display.o
 	$(CHECK_ELF_RELOCATIONS)
 
 $(BUILD)/user_compositor_service.o: user/compositor_service.c \
@@ -527,10 +550,13 @@ check-run-tools: check-image-tools
 $(BUILD):
 	mkdir -p $(BUILD)
 
-$(BUILD)/loader.obj: loader/loader.c loader/uefi.h loader/elf.h include/boot_info.h | $(BUILD)
+$(BUILD)/loader.obj: loader/loader.c loader/display_inventory.h loader/uefi.h loader/elf.h include/boot_info.h | $(BUILD)
 	$(CLANG) $(LOADER_CFLAGS) -c loader/loader.c -o $@
 
-$(EFI): $(BUILD)/loader.obj
+$(BUILD)/loader_display_inventory.obj: loader/display_inventory.c loader/display_inventory.h loader/uefi.h include/boot_info.h include/boot_display.h | $(BUILD)
+	$(CLANG) $(LOADER_CFLAGS) -c $< -o $@
+
+$(EFI): $(BUILD)/loader.obj $(BUILD)/loader_display_inventory.obj
 	MSYS2_ARG_CONV_EXCL='*' $(LLD_LINK) /subsystem:efi_application /entry:efi_main /nodefaultlib /machine:x64 \
 	           /dynamicbase /nxcompat /out:$@ $^
 
@@ -578,3 +604,45 @@ run-headless: check-run-tools $(IMAGE) tools/run_qemu.sh
 clean:
 	rm -rf $(BUILD)
 	rm -f $(USER_PROGRAMS)
+
+.PHONY: test-boot-display
+test-boot-display:
+	$(PYTHON) tools/test_loader_display_inventory.py --cc $(CLANG) --build-dir $(BUILD)/host-tests
+
+.PHONY: test-serial
+test-serial:
+	$(PYTHON) tools/test_serial_tx.py --cc $(CLANG) --build-dir $(BUILD)/host-tests
+
+.PHONY: test-serial-capture
+test-serial-capture:
+	$(PYTHON) tools/test_serial_capture.py --build-dir $(BUILD)/host-tests
+
+.PHONY: test-framebuffer-scanout
+test-framebuffer-scanout:
+	$(PYTHON) tools/test_framebuffer_scanout.py --cc $(CLANG) --build-dir $(BUILD)/host-tests
+
+.PHONY: test-amd-polaris-display
+test-amd-polaris-display:
+	$(PYTHON) tools/test_amd_polaris_display.py --cc $(CLANG) --build-dir $(BUILD)/host-tests
+
+.PHONY: test-supervisor-wait
+test-supervisor-wait:
+	$(PYTHON) tools/test_supervisor_wait.py --cc $(CLANG) --build-dir $(BUILD)/host-tests
+
+.PHONY: test-managed-service-wait
+test-managed-service-wait:
+	$(PYTHON) tools/test_supervisor_wait.py --managed --cc $(CLANG) --build-dir $(BUILD)/host-tests
+
+.PHONY: test-polaris-mmio
+test-polaris-mmio:
+	$(PYTHON) tools/test_polaris_mmio.py --cc $(CLANG) --build-dir $(BUILD)/host-tests
+
+.PHONY: test-polaris-read-profile
+test-polaris-read-profile:
+	$(PYTHON) tools/test_polaris_read_profile.py --cc $(CLANG) --build-dir $(BUILD)/host-tests
+
+# Cache exact upstream references separately; audit performs no download.
+POLARIS_SOURCE_DIR ?= build/rx570-source-review
+.PHONY: audit-polaris-registers
+audit-polaris-registers:
+	$(PYTHON) tools/audit_polaris_registers.py --source-dir $(POLARIS_SOURCE_DIR) --cc $(CLANG) --build-dir $(BUILD)/register-audit --check-refusals

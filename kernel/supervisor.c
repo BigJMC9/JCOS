@@ -163,13 +163,25 @@ static bool supervisor_wait_thread_dead(u64 timeout_ticks) {
     if (!timeout_ticks || !timer_initialized()) return false;
 
     u64 started = timer_ticks();
-    while (!supervisor_thread_dead()) {
-        if ((u64)(timer_ticks() - started) >= timeout_ticks) return false;
+    for (;;) {
+        /* The child may terminate on a timer preemption. Observe DEAD and
+         * READY under one UP critical section, including the scheduling
+         * handoff; otherwise completion between checks looks like failure. */
+        u64 flags = supervisor_interrupt_save();
+        if (supervisor_thread_dead()) {
+            supervisor_interrupt_restore(flags);
+            return true;
+        }
         Thread *thread = supervisor_thread();
-        if (!thread || thread->state != THREAD_STATE_READY || !thread->on_run_queue) return false;
-        if (!supervisor_schedule_once()) return false;
+        if ((u64)(timer_ticks() - started) >= timeout_ticks ||
+            !thread || thread->state != THREAD_STATE_READY || !thread->on_run_queue) {
+            supervisor_interrupt_restore(flags);
+            return false;
+        }
+        bool scheduled = scheduler_yield();
+        supervisor_interrupt_restore(flags);
+        if (!scheduled) return false;
     }
-    return true;
 }
 
 static bool supervisor_wait_fault_exit(u64 expected_pid, u64 expected_tid) {

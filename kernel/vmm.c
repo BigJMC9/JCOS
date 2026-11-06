@@ -11,6 +11,7 @@
 #define PTE_PRESENT (1ULL << 0)
 #define PTE_WRITE   (1ULL << 1)
 #define PTE_USER    (1ULL << 2)
+#define PTE_PWT     (1ULL << 3)
 #define PTE_PCD     (1ULL << 4)
 #define PTE_HUGE    (1ULL << 7)
 #define PTE_NX      (1ULL << 63)
@@ -488,6 +489,17 @@ done:
     return result;
 }
 
+bool vmm_device_memory_supported(void) {
+    u32 a, b, c, d;
+    arch_cpuid(1U, 0U, &a, &b, &c, &d);
+    (void)a; (void)b; (void)c;
+    u64 cr0 = arch_read_cr0();
+    /* No PAT programming, cache transitions, PCID or MTRR changes here. */
+    return g_nx_enabled && profile_supported() && (d & (1U << 16)) &&
+        (cr0 & CR0_WRITE_PROTECT) && !(cr0 & ((1ULL << 29) | (1ULL << 30))) &&
+        ((arch_read_msr(0x277U) >> 24) & 0xFFULL) == 0ULL;
+}
+
 static bool map_page_locked(VmPageMap *map, u64 virtual_address, frame_t frame, vm_flags_t flags) {
     if (!map || map->root_frame == FRAME_INVALID || map->destroy_pending) return false;
     if (map->shared_source && !map_active(map)) return false;
@@ -495,7 +507,9 @@ static bool map_page_locked(VmPageMap *map, u64 virtual_address, frame_t frame, 
     if (!valid_mapping_frame(frame)) return false;
     if (!g_nx_enabled) return false;
     /* Refuse flags we do not understand yet. */
-    if (flags & ~(VM_WRITE | VM_USER | VM_EXEC | VM_UNCACHED)) return false;
+    if (flags & ~(VM_WRITE | VM_USER | VM_EXEC | VM_UNCACHED | VM_DEVICE)) return false;
+    if ((flags & VM_DEVICE) &&
+        ((flags & VM_UNCACHED) || !vmm_device_memory_supported())) return false;
 
     u32 i4 = pml4_index(virtual_address);
     if (!map_owns_pml4_index(map,i4)) return false;
@@ -602,6 +616,7 @@ static bool map_page_locked(VmPageMap *map, u64 virtual_address, frame_t frame, 
     if (flags & VM_WRITE) entry_flags |= PTE_WRITE;
     if (flags & VM_USER) entry_flags |= PTE_USER;
     if (flags & VM_UNCACHED) entry_flags |= PTE_PCD;
+    if (flags & VM_DEVICE) entry_flags |= PTE_PCD | PTE_PWT;
     if (flags & VM_EXEC) entry_flags &= ~PTE_NX;
 
     pt[i1] = physical | entry_flags;
@@ -667,7 +682,8 @@ bool vmm_query_page(const VmPageMap *map, u64 virtual_address, frame_t *frame, v
         if ((pml4e & PTE_WRITE) && (pdpte & PTE_WRITE) && (pde & PTE_WRITE) && (pte & PTE_WRITE)) result |= VM_WRITE;
         if ((pml4e & PTE_USER) && (pdpte & PTE_USER) && (pde & PTE_USER) && (pte & PTE_USER)) result |= VM_USER;
         if (!((pml4e | pdpte | pde | pte) & PTE_NX)) result |= VM_EXEC;
-        if (pte & PTE_PCD) result |= VM_UNCACHED;
+        if ((pte & (PTE_PCD | PTE_PWT)) == (PTE_PCD | PTE_PWT)) result |= VM_DEVICE;
+        else if (pte & PTE_PCD) result |= VM_UNCACHED;
 
         *flags = result;
     }
@@ -683,7 +699,8 @@ static vm_flags_t vmm_test_entry_flags(u64 entry) {
     if (entry & PTE_WRITE) flags |= VM_WRITE;
     if (entry & PTE_USER) flags |= VM_USER;
     if (!(entry & PTE_NX)) flags |= VM_EXEC;
-    if (entry & PTE_PCD) flags |= VM_UNCACHED;
+    if ((entry & (PTE_PCD | PTE_PWT)) == (PTE_PCD | PTE_PWT)) flags |= VM_DEVICE;
+    else if (entry & PTE_PCD) flags |= VM_UNCACHED;
 
     return flags;
 }

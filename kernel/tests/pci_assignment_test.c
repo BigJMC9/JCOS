@@ -65,8 +65,15 @@ static bool settle_assignment(PciAssignment *assignment) {
     u64 owner = pci_assignment_owner_process_id(assignment);
     PciAssignmentState state = pci_assignment_state(assignment);
     if (state == PCI_ASSIGNMENT_ASSIGNED) {
-        if (!owner || !pci_assignment_begin_quiesce(assignment, owner)) return false;
-        state = PCI_ASSIGNMENT_QUIESCING;
+        if (!owner) return false;
+        if (pci_assignment_bus_master_exposed(assignment)) {
+            /* This fixture only marks software history; no DMA was enabled. */
+            if (!pci_assignment_force_quarantine(assignment, owner)) return false;
+            state = PCI_ASSIGNMENT_QUARANTINED;
+        } else {
+            if (!pci_assignment_begin_quiesce(assignment, owner)) return false;
+            state = PCI_ASSIGNMENT_QUIESCING;
+        }
     }
     if (state == PCI_ASSIGNMENT_QUIESCING) {
         if (!owner || !pci_assignment_complete_release(assignment, owner)) return false;
@@ -211,6 +218,15 @@ void pci_assignment_test_run(void) {
         !pci_assignment_authorized(&g_assignment, &g_driver_a, stale_a);
     report("REPLACEMENT DRIVER GETS FRESH AUTHORITY", replacement);
     if (!replacement) goto fail;
+
+    bool inherited = !pci_assignment_note_inherited_bus_master(&g_assignment, g_driver_a.id) &&
+        !pci_assignment_bus_master_exposed(&g_assignment) &&
+        pci_assignment_note_inherited_bus_master(&g_assignment, g_driver_b.id) &&
+        pci_assignment_bus_master_exposed(&g_assignment) &&
+        !pci_assignment_begin_quiesce(&g_assignment, g_driver_b.id) &&
+        !pci_assignment_dma_gate_active(&g_assignment);
+    report("INHERITED BUS-MASTER HISTORY / ORDINARY RELEASE REFUSED (MODEL)", inherited);
+    if (!inherited) goto fail;
 
     bool quarantined = pci_assignment_quarantine(&g_assignment, g_driver_b.id) &&
         pci_assignment_state(&g_assignment) == PCI_ASSIGNMENT_QUARANTINED &&

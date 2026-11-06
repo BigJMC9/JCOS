@@ -31,7 +31,7 @@ Registry metadata selects whether a diagnostic needs normal live preemption or a
 | Runtime and scheduling | `user-runtime`, `user-runtime-block`, `execution-profile`, `scheduler-idle`, `scheduler-idle-exit`, `runtime-preemption` |
 | Launch and services | `program-launch`, `program-startup`, `service-incarnation`, `service-robustness`, `service-policy` |
 | Console and archive policy | `userspace-shell`, `console-app`, `console-input`, `files-userspace`, `launch-userspace` |
-| Graphics | `display-lease`, `display-service`, `display-surface` |
+| Graphics | `polaris-read-profile`, `device-register-reader`, `display-probe`, `display-lease`, `display-service`, `display-surface` |
 | PCI access | `pci-config`, `pci-assignment`, `pci-bar-resource`, `pci-bar-access` |
 | IRQ and DMA lifetime | `pci-irq-resource`, `pci-irq-router`, `pci-dma-buffer`, `pci-dma-submission` |
 | Device recovery | `pci-device-recovery`, `pci-driver-hostile` |
@@ -60,9 +60,13 @@ Compare resource counts to the fixture's captured baseline, including persistent
 
 ### Emulator and automated checks
 
-The QEMU run targets boot an image for interactive testing; they are not an unattended test runner. COM1 is connected to the launching terminal. Preserve the full serial transcript, including boot state, per-step outcomes and the final summary.
+The QEMU run targets boot an image for interactive testing; they are not an unattended test runner. COM1 remains connected to the launching terminal and a timestamped host log is saved automatically. For physical-machine capture, use [Console capture](CONSOLE_CAPTURE.md). Preserve boot state, per-step outcomes and the final summary.
 
 The default QEMU setup does not add a native xHCI USB keyboard. `test usb-host` checks capability-field decoding, context offsets, speed/EP0 models, completion classification and descriptor parsing. It does not enumerate a physical keyboard or test its disconnect behavior.
+
+Firmware fallback and native rescue have separate acceptance contracts; see [Graphics recovery](GRAPHICS_RECOVERY.md).
+
+Use `displayprobe` for read-only display PCI/GOP inventory and `displayfirmware` for all six copied firmware queries, source indices and raw descriptor prefixes; see [Display inventory](DISPLAY_PROBE.md). The `display-probe` test exercises decoder refusals and preserved configuration/lease state, including fallback on QEMU.
 
 Graphics checks require a valid GOP resource and an allowed mapping. `display-surface` includes bounded surfaces, composition/focus and failure/recovery scenarios. A passing automated input case does not replace manual verification of the physical keyboard route or the interactive `gui` session.
 
@@ -119,3 +123,93 @@ Keep one record per actual run with:
 | Limits | What was not exercised or measured |
 
 Keep public release references independent of protocol versions; see [Versioning](VERSIONING.md).
+
+## Firmware scanout access checks
+
+Run `make -f Makefile.msys2 test-framebuffer-scanout` for hardware-free
+regressions against the actual framebuffer, display lease and terminal code.
+The three fresh-process scenarios cover idle retirement, simulated preemption
+inside rendering and retirement during a multi-row presentation. They verify
+that retired boot metadata cannot re-enable framebuffer writes, new GOP
+mappings or terminal rendering, and that serial/terminal processing continues.
+
+The `display-lease` and `display-service` diagnostics also verify
+retirement refusal while a handoff or real Ring3 direct lease exists. They do
+not retire the active test display. `displayprobe` reports boot-scanout
+validity independently of the writer lease and saved memory bounds. See the
+[graphics recovery contract](GRAPHICS_RECOVERY.md) for native-grant ordering and
+the limits of these software checks.
+
+The display-service test also runs the userspace Polaris reader/decoder against
+fixed synthetic register data, rejects an unsupported model version and repeats
+the check in the replacement service after its injected fault.
+`make -f Makefile.msys2 test-amd-polaris-display` runs the broader host
+negative-input matrix. Neither path reads physical GPU registers; see the
+[AMD Polaris backend reference](AMD_POLARIS_DISPLAY.md).
+
+`make -f Makefile.msys2 test-supervisor-wait` exercises the production
+supervisor terminal wait with a simulated completion between state observations,
+plus already-completed, scheduling-failure and timeout paths. The wait observes
+state and schedules under the existing single-CPU interrupt discipline.
+
+`test device-register-reader` exercises the new capability-checked
+semantic read syscall from a dedicated Ring3 process. It verifies the Polaris
+adapter's thirty-call capture, malformed requests, owner/rights restrictions,
+revocation, stale IDs/handles, owner faults and restored resource counts.
+All register values come from a kernel-owned RAM bank; the physical profile
+constructor remains unavailable. No GPU mapping or register read is performed.
+
+`make -f Makefile.msys2 test-managed-service-wait` runs the same
+deterministic terminal-completion boundary regression against the generic
+managed-service wait. The existing `test-supervisor-wait` target continues
+to cover the supervisor wait.
+
+`make -f Makefile.msys2 test-polaris-mmio` exercises the production
+BAR5 planner/mapping lifecycle with hosted hardware/VM doubles and the real
+VMM with hosted page-table RAM. It checks complete raw descriptor/audit matching,
+D0/decode, all mapping failure positions, rollback/release retries, retained
+assignment pins, stale identity and leaf refusals, RAM/alias conflicts and
+strict UC PTE encoding/refusal. No mapped MMIO leaf is accessed.
+
+The existing `display-probe` test also checks the strict four-page planner.
+The `pci-assignment` test checks sticky inherited bus-master history in the
+real assignment implementation, without enabling DMA or resetting hardware.
+The physical reader profile remains unavailable. No bare-metal run is needed
+to validate these software-only additions; live GPU reads require separate
+hardware qualification and independent serial control.
+
+`make -f Makefile.msys2 test-polaris-read-profile` checks finite capture
+ordering/budgets/expiry, immutable physical qualification blockers, and the
+production PCI observation/report path using hosted hardware facts. In JA OS,
+`test polaris-read-profile` runs the deterministic models.
+
+The expanded `device-register-reader` test also exercises the finite
+copied-RAM profile through actual Ring3 syscalls. It checks thirty-read
+completion, no rearm, wrong-order/all-ones closure and factory bounds. A spinning
+partial-capture process leaves an independent Ring3 console service able to
+perform new work, then undergoes deadline refusal and bounded forced cleanup.
+A fresh process faults after a partial capture. No physical GPU is accessed.
+
+`display-readiness` prints local RX 570 qualification observations and
+unresolved blockers using read-only PCI config. It cannot activate hardware.
+Keep its output with a future serial capture; COM1 availability reported by
+the OS is distinct from verified input/output on another physical computer.
+No fresh monitor transcription is required for these software-only tests.
+
+
+The offline `audit-polaris-registers` target compares the compiled semantic
+selectors, offsets and named decoder masks with the exact upstream files and
+SHA-256 values in `docs/POLARIS_REGISTER_REVIEW.json`. Supply the separate
+source cache through `POLARIS_SOURCE_DIR`. The target downloads nothing and
+does not touch a device. Its source/offset/selector/mask/duplicate refusal
+checks and decoder host matrix qualify source agreement only.
+
+The binding host suite also covers kernel operation holds: cleanup closes
+admission and retains mappings/assignment pins until all holds drain.
+Copied/duplicate token storage, stale identities, capacity overflow and
+post-close acquisition are refused. Release is tested after owner death and
+quarantine. No MMIO leaf is read.
+
+`display-readiness` version 2 explicitly retains a selected-pipe/display-power
+blocker: observed PCI D0 does not prove the chosen pipe's power/clock state.
+This report change does not alter the version-1 register-read syscall.

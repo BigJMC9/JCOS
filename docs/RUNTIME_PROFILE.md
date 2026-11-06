@@ -66,9 +66,11 @@ isolation tests; changing compiler flags alone is insufficient.
 ## Entry and syscall contracts
 
 The register syscall transport uses `INT 0x80`. `include/user_abi.h` is the
-numeric source of truth: the present calls occupy 0 through 11 and cover thread
-identity/exit, nonblocking and blocking IPC, clock ticks/frequency, and legacy
-display/audio helpers. Do not replace this transport with `SYSCALL/SYSRET`
+numeric source of truth: the present calls occupy 0 through 12 and cover thread
+identity/exit, nonblocking and blocking IPC, clock ticks/frequency, legacy
+display/audio helpers, and a versioned capability-checked semantic register read.
+The register-read mechanism currently supports kernel-owned diagnostic banks;
+it has no physical-device constructor. Do not replace this transport with `SYSCALL/SYSRET`
 without a separate entry/return ABI and validation design.
 
 IPC transports at most four words in registers. `JcosIpcMessage` is a C wrapper

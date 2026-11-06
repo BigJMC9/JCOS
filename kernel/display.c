@@ -30,7 +30,7 @@ static void display_irq_restore(u64 flags) {
 }
 
 bool display_init(void) {
-    if (!framebuffer_width() || !framebuffer_height() ||
+    if (!framebuffer_firmware_valid() || !framebuffer_width() || !framebuffer_height() ||
         !device_resource_create(&g_display, DEVICE_RESOURCE_DISPLAY)) return false;
     g_owner_process_id = 0ULL;
     g_direct_owner_process_id = 0ULL;
@@ -40,7 +40,29 @@ bool display_init(void) {
 }
 
 bool display_available(void) {
-    return device_resource_valid(&g_display);
+    return device_resource_valid(&g_display) && framebuffer_firmware_valid();
+}
+
+bool display_kernel_framebuffer_writable(void) {
+    return g_direct_state == DISPLAY_LEASE_KERNEL ||
+        g_direct_state == DISPLAY_LEASE_RECLAIM;
+}
+
+bool display_retire_firmware_scanout(void) {
+    u64 flags = display_irq_save();
+    /* Reclaim first, after the service's borrowed mapping has been removed.
+     * A state flag cannot revoke stores through a live Ring3 alias. */
+    FramebufferScanoutStatus status;
+    framebuffer_scanout_status(&status);
+    if (g_direct_state != DISPLAY_LEASE_KERNEL ||
+        status.state == FRAMEBUFFER_SCANOUT_UNAVAILABLE) {
+        display_irq_restore(flags);
+        return false;
+    }
+    bool drained = framebuffer_firmware_retire();
+    display_irq_restore(flags);
+    terminal_set_render_enabled(false);
+    return drained;
 }
 
 DeviceResource *display_resource(void) {
@@ -93,7 +115,8 @@ bool display_direct_prepare(u64 user_virtual_base, ProgramBorrowedMappingSpec *o
     mapping.flags = VM_WRITE | VM_UNCACHED;
 
     u64 flags = display_irq_save();
-    if (g_direct_state != DISPLAY_LEASE_KERNEL) {
+    if (g_direct_state != DISPLAY_LEASE_KERNEL || !framebuffer_firmware_valid() ||
+        !framebuffer_writers_idle()) {
         display_irq_restore(flags);
         return false;
     }
@@ -118,7 +141,8 @@ bool display_direct_commit(Process *process) {
         process->kernel || !process->id) return false;
 
     u64 flags = display_irq_save();
-    bool committed = g_direct_state == DISPLAY_LEASE_HANDOFF;
+    bool committed = g_direct_state == DISPLAY_LEASE_HANDOFF &&
+        framebuffer_firmware_valid();
     if (committed) {
         g_direct_owner_process_id = process->id;
         g_direct_state = DISPLAY_LEASE_USER;
@@ -146,7 +170,7 @@ static bool display_direct_restore_kernel(DisplayLeaseState expected, u64 owner_
 
     /* Keep legacy presentation blocked while the terminal reconstructs its
      * viewport. Serial logging remains independent throughout the handoff. */
-    if (restore_render) terminal_set_render_enabled(true);
+    if (restore_render && framebuffer_firmware_valid()) terminal_set_render_enabled(true);
 
     flags = display_irq_save();
     if (g_direct_state != DISPLAY_LEASE_RECLAIM) {
@@ -182,7 +206,7 @@ bool display_present_user(Process *process, CapabilityHandle handle, u64 pixels,
 
     u32 screen_width = framebuffer_width();
     u32 screen_height = framebuffer_height();
-    if (!screen_width || !screen_height) return false;
+    if (!screen_width || !screen_height || !framebuffer_write_begin()) return false;
 
     u32 target_width = screen_width;
     u32 target_height = (u32)(((u64)height * screen_width) / width);
@@ -206,10 +230,17 @@ bool display_present_user(Process *process, CapabilityHandle handle, u64 pixels,
         if (source_y != loaded_row) {
             u64 offset = (u64)source_y * width;
             if (pixels > ~0ULL - offset ||
-                !user_memory_read(process, pixels + offset, g_source_row, width)) return false;
+                !user_memory_read(process, pixels + offset, g_source_row, width)) {
+                framebuffer_write_end();
+                return false;
+            }
             loaded_row = source_y;
         }
         framebuffer_blit_rgb332_row(left, top + y, target_width, g_source_row, width);
     }
-    return true;
+    /* Retirement may close admission while this outer writer drains. Report
+     * failure rather than success for a partially rendered retired scanout. */
+    bool presented = framebuffer_firmware_valid();
+    framebuffer_write_end();
+    return presented;
 }

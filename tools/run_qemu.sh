@@ -62,8 +62,21 @@ if [ ! -f "$CODE" ] || [ ! -f "$VARS" ]; then
 fi
 
 mkdir -p build
-RUNTIME_VARS=build/OVMF_VARS.runtime.fd
+RUNTIME_VARS=${JCOS_RUNTIME_VARS:-build/OVMF_VARS.runtime.fd}
+mkdir -p "$(dirname "$RUNTIME_VARS")"
 cp "$VARS" "$RUNTIME_VARS"
+
+# Keep one byte-for-byte COM1 transcript per launch while preserving stdio input.
+SERIAL_LOG=${JCOS_SERIAL_LOG:-build/serial-$(date -u +%Y%m%dT%H%M%SZ)-$$.log}
+case "$SERIAL_LOG" in
+    *,*) echo "Serial log paths containing commas are unsupported." >&2; exit 1 ;;
+esac
+if [ -e "$SERIAL_LOG" ]; then
+    echo "Serial log already exists; choose a new JCOS_SERIAL_LOG: $SERIAL_LOG" >&2
+    exit 1
+fi
+mkdir -p "$(dirname "$SERIAL_LOG")"
+printf 'COM1 transcript: %s\n' "$SERIAL_LOG"
 
 set -- \
     -machine q35 \
@@ -72,7 +85,8 @@ set -- \
     -drive "if=pflash,format=raw,file=$RUNTIME_VARS" \
     -drive "format=raw,file=$IMAGE" \
     -monitor none \
-    -serial stdio
+    -chardev "stdio,id=jcserial,logfile=$SERIAL_LOG,logappend=off" \
+    -serial chardev:jcserial
 
 if [ "$HEADLESS" -eq 1 ]; then
     AUDIO_DRIVER=${JCOS_AUDIO_BACKEND:-none}

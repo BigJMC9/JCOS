@@ -1,0 +1,362 @@
+{
+  "schema_version": 1,
+  "upstream": {
+    "repository": "https://github.com/torvalds/linux",
+    "tag": "v6.12",
+    "commit": "adc218676eef25575469234709c2d87185ca223a"
+  },
+  "sources": [
+    {
+      "path": "drivers/gpu/drm/amd/include/asic_reg/dce/dce_11_2_d.h",
+      "file": "dce_11_2_d.h",
+      "sha256": "7f865912129ac67966827035d5a34b4362f8a3156a56e298cb995386ce77a644"
+    },
+    {
+      "path": "drivers/gpu/drm/amd/include/asic_reg/dce/dce_11_2_sh_mask.h",
+      "file": "dce_11_2_sh_mask.h",
+      "sha256": "cd5dde10fcdf14c5355f54dc34c84b7fef30d8864045ae4f5172d7e66beab737"
+    },
+    {
+      "path": "drivers/gpu/drm/amd/display/dc/dce/dce_mem_input.c",
+      "file": "dce_mem_input.c",
+      "sha256": "f26423abb765f6725af68a77cc5ba70c124761b58c1406b0b81b289c5ea8b2e7"
+    },
+    {
+      "path": "drivers/gpu/drm/amd/display/dc/dce110/dce110_timing_generator.c",
+      "file": "dce110_timing_generator.c",
+      "sha256": "aa7451a5d9b7d57a3005312ccf680e17204644a9cb5a88f17b9045ace5d1ca84"
+    },
+    {
+      "path": "drivers/gpu/drm/amd/amdgpu/dce_v11_0.c",
+      "file": "dce_v11_0.c",
+      "sha256": "8448608bd8a6b3859fa3582f1dbc639d04f12aaa992ca3ba42a634a8091c6ebc"
+    },
+    {
+      "path": "drivers/gpu/drm/amd/display/dc/core/dc_resource.c",
+      "file": "dc_resource.c",
+      "sha256": "e70d8083fe63381f6bad86f6e2da4e7ea28bb2f678f794ca02b7e8c45cde730e"
+    },
+    {
+      "path": "drivers/gpu/drm/amd/display/dc/hwss/dce110/dce110_hwseq.c",
+      "file": "dce110_hwseq.c",
+      "sha256": "4bc7c1bb6bbda9ed0c998e5954985ebaceeceda16fe8761696e15242c3b8e796"
+    },
+    {
+      "path": "drivers/gpu/drm/amd/display/dc/hwss/dce/dce_hwseq.c",
+      "file": "dce_hwseq.c",
+      "sha256": "7c343bae926585e75aaac7590f23f8b3afa541052ed0537beccf172cd0c75a61"
+    },
+    {
+      "path": "drivers/gpu/drm/amd/display/dc/resource/dce112/dce112_resource.c",
+      "file": "dce112_resource.c",
+      "sha256": "38d0357ba68540159df93ca29dee2b26b201d8bf6940dfed3854f8270146a413"
+    },
+    {
+      "path": "drivers/gpu/drm/amd/display/dc/inc/reg_helper.h",
+      "file": "reg_helper.h",
+      "sha256": "3d4a2cfdbaa61dccc3cfe417a5109796c989623ed49e87572b58d6c392ee88b9"
+    },
+    {
+      "path": "drivers/gpu/drm/amd/display/dc/dce/dce_mem_input.h",
+      "file": "dce_mem_input.h",
+      "sha256": "846bdc6cb8e252c63ecf29ea932dbf5125ebdeb4303ee61b30af3ee7b0fceb52"
+    },
+    {
+      "path": "drivers/gpu/drm/amd/display/dc/dc_helper.c",
+      "file": "dc_helper.c",
+      "sha256": "a6605000454d3acd3ce8def57772fbaf752459402cf024a3e3fece095719057f"
+    },
+    {
+      "path": "drivers/gpu/drm/amd/display/dc/hwss/dce112/dce112_hwseq.c",
+      "file": "dce112_hwseq.c",
+      "sha256": "afd4f61b3686352f0f8441815d386435b908de5c8545c6fa7fc0e841290c709d"
+    }
+  ],
+  "offset_source": "dce_11_2_d.h",
+  "mask_source": "dce_11_2_sh_mask.h",
+  "fields": [
+    {
+      "selector": "POLARIS_REG_CRTC_CONTROL",
+      "family": "CRTC",
+      "register": "CRTC_CONTROL",
+      "hardware_read_side_effects": "not established by offset/mask definitions",
+      "source_access_evidence": {
+        "kind": "explicit_read",
+        "file": "dce110_timing_generator.c",
+        "function": "dce110_is_tg_enabled",
+        "line": 2103
+      }
+    },
+    {
+      "selector": "POLARIS_REG_CRTC_BLANK",
+      "family": "CRTC",
+      "register": "CRTC_BLANK_CONTROL",
+      "hardware_read_side_effects": "not established by offset/mask definitions",
+      "source_access_evidence": {
+        "kind": "explicit_read",
+        "file": "dce110_timing_generator.c",
+        "function": "dce110_tg_is_blanked",
+        "line": 1968
+      }
+    },
+    {
+      "selector": "POLARIS_REG_CRTC_INTERLACE",
+      "family": "CRTC",
+      "register": "CRTC_INTERLACE_CONTROL",
+      "hardware_read_side_effects": "not established by offset/mask definitions",
+      "source_access_evidence": {
+        "kind": "definition_only_in_reviewed_sources"
+      }
+    },
+    {
+      "selector": "POLARIS_REG_GRPH_ENABLE",
+      "family": "DCP",
+      "register": "GRPH_ENABLE",
+      "hardware_read_side_effects": "not established by offset/mask definitions",
+      "source_access_evidence": {
+        "kind": "read_modify_write",
+        "file": "dce_mem_input.c",
+        "function": "dce_mi_program_surface_config",
+        "line": 640
+      }
+    },
+    {
+      "selector": "POLARIS_REG_GRPH_CONTROL",
+      "family": "DCP",
+      "register": "GRPH_CONTROL",
+      "hardware_read_side_effects": "not established by offset/mask definitions",
+      "source_access_evidence": {
+        "kind": "read_modify_write",
+        "file": "dce_mem_input.c",
+        "function": "program_tiling",
+        "line": 450
+      }
+    },
+    {
+      "selector": "POLARIS_REG_GRPH_SWAP",
+      "family": "DCP",
+      "register": "GRPH_SWAP_CNTL",
+      "hardware_read_side_effects": "not established by offset/mask definitions",
+      "source_access_evidence": {
+        "kind": "specified_initial_value_write_only",
+        "file": "dce_mem_input.c",
+        "function": "program_grph_pixel_format",
+        "line": 576
+      }
+    },
+    {
+      "selector": "POLARIS_REG_PRIMARY_LOW",
+      "family": "DCP",
+      "register": "GRPH_PRIMARY_SURFACE_ADDRESS",
+      "hardware_read_side_effects": "not established by offset/mask definitions",
+      "source_access_evidence": {
+        "kind": "post_write_readback",
+        "file": "dce_v11_0.c",
+        "function": "dce_v11_0_page_flip",
+        "line": 280
+      }
+    },
+    {
+      "selector": "POLARIS_REG_PRIMARY_HIGH",
+      "family": "DCP",
+      "register": "GRPH_PRIMARY_SURFACE_ADDRESS_HIGH",
+      "hardware_read_side_effects": "not established by offset/mask definitions",
+      "source_access_evidence": {
+        "kind": "specified_initial_value_write_only",
+        "file": "dce_mem_input.c",
+        "function": "program_pri_addr",
+        "line": 813
+      }
+    },
+    {
+      "selector": "POLARIS_REG_PITCH",
+      "family": "DCP",
+      "register": "GRPH_PITCH",
+      "hardware_read_side_effects": "not established by offset/mask definitions",
+      "source_access_evidence": {
+        "kind": "specified_initial_value_write_only",
+        "file": "dce_mem_input.c",
+        "function": "program_size_and_rotation",
+        "line": 519
+      }
+    },
+    {
+      "selector": "POLARIS_REG_OFFSET_X",
+      "family": "DCP",
+      "register": "GRPH_SURFACE_OFFSET_X",
+      "hardware_read_side_effects": "not established by offset/mask definitions",
+      "source_access_evidence": {
+        "kind": "write_only_example",
+        "file": "dce_v11_0.c",
+        "function": "dce_v11_0_crtc_do_set_base",
+        "line": 2100
+      }
+    },
+    {
+      "selector": "POLARIS_REG_OFFSET_Y",
+      "family": "DCP",
+      "register": "GRPH_SURFACE_OFFSET_Y",
+      "hardware_read_side_effects": "not established by offset/mask definitions",
+      "source_access_evidence": {
+        "kind": "write_only_example",
+        "file": "dce_v11_0.c",
+        "function": "dce_v11_0_crtc_do_set_base",
+        "line": 2101
+      }
+    },
+    {
+      "selector": "POLARIS_REG_X_START",
+      "family": "DCP",
+      "register": "GRPH_X_START",
+      "hardware_read_side_effects": "not established by offset/mask definitions",
+      "source_access_evidence": {
+        "kind": "specified_initial_value_write_only",
+        "file": "dce_mem_input.c",
+        "function": "program_size_and_rotation",
+        "line": 507
+      }
+    },
+    {
+      "selector": "POLARIS_REG_Y_START",
+      "family": "DCP",
+      "register": "GRPH_Y_START",
+      "hardware_read_side_effects": "not established by offset/mask definitions",
+      "source_access_evidence": {
+        "kind": "specified_initial_value_write_only",
+        "file": "dce_mem_input.c",
+        "function": "program_size_and_rotation",
+        "line": 510
+      }
+    },
+    {
+      "selector": "POLARIS_REG_X_END",
+      "family": "DCP",
+      "register": "GRPH_X_END",
+      "hardware_read_side_effects": "not established by offset/mask definitions",
+      "source_access_evidence": {
+        "kind": "specified_initial_value_write_only",
+        "file": "dce_mem_input.c",
+        "function": "program_size_and_rotation",
+        "line": 513
+      }
+    },
+    {
+      "selector": "POLARIS_REG_Y_END",
+      "family": "DCP",
+      "register": "GRPH_Y_END",
+      "hardware_read_side_effects": "not established by offset/mask definitions",
+      "source_access_evidence": {
+        "kind": "specified_initial_value_write_only",
+        "file": "dce_mem_input.c",
+        "function": "program_size_and_rotation",
+        "line": 516
+      }
+    }
+  ],
+  "masks": [
+    {
+      "local": "POLARIS_CRTC_MASTER_EN_MASK",
+      "upstream": "CRTC_CONTROL__CRTC_MASTER_EN_MASK"
+    },
+    {
+      "local": "POLARIS_CRTC_CURRENT_MASTER_EN_STATE_MASK",
+      "upstream": "CRTC_CONTROL__CRTC_CURRENT_MASTER_EN_STATE_MASK"
+    },
+    {
+      "local": "POLARIS_CRTC_DISP_READ_REQUEST_DISABLE_MASK",
+      "upstream": "CRTC_CONTROL__CRTC_DISP_READ_REQUEST_DISABLE_MASK"
+    },
+    {
+      "local": "POLARIS_CRTC_CURRENT_BLANK_STATE_MASK",
+      "upstream": "CRTC_BLANK_CONTROL__CRTC_CURRENT_BLANK_STATE_MASK"
+    },
+    {
+      "local": "POLARIS_CRTC_BLANK_DATA_EN_MASK",
+      "upstream": "CRTC_BLANK_CONTROL__CRTC_BLANK_DATA_EN_MASK"
+    },
+    {
+      "local": "POLARIS_CRTC_INTERLACE_ENABLE_MASK",
+      "upstream": "CRTC_INTERLACE_CONTROL__CRTC_INTERLACE_ENABLE_MASK"
+    },
+    {
+      "local": "POLARIS_GRPH_ENABLE_MASK",
+      "upstream": "GRPH_ENABLE__GRPH_ENABLE_MASK"
+    },
+    {
+      "local": "POLARIS_GRPH_KEYER_ALPHA_SEL_MASK",
+      "upstream": "GRPH_ENABLE__GRPH_KEYER_ALPHA_SEL_MASK"
+    },
+    {
+      "local": "POLARIS_GRPH_DEPTH_MASK",
+      "upstream": "GRPH_CONTROL__GRPH_DEPTH_MASK"
+    },
+    {
+      "local": "POLARIS_GRPH_FORMAT_MASK",
+      "upstream": "GRPH_CONTROL__GRPH_FORMAT_MASK"
+    },
+    {
+      "local": "POLARIS_GRPH_FORMAT_SHIFT",
+      "upstream": "GRPH_CONTROL__GRPH_FORMAT__SHIFT"
+    },
+    {
+      "local": "POLARIS_GRPH_ARRAY_MODE_MASK",
+      "upstream": "GRPH_CONTROL__GRPH_ARRAY_MODE_MASK"
+    },
+    {
+      "local": "POLARIS_GRPH_ARRAY_MODE_SHIFT",
+      "upstream": "GRPH_CONTROL__GRPH_ARRAY_MODE__SHIFT"
+    },
+    {
+      "local": "POLARIS_GRPH_ADDRESS_TRANSLATION_ENABLE_MASK",
+      "upstream": "GRPH_CONTROL__GRPH_ADDRESS_TRANSLATION_ENABLE_MASK"
+    },
+    {
+      "local": "POLARIS_GRPH_COLOR_EXPANSION_MODE_MASK",
+      "upstream": "GRPH_CONTROL__GRPH_COLOR_EXPANSION_MODE_MASK"
+    },
+    {
+      "local": "POLARIS_GRPH_PRIMARY_SURFACE_ADDRESS_MASK",
+      "upstream": "GRPH_PRIMARY_SURFACE_ADDRESS__GRPH_PRIMARY_SURFACE_ADDRESS_MASK"
+    },
+    {
+      "local": "POLARIS_GRPH_PRIMARY_SURFACE_ADDRESS_HIGH_MASK",
+      "upstream": "GRPH_PRIMARY_SURFACE_ADDRESS_HIGH__GRPH_PRIMARY_SURFACE_ADDRESS_HIGH_MASK"
+    },
+    {
+      "local": "POLARIS_GRPH_PITCH_MASK",
+      "upstream": "GRPH_PITCH__GRPH_PITCH_MASK"
+    },
+    {
+      "local": "POLARIS_GRPH_X_START_MASK",
+      "upstream": "GRPH_X_START__GRPH_X_START_MASK"
+    },
+    {
+      "local": "POLARIS_GRPH_Y_START_MASK",
+      "upstream": "GRPH_Y_START__GRPH_Y_START_MASK"
+    },
+    {
+      "local": "POLARIS_GRPH_X_END_MASK",
+      "upstream": "GRPH_X_END__GRPH_X_END_MASK"
+    },
+    {
+      "local": "POLARIS_GRPH_Y_END_MASK",
+      "upstream": "GRPH_Y_END__GRPH_Y_END_MASK"
+    }
+  ],
+  "scope": "Source layout/field audit only; does not grant or qualify physical GPU access",
+  "unresolved": [
+    "per-register hardware read-side-effect contract",
+    "selected pipe/display power-domain accessibility",
+    "firmware power/clock/reset transition exclusion",
+    "physical serial input/output/control",
+    "physical first-capture evidence"
+  ],
+  "review_findings": [
+    "Five fields have explicit reads, read-modify-write calls, or post-write readback examples in the reviewed source set; this does not certify read side effects in JA OS firmware state.",
+    "REG_SET with a supplied initial value is not a read example; generic_reg_set_ex and generic_reg_update_ex have different access behavior.",
+    "DCE11.2 hardware sequencing includes controller-specific display power gating; PCI D0 does not establish the chosen display-pipe power/clock state.",
+    "Primary-surface low writes trigger an update in the reviewed page-flip path; no write to the capture fields is permitted.",
+    "Do not blindly probe all six pipes or infer the active pipe from GOP address/geometry.",
+    "BAR5 operation retention requires stable binding/token identities, permanent close-before-drain, and retained mapping/assignment pins until all CPU holds return."
+  ]
+}

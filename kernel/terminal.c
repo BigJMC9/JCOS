@@ -478,6 +478,7 @@ void terminal_set_line_observer(TerminalLineObserver observer, void *context) {
 }
 
 void terminal_set_render_enabled(bool enabled) {
+    if (enabled && !framebuffer_firmware_valid()) enabled = false;
     if (g_render_enabled == enabled) return;
 
     if (!enabled) {

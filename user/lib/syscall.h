@@ -3,6 +3,9 @@
 
 #include "../../include/user_abi.h"
 
+/* Additive versioned semantic register-read mechanism; see device_register_abi.h. */
+int jcos_device_register_read(JcosCapabilityHandle handle, JcosU64 identity,
+    JcosU64 request, JcosU32 *out_value);
 JcosU64 jcos_thread_id(void);
 int jcos_ipc_try_send(JcosCapabilityHandle handle, const JcosIpcMessage *message);
 int jcos_ipc_try_receive(JcosCapabilityHandle handle, JcosIpcMessage *message);

@@ -1,0 +1,71 @@
+#ifndef JCOS_AMD_POLARIS_REGISTERS_H
+#define JCOS_AMD_POLARIS_REGISTERS_H
+#include "user_abi.h"
+
+/* AMD DCE11.2 register facts, Linux v6.12 dce_11_2_d.h.
+ * Shared arithmetic only; no read/power/isolation authority is implied. */
+#define POLARIS_DISPLAY_PIPE_COUNT 6U
+
+/* Named field facts used by the decoder; independently checked against the
+ * pinned upstream masks by tools/audit_polaris_registers.py. No access rights. */
+#define POLARIS_CRTC_MASTER_EN_MASK 0x1U
+#define POLARIS_CRTC_CURRENT_MASTER_EN_STATE_MASK 0x10000U
+#define POLARIS_CRTC_DISP_READ_REQUEST_DISABLE_MASK 0x1000000U
+#define POLARIS_CRTC_CURRENT_BLANK_STATE_MASK 0x1U
+#define POLARIS_CRTC_BLANK_DATA_EN_MASK 0x100U
+#define POLARIS_CRTC_INTERLACE_ENABLE_MASK 0x1U
+#define POLARIS_GRPH_ENABLE_MASK 0x1U
+#define POLARIS_GRPH_KEYER_ALPHA_SEL_MASK 0x2U
+#define POLARIS_GRPH_DEPTH_MASK 0x3U
+#define POLARIS_GRPH_FORMAT_MASK 0x700U
+#define POLARIS_GRPH_FORMAT_SHIFT 0x8U
+#define POLARIS_GRPH_ARRAY_MODE_MASK 0xF00000U
+#define POLARIS_GRPH_ARRAY_MODE_SHIFT 0x14U
+#define POLARIS_GRPH_ADDRESS_TRANSLATION_ENABLE_MASK 0x10000U
+#define POLARIS_GRPH_COLOR_EXPANSION_MODE_MASK 0x80000000U
+#define POLARIS_GRPH_PRIMARY_SURFACE_ADDRESS_MASK 0xFFFFFF00U
+#define POLARIS_GRPH_PRIMARY_SURFACE_ADDRESS_HIGH_MASK 0xFFU
+#define POLARIS_GRPH_PITCH_MASK 0x7FFFU
+#define POLARIS_GRPH_X_START_MASK 0x3FFFU
+#define POLARIS_GRPH_Y_START_MASK 0x3FFFU
+#define POLARIS_GRPH_X_END_MASK 0x7FFFU
+#define POLARIS_GRPH_Y_END_MASK 0x7FFFU
+
+typedef enum {
+    POLARIS_REG_CRTC_CONTROL = 0,
+    POLARIS_REG_CRTC_BLANK,
+    POLARIS_REG_CRTC_INTERLACE,
+    POLARIS_REG_GRPH_ENABLE,
+    POLARIS_REG_GRPH_CONTROL,
+    POLARIS_REG_GRPH_SWAP,
+    POLARIS_REG_PRIMARY_LOW,
+    POLARIS_REG_PRIMARY_HIGH,
+    POLARIS_REG_PITCH,
+    POLARIS_REG_OFFSET_X,
+    POLARIS_REG_OFFSET_Y,
+    POLARIS_REG_X_START,
+    POLARIS_REG_Y_START,
+    POLARIS_REG_X_END,
+    POLARIS_REG_Y_END,
+    POLARIS_DISPLAY_REGISTER_COUNT
+} PolarisDisplayRegister;
+
+
+static inline int jcos_polaris_register_offset(JcosU32 pipe, PolarisDisplayRegister field,
+    JcosU64 mmio_span, JcosU32 *out_byte_offset) {
+    static const JcosU32 base[POLARIS_DISPLAY_PIPE_COUNT] = {
+        0x1A00U, 0x1C00U, 0x1E00U, 0x4000U, 0x4200U, 0x4400U
+    };
+    static const JcosU32 delta[POLARIS_DISPLAY_REGISTER_COUNT] = {
+        0x19CU, 0x19DU, 0x19EU, 0U, 1U, 3U, 4U, 7U, 6U,
+        9U, 10U, 11U, 12U, 13U, 14U
+    };
+    if (!out_byte_offset) return 0;
+    *out_byte_offset = 0U;
+    if (pipe >= POLARIS_DISPLAY_PIPE_COUNT || (JcosU32)field >= POLARIS_DISPLAY_REGISTER_COUNT) return 0;
+    JcosU32 offset = (base[pipe] + delta[field]) * 4U;
+    if (mmio_span < 4ULL || offset > mmio_span - 4ULL) return 0;
+    *out_byte_offset = offset;
+    return 1;
+}
+#endif

@@ -1,7 +1,11 @@
 #include "lib/syscall.h"
+#include "tests/amd_polaris_display_test.h"
 #include "../include/display_service_protocol.h"
 #include "../include/program_startup.h"
 #include "../include/service_protocol.h"
+
+_Static_assert(POLARIS_DISPLAY_MODEL_VERSION == JCOS_DISPLAY_POLARIS_MODEL_VERSION, "Polaris model version");
+_Static_assert(POLARIS_DISPLAY_MODEL_EXPECTED == JCOS_DISPLAY_POLARIS_MODEL_EXPECTED, "Polaris model checks");
 
 typedef struct {
     volatile JcosU32 *framebuffer;
@@ -232,6 +236,20 @@ void jcos_main(const JcosProgramStartup *startup) {
                 continue;
             }
             if (!send_reply(reply_cap, JCOS_DISPLAY_SERVICE_REPLY_MASKS_SET, incarnation, 0ULL, 3U)) jcos_thread_exit();
+            continue;
+        }
+
+        if (op == JCOS_DISPLAY_SERVICE_OP_POLARIS_MODEL) {
+            if (request.word_count != 3U || request.words[1] != 0ULL) {
+                if (!send_reply(reply_cap, JCOS_SERVICE_REPLY_INVALID_REQUEST, incarnation, op, 4U)) jcos_thread_exit();
+                continue;
+            }
+            if (request.words[2] != JCOS_DISPLAY_POLARIS_MODEL_VERSION) {
+                if (!send_reply(reply_cap, JCOS_SERVICE_REPLY_INCOMPATIBLE_VERSION, incarnation, request.words[2], 4U)) jcos_thread_exit();
+                continue;
+            }
+            JcosU32 result = polaris_display_model_test();
+            if (!send_reply(reply_cap, JCOS_DISPLAY_SERVICE_REPLY_POLARIS_MODEL, incarnation, result, 4U)) jcos_thread_exit();
             continue;
         }
 

@@ -28,7 +28,32 @@ typedef struct {
     u32 reserved_mask;
 } FramebufferInfo;
 
+/* This is boot-scanout validity, independent of the CPU writer lease and of
+ * device/DMA isolation. RETIRED does not mean that native output is active. */
+typedef enum {
+    FRAMEBUFFER_SCANOUT_UNAVAILABLE = 0,
+    FRAMEBUFFER_SCANOUT_FIRMWARE,
+    FRAMEBUFFER_SCANOUT_RETIRING,
+    FRAMEBUFFER_SCANOUT_RETIRED
+} FramebufferScanoutState;
+
+typedef struct {
+    FramebufferScanoutState state;
+    u32 kernel_writers;
+} FramebufferScanoutStatus;
+
 bool framebuffer_init(const BootInfo *boot);
+void framebuffer_scanout_status(FramebufferScanoutStatus *out);
+bool framebuffer_firmware_valid(void);
+/* Short, UP interrupt-serialized admission; never hold interrupts off while
+ * drawing. An outer writer pins an entire multi-primitive presentation. */
+bool framebuffer_write_begin(void);
+void framebuffer_write_end(void);
+bool framebuffer_writers_idle(void);
+/* Display manager only, after borrowed Ring3 mappings have been torn down.
+ * Closes admission permanently, including on a false (still draining) result.
+ * True proves CPU writers drained, never DMA isolation or native readiness. */
+bool framebuffer_firmware_retire(void);
 bool framebuffer_info(FramebufferInfo *out);
 u32 framebuffer_rgb(u8 r, u8 g, u8 b);
 void framebuffer_pixel(u32 x, u32 y, u32 color);

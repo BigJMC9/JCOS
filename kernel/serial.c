@@ -4,8 +4,36 @@
 #define COM1 0x3F8
 
 static bool g_ready;
+static SerialTxStats g_tx;
+
+/* Current execution profile is UP. Keep the readiness check and one-byte
+ * write atomic, but restore the caller's IRQ state between polling attempts. */
+static u64 serial_irq_save(void) {
+    u64 flags;
+    __asm__ volatile ("pushfq; popq %0" : "=r"(flags) : : "memory");
+    arch_cli();
+    return flags;
+}
+
+static void serial_irq_restore(u64 flags) {
+    if (flags & (1ULL << 9U)) arch_sti();
+}
+
+void serial_get_tx_stats(SerialTxStats *out) {
+    if (!out) return;
+    u64 flags = serial_irq_save();
+    out->transmitted_bytes = g_tx.transmitted_bytes;
+    out->dropped_bytes = g_tx.dropped_bytes;
+    out->timeouts = g_tx.timeouts;
+    out->stalled = g_tx.stalled;
+    serial_irq_restore(flags);
+}
 
 bool serial_init(void) {
+    g_tx.transmitted_bytes = 0;
+    g_tx.dropped_bytes = 0;
+    g_tx.timeouts = 0;
+    g_tx.stalled = false;
     arch_out8(COM1 + 1, 0x00); /* Disable UART interrupts. */
     arch_out8(COM1 + 3, 0x80); /* Divisor latch access. */
     arch_out8(COM1 + 0, 0x03); /* 38400 baud with a 115200 base clock. */
@@ -25,7 +53,27 @@ bool serial_available(void) {
 
 static void put_raw(char c) {
     if (!g_ready) return;
-    if (arch_in8(COM1 + 5) & 0x20) arch_out8(COM1, (u8)c);
+    for (u32 attempt = 0; attempt < SERIAL_TX_POLL_LIMIT; ++attempt) {
+        u64 flags = serial_irq_save();
+        if (arch_in8(COM1 + 5) & 0x20U) {
+            arch_out8(COM1, (u8)c);
+            ++g_tx.transmitted_bytes;
+            g_tx.stalled = false;
+            serial_irq_restore(flags);
+            return;
+        }
+        /* After one bounded timeout, avoid repeating a full busy wait for
+         * every byte. A future ready observation resumes normal transmission. */
+        if (g_tx.stalled || attempt + 1U == SERIAL_TX_POLL_LIMIT) {
+            if (!g_tx.stalled) ++g_tx.timeouts;
+            g_tx.stalled = true;
+            ++g_tx.dropped_bytes;
+            serial_irq_restore(flags);
+            return;
+        }
+        serial_irq_restore(flags);
+        arch_pause();
+    }
 }
 
 void serial_putc(char c) {

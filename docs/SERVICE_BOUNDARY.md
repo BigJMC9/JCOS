@@ -116,7 +116,7 @@ The three graphical roles have separate authority:
 | Compositor service | Bounded command/reply authority to the display service; no GOP mapping | Placement, z-order, focus and composition order |
 | Display service | Exclusive validated GOP mapping; shared surfaces mapped RO/NX | Convert/render pixels and execute bounded presentation operations |
 
-The shared profile in [display_service_protocol.h](../include/display_service_protocol.h) has four 4 KiB slots, each 64 × 64 RGB332. The compositor protocol is defined separately in [compositor_service_protocol.h](../include/compositor_service_protocol.h). The display service supports the supplied GOP pixel-format metadata, including channel masks for PixelBitMask conversion. This does not provide native mode setting or GPU acceleration.
+The shared profile in [display_service_protocol.h](../include/display_service_protocol.h) has four 4 KiB slots, each 64 Ã— 64 RGB332. The compositor protocol is defined separately in [compositor_service_protocol.h](../include/compositor_service_protocol.h). The display service supports the supplied GOP pixel-format metadata, including channel masks for PixelBitMask conversion. This does not provide native mode setting or GPU acceleration.
 
 A compositor failure can be handled without killing the graphical client or relinquishing the display service's GOP lease. The acceptance paths explicitly replace/reconnect the compositor and restore its bounded configuration. A display-service failure retains its lease for supervised cleanup; process death alone does not transfer framebuffer ownership back to the kernel.
 
@@ -125,6 +125,12 @@ The interactive `gui` path currently runs one client. Its normal loop exits and 
 The older capability-checked `DISPLAY_INFO`/`DISPLAY_PRESENT` and `AUDIO_INFO`/`AUDIO_WRITE` syscalls remain for the bounded media path. They perform kernel-mediated access, including checked reads of user buffers. Legacy presentation is blocked while the direct display lease is held. These paths are separate from the shared-surface compositor contract and remain transitional privileged functionality.
 
 ## Device authority and recovery
+
+A versioned semantic register-read syscall now checks a dedicated READ-only,
+owner-bound resource and exact resource identity. Its implemented provider is a
+kernel-owned diagnostic bank; no physical register resource can be constructed.
+The [Polaris reference](AMD_POLARIS_DISPLAY.md) defines its enforced interface
+and the remaining physical binding requirements.
 
 The current PCI framework consists primarily of kernel resource APIs. A constrained Ring 3 probe uses a dedicated IPC mediator; there is no general public PCI syscall suite for arbitrary driver deployment.
 
@@ -154,3 +160,27 @@ Tests cover launch/rollback, IPC terminal ordering, capability lifetime, service
 | Console and policy brokers | [system_console.c](../kernel/system_console.c), [console_service.c](../user/console_service.c), [foreground_program.c](../kernel/foreground_program.c), [background_service.c](../kernel/background_service.c) |
 | Graphics | [display_service.c](../user/display_service.c), [compositor_service.c](../user/compositor_service.c), [graphical_session.c](../kernel/graphical_session.c) |
 | PCI access and recovery | [pci_assignment.h](../kernel/pci_assignment.h), [pci_bar_access.h](../kernel/pci_bar_access.h), [pci_irq_router.h](../kernel/pci_irq_router.h), [pci_dma_submission.h](../kernel/pci_dma_submission.h), [pci_device_recovery.h](../kernel/pci_device_recovery.h), [pci_flr.h](../kernel/pci_flr.h) |
+
+The privileged Polaris BAR5 preparation lifecycle can stage four supervisor-only
+RO/NX/UC pages from the exact complete firmware extent while retaining assignment
+lifetime/access pins. It has no userspace constructor, register-load entry point
+or physical reader grant. Failed cleanup retains its ledger; inherited bus
+mastering sets sticky exposure history and prevents ordinary release.
+See [the Polaris backend](AMD_POLARIS_DISPLAY.md) for preconditions and the
+distinction between page-table preparation and qualified physical access.
+
+The optional finite register-capture diagnostic grants one pipe and at most
+thirty ordered reads before permanent closure, with admission expiry of at
+most two seconds. Values remain copied protected RAM. Expiry does not reap
+resources or cancel hardware transactions; cap references survive owner failure.
+The readiness report is observational and cannot issue authority. Physical
+register safety, independent serial control and physical capture remain
+unqualified; see [finite capture admission](AMD_POLARIS_DISPLAY.md#finite-capture-admission-and-readiness).
+
+The prepared Polaris BAR5 binding supports bounded kernel operation holds with
+independent binding/token identities. Cleanup closes new admission before
+waiting for holds and retains leaf mappings plus assignment pins until they
+drain. These holds expose no register-load operation or userspace grant.
+Release requires trusted evidence that the retained CPU operation stopped;
+it does not certify hardware completion or DMA quiescence. Readiness reports
+selected-pipe power as unresolved independently of PCI D0.

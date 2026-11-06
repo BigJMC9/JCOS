@@ -5,6 +5,8 @@
 #include "interrupts.h"
 #include "lib.h"
 #include "pci.h"
+#include "display_probe.h"
+#include "polaris_read_profile.h"
 #include "pmm.h"
 #include "vmm.h"
 #include "address_space.h"
@@ -5657,6 +5659,33 @@ static const char *pci_device_kind(const PciDevice *device) {
     return "OTHER";
 }
 
+static void command_serial_info(void) {
+    SerialTxStats stats;
+    serial_get_tx_stats(&stats);
+    terminal_write("COM1: ");
+    terminal_writeln(serial_available() ? "AVAILABLE / 38400 8N1 / NO FLOW CONTROL" : "UNAVAILABLE");
+    terminal_write("TX BYTES=");
+    terminal_write_u64(stats.transmitted_bytes);
+    terminal_write(" DROPPED BYTES=");
+    terminal_write_u64(stats.dropped_bytes);
+    terminal_write(" TIMEOUTS=");
+    terminal_write_u64(stats.timeouts);
+    terminal_writeln(stats.stalled ? " STALLED=YES" : " STALLED=NO");
+    terminal_writeln("COUNTERS COVER LOCAL UART WRITES; VERIFY THE EXTERNAL RECEIVE/INPUT PATH SEPARATELY.");
+}
+
+static void command_display_firmware(void) {
+    display_probe_firmware_print(g_boot);
+}
+
+static void command_display_readiness(void) {
+    polaris_read_profile_print(g_boot);
+}
+
+static void command_display_probe(void) {
+    display_probe_print(g_boot);
+}
+
 static void command_pci(void) {
     u32 count = pci_device_count();
     terminal_write("PCI DEVICES: ");
@@ -6579,6 +6608,16 @@ static void shell_registry_init(void) {
     shell_add_command("power", "power", "show shutdown/reboot readiness", SHELL_GROUP_SYSTEM, command_power, 0, true);
     shell_add_command("acpi", "acpi", "show ACPI discovery results", SHELL_GROUP_HARDWARE, command_acpi, 0, true);
     shell_add_command("pci", "pci", "list discovered PCI devices", SHELL_GROUP_HARDWARE, command_pci, 0, true);
+    shell_add_command("display-readiness", "display-readiness", "RX 570 read qualification blockers; no GPU access",
+        SHELL_GROUP_HARDWARE, command_display_readiness, 0, true);
+    shell_add_command("displayprobe", "displayprobe", "read-only display PCI/GOP inventory; no native takeover",
+        SHELL_GROUP_HARDWARE, command_display_probe, 0, true);
+    shell_add_command("serialinfo", "serialinfo", "show COM1 settings and bounded transmit/drop counters",
+        SHELL_GROUP_HARDWARE, command_serial_info, 0, true);
+    shell_add_command("displayfirmware", "displayfirmware", "show all six copied firmware BAR queries and exact associations",
+        SHELL_GROUP_HARDWARE, command_display_firmware, 0, true);
+    shell_add_command("display-probe", "display-probe", "alias for displayprobe",
+        SHELL_GROUP_HARDWARE, command_display_probe, 0, false);
     shell_add_command("ahci", "ahci", "show AHCI controller and SATA ports", SHELL_GROUP_HARDWARE, command_ahci, 0, true);
     shell_add_command("disks", "disks", "list block devices", SHELL_GROUP_STORAGE, command_disks, 0, true);
     shell_add_command("sector", "sector LBA", "dump a raw disk sector", SHELL_GROUP_STORAGE, 0, command_sector, true);

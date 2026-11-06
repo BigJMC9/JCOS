@@ -13,6 +13,7 @@
 #include "terminal.h"
 #include "thread.h"
 #include "timer.h"
+#include "display_service_protocol.h"
 
 #define DISPLAY_SERVICE_TEST_COOKIE 0x523842444953504CULL
 
@@ -125,11 +126,41 @@ void display_service_test_run(void) {
     report("RING3 SERVICE START / DIRECT GOP LEASE", lease_owned);
     if (!lease_owned) goto fail;
 
+    bool retirement_refused = !display_retire_firmware_scanout() &&
+        framebuffer_firmware_valid() && display_direct_state() == DISPLAY_LEASE_USER &&
+        display_direct_owner_process_id() == first_pid;
+    report("LIVE GOP MAPPING BLOCKS SCANOUT RETIREMENT", retirement_refused);
+    if (!retirement_refused) goto fail;
+
+    ProgramBorrowedMappingSpec competing_mapping;
+    FramebufferInfo competing_info;
+    u64 competing_pointer = 0ULL;
+    bool exclusive = !display_direct_prepare(0x0000022000000000ULL,
+        &competing_mapping, &competing_info, &competing_pointer) &&
+        !competing_pointer && !competing_mapping.size &&
+        !display_direct_reclaim(first_pid + 1ULL) && !display_direct_abort() &&
+        display_direct_state() == DISPLAY_LEASE_USER &&
+        display_direct_owner_process_id() == first_pid && !terminal_render_enabled();
+    report("CONCURRENT GOP WRITER / WRONG-OWNER RECLAIM REFUSED", exclusive);
+    if (!exclusive) goto fail;
+
     u64 reply_cookie = 0ULL;
     bool ping = display_service_ping(DISPLAY_SERVICE_TEST_COOKIE, &reply_cookie) &&
         reply_cookie == DISPLAY_SERVICE_TEST_COOKIE;
     report("DISPLAY SERVICE PING", ping);
     if (!ping) goto fail;
+
+    u32 model_checks = 0U;
+    bool model = display_service_polaris_model_check(JCOS_DISPLAY_POLARIS_MODEL_VERSION, &model_checks) &&
+        model_checks == JCOS_DISPLAY_POLARIS_MODEL_EXPECTED;
+    report("POLARIS RING3 READER / DECODER MODEL (NO GPU ACCESS)", model);
+    if (!model) goto fail;
+    bool model_version_refused = !display_service_polaris_model_check(
+        JCOS_DISPLAY_POLARIS_MODEL_VERSION + 1ULL, &model_checks) && !model_checks &&
+        display_service_ping(DISPLAY_SERVICE_TEST_COOKIE, &reply_cookie) &&
+        reply_cookie == DISPLAY_SERVICE_TEST_COOKIE;
+    report("POLARIS MODEL VERSION REFUSED / SERVICE STILL RESPONSIVE", model_version_refused);
+    if (!model_version_refused) goto fail;
 
     bool redraw = display_service_redraw();
     report("USERSPACE FRAMEBUFFER REDRAW", redraw);
@@ -155,6 +186,20 @@ void display_service_test_run(void) {
     report("FAULT RECOVERY / KERNEL FRAMEBUFFER RESTORED", recovered);
     if (!recovered) goto fail;
 
+    FramebufferInfo retained;
+    bool metadata = framebuffer_info(&retained) &&
+        retained.physical_base == info.physical_base && retained.size == info.size &&
+        retained.mapping_physical_base == info.mapping_physical_base &&
+        retained.mapping_size == info.mapping_size && retained.page_offset == info.page_offset &&
+        retained.width == info.width && retained.height == info.height &&
+        retained.pixels_per_scanline == info.pixels_per_scanline &&
+        retained.pixel_format == info.pixel_format && retained.red_mask == info.red_mask &&
+        retained.green_mask == info.green_mask && retained.blue_mask == info.blue_mask &&
+        retained.reserved_mask == info.reserved_mask &&
+        retained.direct_map_safe == info.direct_map_safe && retained.memory_type == info.memory_type;
+    report("GOP METADATA PRESERVED THROUGH SERVICE FAILURE / RECOVERY", metadata);
+    if (!metadata) goto fail;
+
     bool restarted = display_service_start();
     u64 second_pid = display_service_process_id();
     u64 second_incarnation = display_service_incarnation();
@@ -166,6 +211,13 @@ void display_service_test_run(void) {
         display_direct_owner_process_id() == second_pid;
     report("RESTART / NEW DISPLAY INCARNATION", replacement);
     if (!replacement) goto fail;
+
+    model_checks = 0U;
+    bool replacement_model = display_service_polaris_model_check(
+        JCOS_DISPLAY_POLARIS_MODEL_VERSION, &model_checks) &&
+        model_checks == JCOS_DISPLAY_POLARIS_MODEL_EXPECTED;
+    report("POLARIS MODEL IN FRESH SERVICE AFTER FAULT", replacement_model);
+    if (!replacement_model) goto fail;
 
     bool stopped = display_service_stop() &&
         display_service_state() == MANAGED_SERVICE_STOPPED &&
