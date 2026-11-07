@@ -151,6 +151,33 @@ bool program_instance_needs_cleanup(const ProgramInstance *instance) {
     return false;
 }
 
+bool program_borrowed_set_writable(ProgramInstance *p,u64 pid,bool writable) {
+    if (!p || !pid) return false;
+    u64 irq=program_irq_save(); bool ok=false;
+    if (!p->published || !p->process_created || p->process.id!=pid ||
+        !process_storage_in_use(&p->process) || p->process.kernel ||
+        !p->thread_created || p->thread.state!=THREAD_STATE_BLOCKED ||
+        p->thread.on_run_queue || !p->borrowed_page_count) goto done;
+    AddressSpace *space=process_address_space(&p->process);
+    if (!space || space->kernel) goto done;
+    /* Whole-range preflight precedes the first permission change. */
+    for (u32 i=0;i<p->borrowed_page_count;++i) {
+        frame_t frame; vm_flags_t flags;
+        if (!address_space_query_page(space,p->borrowed_virtual_base+(u64)i*VM_PAGE_SIZE,&frame,&flags) ||
+            frame!=p->borrowed_first_frame+i || !(flags&VM_USER) ||
+            (flags&~(VM_USER|VM_WRITE|VM_UNCACHED))) goto done;
+    }
+    for (u32 i=0;i<p->borrowed_page_count;++i) {
+        u64 address=p->borrowed_virtual_base+(u64)i*VM_PAGE_SIZE;
+        frame_t frame; vm_flags_t flags;
+        if (!address_space_query_page(space,address,&frame,&flags) ||
+            !vmm_set_writable(&space->page_map,address,p->borrowed_first_frame+i,flags,writable)) goto done;
+    }
+    ok=true;
+done:
+    program_irq_restore(irq); return ok;
+}
+
 static bool program_threads_dead(const ProgramInstance *instance) {
     if (!instance || !instance->process_created) return false;
     u64 count = process_thread_count(&instance->process);

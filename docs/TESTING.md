@@ -31,7 +31,7 @@ Registry metadata selects whether a diagnostic needs normal live preemption or a
 | Runtime and scheduling | `user-runtime`, `user-runtime-block`, `execution-profile`, `scheduler-idle`, `scheduler-idle-exit`, `runtime-preemption` |
 | Launch and services | `program-launch`, `program-startup`, `service-incarnation`, `service-robustness`, `service-policy` |
 | Console and archive policy | `userspace-shell`, `console-app`, `console-input`, `files-userspace`, `launch-userspace` |
-| Graphics | `polaris-read-profile`, `device-register-reader`, `display-probe`, `display-lease`, `display-service`, `display-surface` |
+| Graphics | `polaris-native`, `polaris-read-profile`, `device-register-reader`, `display-probe`, `display-lease`, `display-service`, `display-surface` |
 | PCI access | `pci-config`, `pci-assignment`, `pci-bar-resource`, `pci-bar-access` |
 | IRQ and DMA lifetime | `pci-irq-resource`, `pci-irq-router`, `pci-dma-buffer`, `pci-dma-submission` |
 | Device recovery | `pci-device-recovery`, `pci-driver-hostile` |
@@ -285,3 +285,148 @@ samples and invalid flip state. The optional preserved policy sources and
 a host test and does not demonstrate a physical recipe exchange, new reads,
 native output or recovery. Keep the physical refusal and subsequent replay
 as separate results.
+
+`test polaris-native` maps private test RAM into distinct actual primary/
+rescue Ring3 processes. It checks a supervisor-owned assignment model without
+hardware access, refusal of ordinary kernel claim, RO-store fault containment,
+spin timeout, independent retained rescue state, stale PID/connection refusal,
+allocation-free RW promotion, original launch identity after failure/reap, and
+full resource cleanup. Primary and rescue title checks compare every foreground
+and background bit against the canonical MSB-first font, including asymmetric
+glyphs; a merely present white pixel cannot pass mirrored text.
+It never retires or programs the live QEMU/physical display.
+
+`test-polaris-program` exercises the production executor with semantic IO
+doubles: complete validation before IO,640 tag/value corruptions, transaction
+failures, one HIGH/LOW pair, posted read, post-write frame baseline, bounded
+pending drain,24-bit completion wrap and no replay. `test-polaris-native`
+exercises actual orchestration with stateful doubles: retirement before writable
+authority, exclusive old-owner teardown, one reserved rescue under retained
+quarantine, watchdog outcomes and retained failed cleanup. Failed/stopped-service
+doubles hide the live PID and clear reaped process storage, matching the real
+API; the original lease owner must come from the driver's retained identity. The MMIO/VMM suite
+also checks real PTE WRITE-only changes and fixed-store guards.
+
+`POLARIS_NATIVE_WRITE=1` is an independent default-off experiment. QEMU
+must refuse the unsupported target before mapping or GPU IO. A physical run
+requires a new exact image boot and independent serial control. Test the
+RAM-only diagnostics before takeover, then separately confirm primary text,
+rescue text and the reclaimed native/rescue console. Keep logs/hashes and
+record any controlled refusal. The inherited GOP is permanently retired before
+RW authority; old firmware-only diagnostics cannot establish a fallback after
+that point.
+
+The native RAM diagnostic now challenges both actual Ring3 roles and exercises
+four acknowledged branches: primary/rescue fault and spin. Each measures an
+independent Ring3 console portal-write increment and checks the original peer
+identity, liveness failure, forced/graceful cleanup and full baseline. The
+controller host suite has57 cases, including heartbeat timing, failed standby/
+rescue, acknowledged injection, lost ACK/progress and exhausted test budgets.
+A separate host harness links the production RPC/progress helpers to test
+12 corrupt/failed heartbeat cases and28 malformed/failed diagnostic ACK cases,
+plus stale peer/console identities and absent actual work. None accesses a GPU.
+
+Physical watchdog acceptance requires a fresh boot of the exact write image,
+correct primary output, `polaris-test primary spin` and independent-progress/
+automatic-rescue markers, then a separate visual check of fresh rescue text.
+A deliberate active-rescue fault/spin should leave serial control and quarantine
+without another GPU transaction. Record clean-state power readiness separately
+from actually performing a controlled reboot. Never use these cases to infer
+GPU reset, device-hang survival or unrestricted repeated GPU attempts.
+
+The recorded physical watchdog run exercises primary SPIN -> monitor heartbeat
+failure -> fresh rescue,then active rescue #UD -> headless quarantine/serial
+and clean-state reboot readiness. Ring3 console portal counters advance
+1385->1386 and1386->1387 at separate checkpoints. Four GPU stores/114 reads
+are recorded,with no extra GPU operation after rescue failure. A controlled
+reset booted Windows;operator boot-priority correction preceded the captured
+JA OS USB return. Preserve that assistance in the result instead of reporting
+an unattended JA OS reboot. The new boot has firmware-valid output and zero
+native/watchdog/test counters;no second GPU experiment was started there.
+
+The second fresh-boot v19 case separately exercised primary terminal #UD ->
+automatic rescue,then active rescue SPIN -> heartbeat failure/headless
+quarantine. Both independent Ring3 console checkpoints completed. Five
+exhausted-state requests were denied with no additional GPU access; serial
+and power readiness remained usable. Controlled reboot returned to a readable
+JA OS firmware console without operator intervention. This complements the
+earlier primary-SPIN/rescue-#UD case; it does not replace its assisted-return
+record. See the complementary run in [Polaris display](AMD_POLARIS_DISPLAY.md).
+
+`test graphics-policy` covers actual supervisor IPC,ordered sessions,stale
+and malformed requests,primary exit/heartbeat recovery,failed-standby priority,
+rescue/headless closure and unrelated ping with unchanged resource counts.
+`make -f Makefile.msys2 test-graphics-policy` adds production policy/client
+host checks; `test-polaris-native` includes75 controller cases. The policy
+candidate passed four clean QEMU boots:focused,two-GPU,normal86/86 and deep86/86
+with603 iterations. These software checks perform no physical GPU programming
+and do not replace the separately observed physical RX570 policy-path case.
+
+The v20 physical case passed three targeted1/1 preflight suites,then primary
+spin/Ring3 action2/fresh visible rescue and rescue #UD/Ring3 action3/headless
+fallback. Independent console work advanced1385->1386->1387 in two checkpoints.
+Five exhausted-state requests were refused with no additional GPU MMIO access.
+Unassisted controlled reboot returned to readable firmware output and status0/0/0.
+Totals114 GPU loads/four stores,no retries,46866 v20 RX/491 host TX;182 earlier
+shutdown bytes are saved separately. This is one monitor-scoped policy run,
+without broader modes/HDMI/reset/isolation or autonomous supervision proof.
+
+`test graphics-worker` runs actual periodic IPC work with real Ring3 policy/
+driver RAM faults. It checks monitor-independent primary spin/rescue fault,
+policy fault/spin,unrelated console work,serialized supervisor clients,exact
+failed-policy stop,direct power readiness before replacement,stale cleanup and
+full object/page/cap baselines. `test-serial-worker` runs worker retention,
+admission and adapter host checks; `test-polaris-native` now has80 cases.
+Delayed diagnostic commands require an active Ring3 shell after a fixed
+three-second minimum and do not issue a competing worker console RPC.
+Four clean QEMU boots PASS:focused,multi,normal87/87/87iterations and deep87/87/607iterations;exact failed-policy stop,power readiness before replacement and replacement immunity PASS.
+These are software checks;physical off-monitor/policy-failure acceptance
+requires the concrete image and independently captured serial/visual evidence.
+
+
+Physical v21 qualification passed four preflight suites and three distinct
+native cases:primary spin/fresh rescue plus rescue exception;policy exception;
+policy spin. Injections occurred with the normal Ring3 shell active,distinct
+worker/control identities and completed help commands before/after. Terminal
+cases retained serial/power readiness;each ended with captured reboot output.
+The first return also has visual/no-intervention confirmation. Physical active
+policy replacement remains untested;replacement immunity passed the actual
+RAM-only worker suite.
+
+The record contains234 GPU loads/eight store attempts without replay,
+98279 received bytes/972 host-transmitted bytes. Original boot and capture
+gaps are excluded. A failed host-banner expectation followed successful rescue;
+the preserved transcript,CPU-only continuation and separate corrected helper
+record this tooling issue. The offline verifier uses the unchanged two-frame
+production minimum. See [the physical worker record](AMD_POLARIS_DISPLAY.md#observed-recovery-outside-the-monitor).
+
+
+The rebind execution candidate adds host target test-polaris-broker. It runs
+the real Ring3 sequence against the independent kernel gate, checks2048
+request tag/payload corruptions before IO and640 malformed plans, and covers
+pending updates, counter wrap, poll exhaustion and bounded no-replay state.
+A separate production transport test covers success plus22 malformed,
+partial-write, deadline, identity, forged-completion and readiness cases.
+
+The actual test polaris-native now runs the real primary/rescue ELF and
+private broker against RAM effectors before draw tests. It checks incomplete
+post-write failure, consumed-attempt refusal and retained RO mapping, then
+restores the complete resource baseline. The older synchronous executor
+remains a host reference and is excluded from the kernel binary.
+Four clean QEMU boots PASS: focused, multi, normal87/87 and deep87/87 across607 iterations; actual Ring3 broker completion, partial-failure RO retention/no replay and full baseline checks PASS. Physical v22 execution/recovery is recorded below.
+
+
+The physical v22 pass completed four preflight suites and three native
+cases: primary spin/fresh rescue then rescue exception; policy exception;
+policy spin. Actual user sequences completed through the independent kernel
+gate before output publication. Normal Ring3 help completed before/after
+injected failures, with serial/power readiness and three captured reboot
+returns. The first return also has visual/no-intervention confirmation.
+No production or image change followed the tested software candidate.
+
+The raw verifier records234 GPU loads/eight stores, no retry, and no GPU IO
+after terminal failure. Active RX98944/host TX972, plus1605 partial initial
+post-reset boot bytes, give100549 image-scoped received bytes. An additional
+131-byte unattributed pre-reset prefix remains saved and excluded. All raw
+received bytes total100680; capture gaps are not claimed. See
+[the physical Ring3 execution record](AMD_POLARIS_DISPLAY.md#observed-ring3-execution-and-rescue).

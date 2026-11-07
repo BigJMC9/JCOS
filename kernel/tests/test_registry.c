@@ -1,5 +1,8 @@
 #include "test_registry.h"
 #include "display_lease_test.h"
+#include "polaris_native_test.h"
+#include "graphics_policy_test.h"
+#include "graphics_worker_test.h"
 #include "device_register_reader_test.h"
 #include "display_probe_test.h"
 #include "polaris_read_profile_test.h"
@@ -102,6 +105,12 @@ static void kernel_test_set_deep_runs(const char *name, u32 runs) {
 static void kernel_test_registry_init(void) {
     if (g_test_registry_initialized) return;
     g_test_registry_initialized = true;
+    kernel_test_add_live("graphics-worker","periodic independent work, actual Ring3 policy/driver failures and safe worker drain",
+        KERNEL_TEST_ACCEPTANCE,graphics_worker_test_run,graphics_worker_test_cleanup_run);
+    kernel_test_add_live("graphics-policy","Ring3 recovery decisions, stale-session refusals and unchanged supervisor authority",
+        KERNEL_TEST_ACCEPTANCE,graphics_policy_test_run,graphics_policy_test_cleanup_run);
+    kernel_test_add_live("polaris-native","reserved Ring3 rescue, read-only pages, bounded faults and fresh diagnostic pixels",
+        KERNEL_TEST_ACCEPTANCE,polaris_native_test_run,polaris_native_test_cleanup_run);
     kernel_test_add_live("device-register-reader", "Ring3 semantic register reads, read-only capability, revocation and stale identity refusal",
         KERNEL_TEST_ACCEPTANCE, device_register_reader_test_run, device_register_reader_test_cleanup_run);
     kernel_test_add("display-lease", "validated GOP resource and exclusive framebuffer ownership handoff",

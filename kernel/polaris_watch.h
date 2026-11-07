@@ -1,0 +1,12 @@
+#ifndef JA_OS_POLARIS_WATCH_H
+#define JA_OS_POLARIS_WATCH_H
+#include "types.h"
+void polaris_watch_arm(u32 role,bool spin);
+void polaris_watch_begin(const BootInfo *boot);
+void polaris_watch_rescue(void);
+void polaris_watch_diagnostic(u32 role,bool spin);
+void polaris_watch_policy_diagnostic(bool spin);
+void polaris_watch_status(void);
+void polaris_watch_finish(void);
+bool polaris_watch_power_prepare(void);
+#endif

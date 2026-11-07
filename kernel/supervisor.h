@@ -23,6 +23,8 @@ typedef enum {
 
 bool supervisor_start(void);
 bool supervisor_ping(u64 cookie, u64 *out_cookie);
+/* Private graphics policy transport; no device capabilities are transferred. */
+bool supervisor_graphics_exchange(u64 session,u64 sequence,u64 snapshot,u64 *action);
 
 /* Bounded stop. A non-cooperating service is force-terminated and reaped.
  * The compatibility bool reports whether the service reached fully STOPPED. */
@@ -50,5 +52,9 @@ u64 supervisor_thread_id(void);
  * supervisor command capability is not exposed to arbitrary user processes. */
 bool supervisor_test_arm_shutdown_hang(void);
 bool supervisor_test_fault(void);
+/* ACK then deliberately leave the receive loop;no ordinary reblock wait. */
+bool supervisor_test_spin(void);
+/* Stop only the retained exact incarnation;an absent/replaced peer is untouched. */
+bool supervisor_stop_identity(u64 process_id,u64 thread_id);
 
 #endif

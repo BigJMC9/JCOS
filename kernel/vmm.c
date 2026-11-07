@@ -691,6 +691,29 @@ bool vmm_query_page(const VmPageMap *map, u64 virtual_address, frame_t *frame, v
     return true;
 }
 
+bool vmm_set_writable(VmPageMap *map,u64 address,frame_t expected,vm_flags_t expected_flags,bool writable) {
+    u64 irq=vmm_irq_save(); bool ok=false;
+    frame_t actual; vm_flags_t permissions;
+    if (!profile_supported() || !map || map->destroy_pending || !page_aligned(address) ||
+        !virtual_address_canonical(address) || !map_owns_pml4_index(map,pml4_index(address)) ||
+        (map->shared_source && !map_active(map)) ||
+        !vmm_query_page(map,address,&actual,&permissions) || actual!=expected ||
+        permissions!=expected_flags || (permissions&VM_EXEC) ||
+        ((permissions&VM_DEVICE) && !vmm_device_memory_supported())) goto done;
+    u64 *table=table_pointer(map->root_frame); frame_t ignored;
+    u32 index[3]={pml4_index(address),pdpt_index(address),pd_index(address)};
+    for (u32 i=0;i<3;++i) {
+        if (!table || !(table[index[i]]&PTE_WRITE) ||
+            !existing_table(table,index[i],&ignored,&table)) goto done;
+    }
+    u64 *leaf=&table[pt_index(address)];
+    if ((*leaf&((1ULL<<8)|PTE_HUGE)) || !(*leaf&PTE_NX)) goto done;
+    if (writable) *leaf|=PTE_WRITE; else *leaf&=~PTE_WRITE;
+    flush_active_map(map); ok=true;
+done:
+    vmm_irq_restore(irq); return ok;
+}
+
 static vm_flags_t vmm_test_entry_flags(u64 entry) {
     if (!(entry & PTE_PRESENT)) return 0;
 

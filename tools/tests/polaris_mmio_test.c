@@ -2,6 +2,8 @@
  * No GPU or CPU MMIO access occurs. Leaf flags get independent production-VMM
  * coverage in vmm_device_test.c; real assignment taint gets QEMU coverage. */
 #include <stdio.h>
+#include "../../kernel/framebuffer.h"
+#include "../../kernel/display.h"
 #include <string.h>
 #include "../../kernel/tests/polaris_mmio_fixture.h"
 #include "../../kernel/tests/polaris_mmio_plan_test.h"
@@ -15,6 +17,17 @@ static DisplayProbeInfo info;
 static u8 config[PCI_CONFIG_SPACE_SIZE];
 static BootMemoryDescriptor memory;
 static Process owner;
+static FramebufferScanoutState native_scanout=FRAMEBUFFER_SCANOUT_FIRMWARE;
+static DisplayLeaseState native_lease=DISPLAY_LEASE_KERNEL;
+static u32 store_calls;
+static u64 stored_address;
+static u32 stored_value;
+Process *process_kernel(void) {return &owner;}
+void framebuffer_scanout_status(FramebufferScanoutStatus *s) {s->state=native_scanout;s->kernel_writers=0;}
+bool framebuffer_writers_idle(void) {return true;}
+DisplayLeaseState display_direct_state(void) {return native_lease;}
+void device_mmio_store32(u64 address,u32 value) {++store_calls;stored_address=address;stored_value=value;}
+
 static PciAssignment assignment;
 static AddressSpace kernel;
 static bool exited, supported = true, wrong_context, fail_child, fail_access;
@@ -87,6 +100,15 @@ bool vmm_query_page(const VmPageMap *m, u64 address, frame_t *f, vm_flags_t *fla
         if (!leaves[i].present || leaves[i].address != address) continue;
         if (f) *f = leaves[i].frame;
         if (flags) *flags = leaves[i].flags;
+        return true;
+    }
+    return false;
+}
+bool vmm_set_writable(VmPageMap *map,u64 address,frame_t expected,vm_flags_t expected_flags,bool writable) {
+    frame_t frame;vm_flags_t flags;
+    if (!vmm_query_page(map,address,&frame,&flags) || frame!=expected || flags!=expected_flags) return false;
+    for (u32 i=0;i<5;++i) if (leaves[i].present && leaves[i].address==address) {
+        if (writable) leaves[i].flags|=VM_WRITE;else leaves[i].flags&=~VM_WRITE;
         return true;
     }
     return false;
@@ -436,6 +458,41 @@ int main(int argc, char **argv) {
     CHECK(!polaris_mmio_prepare(&b, &boot, &assignment, &owner, 17U) && empty() && !map_calls);
     CHECK(reset()); assignment.dma_gate_active = true;
     CHECK(!polaris_mmio_prepare(&b, &boot, &assignment, &owner, 17U) && empty() && !config_reads);
+    CHECK(reset());owner.kernel=true;config[4]|=PCI_COMMAND_BUS_MASTER;
+    CHECK(polaris_mmio_prepare_supervised(&b,&boot,&assignment,17U));
+    PolarisMmioHold native_hold={0};u64 native_id=0;
+    CHECK(polaris_mmio_hold_acquire(&native_hold,&b,b.identity,&owner,&native_id));
+    CHECK(!polaris_mmio_enable_rebind(&native_hold,native_id) && !store_calls);
+    native_scanout=FRAMEBUFFER_SCANOUT_RETIRED;native_lease=DISPLAY_LEASE_USER;
+    CHECK(!polaris_mmio_enable_rebind(&native_hold,native_id));
+    native_lease=DISPLAY_LEASE_KERNEL;
+    CHECK(polaris_mmio_enable_rebind(&native_hold,native_id));
+    CHECK(!polaris_mmio_enable_rebind(&native_hold,native_id));
+    CHECK(!polaris_mmio_rebind_write(&native_hold,native_id,POLARIS_REG_PRIMARY_LOW,0));
+    CHECK(!polaris_mmio_rebind_write(&native_hold,native_id,POLARIS_REG_PRIMARY_HIGH,0xF5));
+    CHECK(polaris_mmio_rebind_write(&native_hold,native_id,POLARIS_REG_PRIMARY_HIGH,0xF4) &&
+        store_calls==1 && stored_value==0xF4 && stored_address==b.virtual_base+0x81C);
+    CHECK(polaris_mmio_rebind_write(&native_hold,native_id,POLARIS_REG_PRIMARY_LOW,0) &&
+        store_calls==2 && stored_address==b.virtual_base+0x810);
+    CHECK(!polaris_mmio_rebind_write(&native_hold,native_id,POLARIS_REG_PRIMARY_HIGH,0xF4));
+    assignment.state=PCI_ASSIGNMENT_QUARANTINED;
+    u32 native_value=~0U;
+    CHECK(!polaris_mmio_read_held(&native_hold,native_id,&owner,0,POLARIS_REG_PRIMARY_HIGH,&native_value));
+    CHECK(polaris_mmio_rebind_read(&native_hold,native_id,POLARIS_REG_PRIMARY_HIGH,&native_value));
+    native_lease=DISPLAY_LEASE_USER;CHECK(!polaris_mmio_arm_recovery(&native_hold,native_id));
+    native_lease=DISPLAY_LEASE_KERNEL;CHECK(polaris_mmio_arm_recovery(&native_hold,native_id));
+    CHECK(!polaris_mmio_arm_recovery(&native_hold,native_id));
+    CHECK(!polaris_mmio_rebind_write(&native_hold,native_id+1,POLARIS_REG_PRIMARY_HIGH,0xF4));
+    load_interrupts=false;CHECK(!polaris_mmio_rebind_write(&native_hold,native_id,POLARIS_REG_PRIMARY_HIGH,0xF4));
+    load_interrupts=true;
+    CHECK(polaris_mmio_rebind_write(&native_hold,native_id,POLARIS_REG_PRIMARY_HIGH,0xF4));
+    CHECK(polaris_mmio_rebind_write(&native_hold,native_id,POLARIS_REG_PRIMARY_LOW,0) && store_calls==4);
+    CHECK(!polaris_mmio_rebind_write(&native_hold,native_id,POLARIS_REG_PRIMARY_LOW,0));
+    CHECK(!polaris_mmio_cleanup(&b));
+    CHECK(polaris_mmio_hold_release(&native_hold,native_id) && polaris_mmio_cleanup(&b) &&
+        assignment.state==PCI_ASSIGNMENT_QUARANTINED && assignment.bus_master_exposed);
+    native_scanout=FRAMEBUFFER_SCANOUT_FIRMWARE;
+    puts("PASS: retired-only supervisor RW leaf; exact HIGH/LOW payload/order; one existing-pin recovery round under retained quarantine; no assignment reuse or hardware.");
     puts("PASS: complete BAR5/D0 plan; all map-failure boundaries; retained rollback/release pins;"
          " owner fault/quarantine; stale identity/context/leaf; alias/RAM refusal; inherited DMA history; bounded holds/close/drain/incarnation; guarded semantic load routes and refusals.");
     return 0;

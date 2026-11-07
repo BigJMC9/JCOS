@@ -5,8 +5,11 @@ The display service links a userspace register reader and decoder in
 Normal display-service diagnostics use synthetic fixtures. A separate, default-off
 kernel-monitor experiment can sample physical registers on the exact selected
 RX 570 candidate. It closes and unmaps live access before a dedicated Ring3
-process decodes immutable copied values. No native modesetting, reset, connector
-programming or independent native rescue is implemented by this path.
+process decodes immutable copied values. A second default-off experiment now
+runs a constrained Ring3 same-buffer rebind and a separately reserved rescue
+entry. It preserves the inherited timing/link; full modesetting, reset and
+connector programming remain unimplemented. Physical writes/recovery require
+their own acceptance evidence.
 
 ## Register contract
 
@@ -522,8 +525,518 @@ prevents a stale identity from affecting a replacement. Native direct handoff
 checks that same generation at prepare and commit. Firmware services and
 legacy presentation stay blocked.
 
-These mechanisms do not program the RX570, establish hardware readiness or
-start a rescue backend. The future constrained physical provider must prove
+These lifecycle mechanisms alone do not program the RX570 or prove hardware
+readiness. The explicit provider below uses them only after its constrained
+register/frame checks. Its physical qualification is separate. It must prove
 operational output before publication and remove failed Ring3 mappings before
 replacement. Host fixtures supply simulated descriptors only; no automatic
 diagnostic labels the live GPU output native or rescue.
+
+## Explicit same-buffer write and reserved rescue experiment
+
+`POLARIS_NATIVE_WRITE=1` enables `polaris-native`, `polaris-rescue`
+and `polaris-finish` in the kernel monitor. Default builds keep writes
+disabled. The native and read-capture build stamps are independent; invalid
+values fail before changing either stamp. There is no boot activation or
+userspace constructor. Unsupported targets refuse before any mapping or GPU IO.
+
+The initial profile requires the exact selected board, pipe0, existing
+CPU0x50000000/GPU0xF400000000 allocation,1024x768,pitch1024 and BGRX32.
+Preparation takes46 reads; the recovery observation takes40 on the already
+identified pipe. It checks unchanged pipe fields, MC/HDP/GOP correlation,
+idle update state, stable flip0/0x20 and advancing24-bit frame count.
+The inherited DP timing/link stays in place. No other VRAM is allocated.
+
+Two distinct Ring3 executables reserve their own process, stack, font/code,
+IPC endpoints and read-only framebuffer aliases before retirement. The rescue
+entry has no dependency on the primary's heap, locks, mutable configuration,
+compositor or allocations. Shared reviewed policy code leaves common-mode
+software risk; separate processes do not imply implementation independence.
+
+The kernel owns a dedicated supervised assignment. Neither process receives
+an assignment/BAR/IRQ/DMA capability or MMIO mapping. Ring3 proposes the five
+semantic recipe steps. Independent validation binds the service incarnation,
+observation and pinned surface before any IO. After irreversible GOP retirement,
+one pipe0 supervisor UC/NX leaf becomes writable. Its only store API admits
+HIGH=0xF4 followed by LOW=0 exactly once per round. It accepts no raw offset
+or alternative address. The normal assignment claim still rejects kernel
+processes; the separate supervised claim cannot be delegated to Ring3.
+
+The executor refreshes address/CRTC/update/flip/frame state before the first
+store, posts LOW with a read, then takes a new frame baseline. At most64
+six-field polls check unchanged address/control, no pending update and a
+24-bit frame delta2..512. Maximum392 loads and two stores per round, with a
+two-second admission deadline. Every live operation runs with interrupts
+enabled and a retained exact mapping/hold. Journals precede transactions.
+The deadline does not cancel a stalled MMIO/interconnect operation.
+
+After register/frame validation, a fresh active descriptor and the existing
+exclusive CPU lease permit the primary's previously RO framebuffer pages to
+become RW. The page update allocates nothing and changes only WRITE on exact
+owned4KiB leaves; USER/NX/cache/frame stay fixed. Any partial failure requires
+stopping the process and retaining/retrying teardown, never resuming it.
+
+`polaris-rescue` revokes the descriptor, quarantines the parent and
+injects a controlled primary fault. The old process must stop/reap and lose
+its mappings before the lease returns to KERNEL. Reclamation uses the retained
+launch process ID: the ordinary managed-service PID accessor returns zero once
+a service fails, and reaping removes its process storage. The saved identity
+remains bound to that driver instance until lease reclamation completes.
+The pre-reserved independent
+rescue entry receives fresh kernel-observed configuration and one bounded
+same-buffer rebind round. It uses the same retained kernel assignment/pins
+while quarantine remains set; ordinary assignment authorization/reuse remains
+refused and inherited DMA history is never cleared. It then draws new rescue
+text under a fresh output generation and the exclusive lease.
+
+A transitional monitor poll detects an unexpected primary terminal outcome;
+bounded RPC detects request failure. In the policy candidate below,the existing
+Ring3 supervisor chooses recovery or headless output from these observations.
+A primary render failure after successful register validation requests the same
+one-shot recovery decision. Unqualified register
+state, failed cleanup, exhausted rescue or standby/rescue failure leaves
+headless quarantine and serial control. This is a restricted process-failure
+profile, not GPU reset or recovery from arbitrary device/bus hangs.
+The worker candidate below removes the kernel-monitor scheduling dependency;
+remaining privileged orchestration and the general Ring3 broker migration are
+separate work.
+
+Verify the green primary pattern and blue rescue pattern separately on the
+physical monitor. After `polaris-finish`, the validated current descriptor
+can back the kernel console while original GOP remains retired. Firmware-only
+service tests are performed before takeover; they cannot reauthorize GOP
+afterward. Run a fresh image boot for another experiment.
+
+`test polaris-native` uses ordinary RAM, not the live framebuffer.
+It exercises actual separate Ring3 entries, RO-write page fault, primary spin
+timeout, stale IDs/connections, retained launch identity after fault/reap,
+allocation-free rescue promotion, exact primary/rescue title pixels using the
+canonical MSB-first font, and full software cleanup. Host targets `test-polaris-program` and
+`test-polaris-native` exercise the production executor/orchestration with
+stateful IO/process doubles. These software passes do not establish physical
+output restoration. No new IRQ, DMA, clocks, translation, reset, ROM execution,
+link training or changed-mode support is supplied.
+
+
+The monitor shutdown/reboot commands first stop native CPU owners and remove
+their borrowed mappings/MMIO leaves, then revoke the supervisor capability.
+The device object and inherited exposure remain quarantined. This preparation
+performs no GPU transaction and does not relax the existing power object/storage
+checks. Failed CPU cleanup keeps the controlled transition blocked and the
+retained records intact. Finishing the experiment also revokes that capability,
+so an otherwise clean system can pass ordinary reboot readiness.
+
+## Observed retained-scanout rescue run
+
+One physical run on2026-11-07 used a Gigabyte Z390 Gaming X/BIOS F10,
+i7-9700K,1002:67DFrevEF/sub1458:2310 and a Philips Momentum272M8 over
+DisplayPort. Image SHA-256:
+b7beab605c55c39d7269f0239e90ccdb5bab59f17f13f8ba7a8e2f40b5c74812.
+Image identity is operator-confirmed flashing plus matching runtime/profile
+markers; flashed bytes were not independently read back.
+
+The primary and reserved rescue each completed HIGH0x681C=0xF4 then
+LOW0x6810=0,14 executor loads/one poll and three frames of post-write
+progress, with update0 and flip0x20. Preparation used46 loads for primary
+and40 for rescue. The operator separately confirmed correctly oriented
+green primary text, blue fresh rescue text and a readable reclaimed kernel
+console. The primary was deliberately faulted with #UD and stopped/reaped
+before rescue; the kernel continued running. Host serial input/replies
+worked in every phase, with no reported local UART drops/timeouts.
+
+Finish restored the KERNEL lease/owner0, removed the driver aliases and
+register leaves, and revoked the mediator capability. Shutdown/reboot
+readiness and storage safety reported YES; no reboot was performed.
+Original GOP remained retired and the device stayed quarantined with its
+inherited busmaster exposure. This records one controlled process-fault
+run preserving the existing allocation and inherited DP timing. Repetition,
+active-output spin/rescue-failure cases, independent progress measurements,
+Ring3 supervisor orchestration, changed modes, HDMI/link training, GPU reset
+and arbitrary GPU/bus-hang recovery require separate evidence.
+
+## Bounded process-liveness monitoring
+
+The v20 explicit write build probes the active driver once per second while the
+kernel monitor loop is running. The worker candidate below schedules these
+observations independently. Each heartbeat has a fresh scalar challenge
+and checks reply shape, service incarnation, role and challenge echo. The
+common IPC path permits up to two seconds for a reply plus a separate
+two-second wait for return to the command receive loop. An already busy
+nonreceiving peer refuses immediately. Primary failure enters the reserved rescue path;
+failed standby or active rescue closes output and retains headless quarantine.
+Heartbeat checks issue no GPU read/write. The monitor must remain active;
+a long monitor command can delay polling, and this is still transitional
+kernel scheduling. Recovery decisions in the candidate below run in the existing
+Ring3 supervisor; autonomous scheduling and the remaining orchestration migration
+are still open.
+
+`polaris-test primary fault|spin` and `polaris-test rescue fault|spin`
+select a deliberate diagnostic on the current writer only, once per role.
+The exact private four-word ACK identifies the role and selected branch.
+The target then leaves its receive loop and faults/spins. The command measures
+a completed byte of work through the existing independent Ring3 console:
+process/incarnation remain the same and its portal-write count increases.
+For spin, the driver must still be live and outside its receive wait before
+and after that work. This is a measured checkpoint, not a sustained throughput
+or whole-recovery progress guarantee. The monitor poll in v20,or the independent worker in the candidate below,
+subsequently detects the outcome;the diagnostic does not invoke rescue directly.
+
+`polaris-status` reports CPU-only stage/heartbeat/test counters. Normal
+heartbeat success is quiet; failures and explicit diagnostic checkpoints are
+journaled. ACK/delivery/progress failure stops the experiment without replay.
+After successful CPU teardown the failed path revokes the mediator capability,
+so ordinary power-readiness checks can succeed while output stays unqualified
+and the GPU parent remains quarantined. Cleanup failure retains the ledger
+and continues to block power readiness.
+
+Existing `polaris-rescue` remains the explicit controlled-fault operation.
+The earlier explicit-rescue run and the watchdog/failure run below are
+separate hardware evidence; neither establishes broader device recovery.
+
+## Observed watchdog and rescue-failure run
+
+One physical run on2026-11-07 used the same Z390/F10/RX570/Philips DisplayPort
+profile with image SHA-256:
+3e68fbabf09de2a311896013159d0383c01d4b9c90740d10a83e59acb4015a73.
+The primary and automatically selected rescue each completed their fixed
+HIGH/LOW pair,14 executor reads/one poll and three frames of progress.
+The operator confirmed correct green primary and blue fresh rescue text.
+
+The primary was acknowledged into a spin. Independent Ring3 console PID3/
+incarnation1 completed work,advancing portal writes1385->1386 while the
+driver remained live/nonreceiving. The monitor detected a failed heartbeat,
+stopped/reaped the primary and entered rescue without an explicit rescue
+command or kernel restart. Its status later reported28 completed heartbeat
+intervals. A deliberate rescue #UD then advanced console work1386->1387;
+the monitor selected headless quarantine without additional GPU reads/writes.
+The failure status showed63 completed heartbeat intervals,test mask0x6,
+no qualified scanout,retired GOP,KERNEL lease/owner0,drained CPU resources,
+and shutdown/reboot readinessYES. Serial input/replies remained usable.
+
+The controlled reboot quiesced services and reset the platform. The operator
+reported that Windows booted,then changed boot priority. The subsequent JA OS
+USB boot,serial monitor and readable firmware-backed console were captured
+and confirmed. Fresh status was stage0/heartbeat0/test mask0. Return to JA OS
+required operator boot-selection intervention; this is not an unattended
+reboot-to-JA-OS result. It also does not prove in-place GPU reset or survival
+of arbitrary GPU/interconnect failure.
+
+Totals:114 GPU loads,four store attempts,no retries;41089 raw received bytes/
+326 host-transmitted bytes include both JA OS boots,all phase replies and the
+CPU-only post-boot status. The image identity uses operator confirmation,
+matching profile/unique runtime markers and captured JA OS boot output,
+without an independent flashed-byte readback. This is one primary-spin and
+rescue-fault case. Active-rescue spin,automatic primary terminal failure,
+repeated/exhaustion cases,Ring3 policy migration,HDMI/changed modes and hardware
+isolation still need separate qualification. Counter increments are measured
+checkpoints,not continuous throughput or a whole-system detection deadline.
+
+
+## Complementary exception and rescue-spin run
+
+A second fresh v19 run on2026-11-07 used the same exact image and DP profile.
+An acknowledged primary #UD/vector6/thread20 caused automatic terminal-outcome
+recovery; the operator confirmed correct blue fresh-rescue text. An active
+rescue spin then failed its heartbeat and was forcibly stopped/reaped, leaving
+headless quarantine, independent serial control and clean power readiness.
+Independent Ring3 console PID3/incarnation1 advanced1385->1386 and1386->1387
+at the fault/spin checkpoints. No further GPU transaction followed rescue failure.
+
+Each primary/rescue round used the fixed HIGH/LOW pair,14 executor loads,
+one poll and three frames of progress; preparation used46/40 loads. Baselines/
+completion were0xB4FE->0xB501 and0xC20C->0xC20F. Totals were114 GPU loads,
+four store attempts,no retries,43080 serial RX bytes and462 host TX bytes.
+Status showed54 completed heartbeat intervals after rescue and77 at cleanup;
+these are probe intervals,not RPC counts or a detection-latency guarantee.
+
+Five exhausted-state native/rescue/diagnostic/finish requests were refused,
+without GPU access or counter changes. A controlled reboot returned directly
+to JA OS,with the readable firmware console confirmed by the operator without
+boot-menu/reset/power intervention. Fresh native status was0/0/0. This is one
+unassisted return; the previous run's assisted boot-selection result remains
+separate. Neither result establishes GPU reset or arbitrary device/bus-hang
+recovery. Both software-fault branch combinations now have separate physical
+cases; statistical reliability,normal Ring3 orchestration,changed modes,HDMI,
+and hardware-memory isolation remain open.
+
+## Ring3 recovery decisions
+
+The v20 image moved continue/rescue/headless decisions into the
+existing protected supervisor process. Its immutable policy module tracks an
+ordered session through armed,primary,recovering,rescue and closed states.
+A failed standby takes precedence over primary failure; active rescue failure
+closes the session. Closed sessions cannot rearm. A later distinct session
+requires a strictly greater token. The native experiment still permits only
+one attempt per boot and one reserved rescue round.
+
+The private four-word exchange carries a versioned scalar health snapshot,
+session token and sequence; replies echo session/sequence and one bounded
+action. Kernel clients retain the exact supervisor process/thread identity.
+Timeout,malformed reply,rejection,sequence exhaustion or replacement poisons
+the client session without replay or automatic reconnection. No startup
+capability,syscall,device mapping or hardware operation is added to the
+supervisor. It continues to use its original two IPC capabilities.
+
+The kernel still samples process/heartbeat state,validates legal action/stage
+and known-writer liveness,enforces exclusive leases and the fixed GPU recipe,
+and performs revocation/quarantine/teardown. Policy failure fails closed.
+Successful CPU cleanup can still permit controlled power transitions while
+device quarantine remains. In v20,heartbeat scheduling is tied to the kernel
+monitor loop. The worker candidate below removes that scheduling dependency;
+remaining privileged lifecycle/broker orchestration is still transitional.
+
+`test graphics-policy` exercises the actual existing Ring3 supervisor with
+four fresh ordered sessions,stale session/sequence/reserved-bit refusals,
+primary exit/missed-heartbeat recovery,failed-standby precedence,rescue
+failure,closed-session refusal and unrelated supervisor ping. It allocates
+no pages/objects/caps and performs no GPU IO. Host checks cover62 malformed
+envelope bits,64 health/stage snapshots,eight client identity/transport/no-replay
+cases and75 production-controller cases,including18 policy/enforcement cases.
+
+Image SHA-256: `e87f9f9c17f91b236f0b3d07db5fa21c31b3ffca68c2904c4662e37e9436e4eb`. Focused,two-GPU,normal86/86
+and deep86/86 across603 iterations passed on four clean QEMU boots. Integer-only
+build rules,zero runtime ELF relocations,default-off independent write/capture
+gates and the108-offset/44-fact/19-source/9-refusal register audit are preserved.
+Primary and rescue ELF bytes are unchanged from the physically tested image;
+the supervisor and kernel implement the new decision path. One physical policy
+case is recorded below;broader policy-failure and branch-combination coverage
+remain open. Existing DP retained mode,once-per-boot limits
+and inherited-DMA quarantine are unchanged;HDMI/new modes/reset/isolation
+remain separate work.
+
+## Observed Ring3 policy recovery run
+
+One physical v20 run on2026-11-07 used the same Z390/F10/RX570/Philips DP
+profile and image SHA-256
+e87f9f9c17f91b236f0b3d07db5fa21c31b3ffca68c2904c4662e37e9436e4eb.
+Preflight passed three targeted1/1 standard suites,including four actual
+Ring3 policy sessions,stale/closed-state refusals,unrelated supervisor ping
+and unchanged page/object/cap counts. The operator confirmed correct green
+primary text. An acknowledged live primary spin completed independent console
+work1385->1386 (PID3/incarnation1),then Ring3 action2 selected rescue. The old
+owner was stopped/reaped before the fresh reserved backend drew the blue
+rescue text,confirmed by the operator without a kernel restart.
+
+A deliberate active-rescue #UD/vector6/thread21 completed independent work
+1386->1387. Ring3 action3 selected headless output,CPU resources/capability
+drained under retained GPU-parent quarantine,original GOP stayed retired,and
+serial/power readiness remained usable. No additional GPU MMIO read/store
+followed the rescue fault. Five exhausted-state commands were refused without
+changing stage3/heartbeat51/test mask0x6. The after-rescue status had28 completed
+heartbeat intervals;these are not exact RPC counts or a detection deadline.
+
+Each round completed the fixed HIGH/LOW pair,14 executor loads/one poll and
+three frames of progress. Primary baseline/completion0x1EFF->0x1F02;rescue
+0x262C->0x262F. Preparation used46/40 loads,total114 GPU loads/four store
+attempts/no retries. Controlled reboot returned directly to a readable JA OS
+firmware console without intervention;fresh native status0/0/0. COM7 is closed.
+
+The v20 capture contains46866 received bytes and491 host-transmitted bytes,
+including1694 initial boot bytes and the new boot after reset. A separate182-byte
+pre-flash shutdown transcript is retained and excluded from the v20 count;
+all saved raw bytes total47048. Identity is operator-confirmed flashing plus
+new policy/profile/runtime markers,without independent flashed-byte readback.
+The monitor still schedules observations;normal independent supervision,
+physical policy-process failure/replacement,additional v20 branch combinations,
+HDMI/changed modes,GPU reset/arbitrary hardware hangs and hardware-memory
+isolation remain unqualified. Work increments are two checkpoints,not sustained
+throughput. Headless means no qualified output;stale pixels may remain visible.
+
+## Independent periodic worker candidate
+
+The explicit v21 image serializes native setup,health observations,diagnostics,
+rescue and CPU teardown on one privileged worker. Private ordered requests
+bind the control thread,request sequence and worker identity. Two kernel-only
+endpoints,four nontransferable kernel capabilities and one guarded16KiB worker
+stack are reserved before native preparation;none are granted to Ring3.
+The worker uses existing PIT-backed timed IPC waits and polls between requests,
+so neither returning to the Ring3 shell nor command traffic suppresses health
+checks. No GPU authority,register sequence,buffer,IRQ/DMA/reset or mode is added.
+The primary/rescue ELF bytes are unchanged.
+
+The existing Ring3 supervisor still chooses continue,rescue or headless.
+Its shared transport and start/stop/recovery entry points now use bounded
+single-flight admission across kernel callers. Admission waiting sends no
+request. Replacement/ambiguous policy replies still close the native session.
+A failed original policy process is stopped through its retained exact
+process/thread identity,including retryable partial teardown;stale cleanup
+cannot stop a replacement. Independent serial/console policy remains separate.
+
+No caller force-terminates a trusted worker callback or frees its live stack.
+Ambiguous command completion poisons the channel without replay;the worker
+performs CPU-only abort once its callback returns. Partial teardown retains
+the exact remaining resources. After native failure,the worker can remain
+quiescent until status/finish/power drains its private control resources.
+The ordinary power baseline is unchanged and succeeds only after those
+resources and the failed policy are actually removed.
+
+Immediate `polaris-test policy fault|spin` tests the current policy once.
+The fixed delayed forms are `primary spin-later`,`rescue fault-later`,
+`policy fault-later` and`policy spin-later`. They require an active
+role,wait at least three seconds and require the Ring3 shell session still
+active at injection. Enter `usershell` after arming. The worker journals
+its separate thread/control identities. An absent shell or changed role
+cancels injection. Delayed injection never starts a competing console RPC;
+normal Ring3 shell commands provide separate progress evidence. Immediate
+monitor diagnostics retain their original independent console-work probe.
+
+`test graphics-worker` uses RAM and the actual worker,drivers and Ring3
+supervisor. It covers primary spin/rescue fault without monitor polling,
+policy fault/spin,unrelated console work,serialized supervisor clients,
+exact failed-policy stop,power readiness before replacement,stale-session/
+cleanup refusal against the replacement and full resource baselines.
+Host checks cover nine constructor failures,seven malformed/ambiguous replies,
+no replay,owner/sequence/partial-teardown guards and the production adapter.
+The production core controller has80 cases,including five policy-failure
+injection cases. These checks perform no physical GPU programming.
+
+Four clean QEMU boots PASS:focused,multi,normal87/87/87iterations and deep87/87/607iterations;exact failed-policy stop,power readiness before replacement and replacement immunity PASS.
+Image SHA-256:`48acc7ccb83748351352034e22cbaaa8cc3101c1f6cccdf555e6c221d2183526`. Physical off-monitor and policy-failure results are recorded below. One per-boot primary/rescue operation budget,
+retained inherited-DMA quarantine and fixed DP mode remain unchanged.
+Monitor independence does not complete the general userspace lifecycle
+broker,native modesetting,HDMI/link training,GPU reset or hardware isolation.
+
+## Observed recovery outside the monitor
+
+Three physical native runs on2026-11-07 used v21 image SHA-256
+48acc7ccb83748351352034e22cbaaa8cc3101c1f6cccdf555e6c221d2183526
+on the same Z390/F10/RX570/Philips DisplayPort profile. Four targeted
+preflight suites passed,including actual RAM-only worker/policy fault
+and spin,exact failed-policy stop,power readiness before replacement
+and full resource baselines. Physical replacement during active native
+output remains untested;the replacement checks used RAM.
+
+The operator confirmed the green primary title. A delayed primary spin
+fired while the normal Ring3 shell was active,with worker31 distinct from
+control1. Help commands completed before and after. Ring3 action2 selected
+rescue,the old owner was stopped/reaped,and the operator confirmed the
+correct blue fresh-rescue title without kernel restart or monitor polling.
+A delayed rescue exception then fired from the shell;action3 selected
+headless output and drained CPU owners under retained GPU quarantine.
+Help completed after that event too. These are command checkpoints,not
+continuous throughput or a whole-system detection-latency measurement.
+
+Primary frame count advanced0x2582->0x2585;rescue0x41B1->0x41B7.
+Each used14 executor loads/one poll;preparation used46/40 loads. Status
+reported137 heartbeat intervals after rescue and169 at cleanup,mask0x6.
+Five exhausted requests were refused without GPU operations. Serial/power
+readiness remained available. Controlled reboot returned to JA OS;the
+operator confirmed a readable prompt without boot-menu/reset/power action.
+
+Two separate fresh native boots exercised policy exception and acknowledged
+policy spin while the shell remained active on worker6/control1. Policy
+identity loss or unavailable transport caused headless CPU drain with no
+rescue or further GPU operation. Both reached stage3/mask0x8,six heartbeat
+intervals,and clean shutdown/reboot/storage checks. Help and serial commands
+completed after each. Both returned with captured reboot output and firmware
+scanout. Later return visibility and absence of intervention were not separately
+confirmed;the first run's explicit observation remains distinct.
+
+Totals:234 GPU loads,eight fixed store attempts,no retry. Primary deltas
+were3,3,2;rescue delta6. These meet the unchanged2..512-frame completion
+rule with no pending update. Saved active captures contain98279 received
+bytes and972 host-transmitted bytes. The initial boot was missed while the
+serial adapter was unplugged;gaps between captures are not claimed as a
+continuous log. Local UART reports showed no drops,timeouts or stalls.
+
+The original host script stopped after successful rescue because it expected
+a monitor banner printed only once. The failed transcript is preserved;
+CPU-only status continued qualification and a separate helper corrected the
+expectation without repeating hardware operations. The offline verifier's
+initial three-frame assumption was corrected to the existing two-frame
+minimum;no production code,image or admission gate changed.
+
+The machine is fresh firmware-backed v21,stage0/heartbeat0/mask0,COM7
+released. Remaining privileged lifecycle/broker migration,physical active
+policy replacement,changed modes,HDMI/link training,GPU reset,arbitrary
+GPU/interconnect hangs and hardware memory isolation remain separate work.
+
+## Ring3 rebind execution candidate
+
+The v22 candidate moves the vendor rebind sequence into the protected primary
+and fresh rescue programs. The old synchronous executor is excluded from the
+kernel build and retained only as a host-test reference. Both driver ELFs
+change; the existing supervisor ELF, GPU operation set and per-boot limits
+remain unchanged.
+
+Private native protocol v2 uses the existing two IPC capabilities and three
+startup arguments. After the five-step plan, the driver requests semantic
+reads, the fixed HIGH/LOW pair and bounded waits through the same endpoint
+pair. No syscall, capability grant, user BAR mapping, physical address or raw
+register offset is added. Each request binds incarnation and sequence. The
+kernel's independent finite gate validates the plan before IO, constrains
+operation order/field/payload, checks actual readback and frame progress,
+and permits at most64 polls/457 operation messages plus final completion.
+The conversation shares a two-second software admission budget; it cannot
+interrupt a stalled device transaction.
+
+A driver cannot authorize output by claiming success. The kernel requires
+its own completed gate, the exact final frame delta and return to the
+receive loop before installing output and promoting the framebuffer lease.
+The driver also requires completion before drawing. Delivery, IO, identity,
+deadline or completion failure consumes the attempt without replay; existing
+revocation and retained quarantine apply. Fresh rescue runs the same reviewed
+sequence in its separately reserved process without trusting primary state.
+
+Host checks exercise the real user sequence and kernel gate,2048 corrupted
+request fields/payloads,640 corrupt plans, pending updates, frame wrap and
+exhaustion. Production broker checks cover success plus22 transport/identity/
+partial-write/deadline/completion failures. Actual RAM-only Ring3 tests cover
+successful execution, incomplete post-write failure, no replay, retained RO
+alias and full cleanup. Four clean QEMU boots PASS: focused, multi, normal87/87 and deep87/87 across607 iterations; actual Ring3 broker completion, partial-failure RO retention/no replay and full baseline checks PASS.
+
+Candidate image SHA-256:
+130a55f2bcfa4e47cea708915296fb66fc4fea83a51317779ae142101de133c7.
+The physical v22 result is recorded below. This does not add changed-mode
+modesetting, HDMI/link training, GPU reset or hardware isolation, and the
+remaining lifecycle/broker migration is still transitional.
+
+## Observed Ring3 execution and rescue
+
+Three native runs on 2026-11-07 used v22 image
+130a55f2bcfa4e47cea708915296fb66fc4fea83a51317779ae142101de133c7
+on the same Z390/F10/RX570/Philips DisplayPort profile. All four targeted
+preflight suites passed, including actual Ring3 broker completion,
+incomplete post-write refusal, retained RO alias and full resource cleanup.
+
+The primary process PID28/incarnation23 completed its user sequence through
+the independent kernel gate; the operator confirmed the correct green title.
+A delayed primary spin fired with the normal Ring3 shell active on worker32/
+control1. Ring3 action2 selected fresh rescue PID29/incarnation24 after
+stopping/reaping the old owner. Rescue completed its own user sequence and
+the operator confirmed correct blue text without a kernel restart or monitor
+polling. Help commands completed before/after the event.
+
+A delayed rescue exception on thread34 selected action3/headless CPU cleanup.
+Help and serial control remained usable, as did shutdown/reboot/storage
+readiness. Five exhausted requests were refused without further GPU IO.
+Controlled reboot returned to readable JA OS with no intervention, confirmed
+separately by the operator. Two additional native boots tested policy
+exception and acknowledged spin. Both failed closed with no additional
+GPU operation, preserved shell/serial/power control and returned with captured
+JA OS reboot output. Later visibility/no-intervention was not separately
+confirmed. Each later primary used PID4/incarnation2 in its separate boot.
+
+Every transaction completed the fixed HIGH/LOW pair,14 executor loads and
+one poll. First primary frames0x1A14->0x1A17; rescue0x22A6->0x22AC;
+policy-exception primary0xA93->0xA96; policy-spin primary0x792->0x795.
+Deltas3/6/3/3 satisfy the unchanged2..512-frame idle-update completion rule.
+Preparation used46 loads for each primary and40 for rescue. Totals:234 GPU
+loads/eight store attempts,no retry or further GPU operation after terminal
+failure. First-run heartbeat intervals35/78 and policy intervals6 are
+observations, not RPC totals or whole-system latency measurements.
+
+Active captures contain98944 RX/972 host TX bytes. A separate1736-byte
+initial reset transcript contains a131-byte unattributed pre-reset prefix
+and1605 post-reset boot bytes. Image-scoped RX is100549;all saved raw RX is
+100680. The prefix is retained and excluded from image-scoped totals.
+Initial boot coverage is partial, and gaps between sessions are not a
+continuous log. Runtime UART checks reported no drops,timeouts or stalls.
+
+The image and production implementation are unchanged since the software
+freeze. The machine is now fresh firmware-backed v22,stage0/heartbeat0/
+testmask0,COM7 released. This qualifies the named Ring3-sequenced execution
+and software-failure paths under retained DP timing. Remaining userspace
+lifecycle/presentation integration,physical active-output policy replacement,
+changed modes/HDMI,GPU reset/arbitrary hardware hangs and memory isolation
+remain separate work.

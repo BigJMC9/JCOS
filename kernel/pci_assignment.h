@@ -25,6 +25,7 @@ typedef struct {
     PciAssignmentState state;
     bool dma_gate_active;
     bool bus_master_exposed;
+    bool supervisor_owned;
     bool initialized;
 } PciAssignment;
 
@@ -54,6 +55,10 @@ PciAssignment *pci_assignment_from_resource(DeviceResource *resource);
  * claiming the same function until explicit revocation and release complete. */
 bool pci_assignment_claim(PciAssignment *assignment, Process *process,
     CapabilityHandle *out_handle);
+
+/* Privileged mediator ownership; no Ring3 grant/transfer. Ordinary claim still
+ * rejects kernel processes. Recovery retains this assignment, never reclaims it. */
+bool pci_assignment_claim_supervised(PciAssignment *assignment,CapabilityHandle *out_handle);
 
 /* Authorization requires both current ownership and the exact live capability
  * issued to that process. QUIESCING and QUARANTINED assignments are unusable. */

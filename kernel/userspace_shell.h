@@ -8,6 +8,8 @@
  * service. Escape or the userspace `monitor` command returns to the kernel
  * emergency/development monitor. */
 bool userspace_shell_run(void);
+/* CPU-only diagnostic state;does not grant shell or device authority. */
+bool userspace_shell_active(void);
 
 /* Boot policy wrapper. A successful activation counts as the default-shell
  * handoff even though this call later returns when the operator requests the

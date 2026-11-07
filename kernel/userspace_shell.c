@@ -12,6 +12,7 @@
 #include "../include/console_service_protocol.h"
 
 static u64 g_userspace_shell_sessions;
+static volatile bool g_session_active;
 static u64 g_userspace_shell_boot_handoffs;
 
 static void userspace_shell_cursor_begin(void) {
@@ -135,11 +136,13 @@ static bool userspace_shell_run_session(bool boot_default) {
 }
 
 bool userspace_shell_run(void) {
-    return userspace_shell_run_session(false);
+    g_session_active=true;
+    bool ok=userspace_shell_run_session(false);g_session_active=false;return ok;
 }
 
 bool userspace_shell_run_boot_default(void) {
-    return userspace_shell_run_session(true);
+    g_session_active=true;
+    bool ok=userspace_shell_run_session(true);g_session_active=false;return ok;
 }
 
 u64 userspace_shell_session_count(void) {
@@ -149,3 +152,4 @@ u64 userspace_shell_session_count(void) {
 u64 userspace_shell_boot_handoff_count(void) {
     return g_userspace_shell_boot_handoffs;
 }
+bool userspace_shell_active(void) {return g_session_active;}

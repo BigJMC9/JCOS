@@ -19,12 +19,14 @@ USER_RUNTIME_BLOCK_TEST := $(ROOTFS_DIR)/bin/runtimeblocktest.elf
 USER_DISPLAY_SERVICE := $(ROOTFS_DIR)/bin/displayservice.elf
 USER_COMPOSITOR_SERVICE := $(ROOTFS_DIR)/bin/compositorservice.elf
 USER_SURFACE_APP := $(ROOTFS_DIR)/bin/surfaceapp.elf
+USER_POLARIS_NATIVE := $(ROOTFS_DIR)/bin/polarisnative.elf
+USER_POLARIS_RESCUE := $(ROOTFS_DIR)/bin/polarisrescue.elf
 USER_REGISTER_PROBE := $(ROOTFS_DIR)/bin/registerprobe.elf
 USER_MEDIA_PLAYER := $(ROOTFS_DIR)/bin/mediaplayer.elf
 .DEFAULT_GOAL := all
 .DELETE_ON_ERROR:
 
-USER_PROGRAMS := $(USER_ELF_TEST) $(USER_SUPERVISOR) $(USER_WORKER_SERVICE) $(USER_ORDINARY_SERVICE) $(USER_ORDINARY_SERVICE_REPLACEMENT) $(USER_CONSOLE_SERVICE) $(USER_HELLO) $(USER_INPUT_ECHO) $(USER_LAUNCH_PROBE) $(USER_PCI_DRIVER_PROBE) $(USER_RUNTIME_TEST) $(USER_RUNTIME_BLOCK_TEST) $(USER_RUNTIME_CANCEL_TEST) $(USER_DISPLAY_SERVICE) $(USER_COMPOSITOR_SERVICE) $(USER_SURFACE_APP) $(USER_MEDIA_PLAYER) $(USER_REGISTER_PROBE)
+USER_PROGRAMS := $(USER_ELF_TEST) $(USER_SUPERVISOR) $(USER_WORKER_SERVICE) $(USER_ORDINARY_SERVICE) $(USER_ORDINARY_SERVICE_REPLACEMENT) $(USER_CONSOLE_SERVICE) $(USER_HELLO) $(USER_INPUT_ECHO) $(USER_LAUNCH_PROBE) $(USER_PCI_DRIVER_PROBE) $(USER_RUNTIME_TEST) $(USER_RUNTIME_BLOCK_TEST) $(USER_RUNTIME_CANCEL_TEST) $(USER_DISPLAY_SERVICE) $(USER_COMPOSITOR_SERVICE) $(USER_SURFACE_APP) $(USER_MEDIA_PLAYER) $(USER_REGISTER_PROBE) $(USER_POLARIS_NATIVE) $(USER_POLARIS_RESCUE)
 ROOTFS_FILES := $(shell test -d $(ROOTFS_DIR) && find $(ROOTFS_DIR) -type f)
 IMAGE := $(BUILD)/JA-os.img
 
@@ -38,6 +40,7 @@ READELF ?= llvm-readelf
 OBJDUMP ?= llvm-objdump
 QEMU ?= qemu-system-x86_64
 POLARIS_LIVE_CAPTURE ?= 0
+POLARIS_NATIVE_WRITE ?= 0
 FRAMEBUFFER_WIDTH ?= 0
 FRAMEBUFFER_HEIGHT ?= 0
 OVMF_CODE ?= /mingw64/share/qemu/edk2-x86_64-code.fd
@@ -83,12 +86,15 @@ $(BUILD)/user_supervisor.o: user/supervisor.c \
                             user/lib/syscall.h \
                             include/user_abi.h \
                             include/program_startup.h \
-                            include/supervisor_protocol.h | $(BUILD)
+                            include/supervisor_protocol.h user/graphics_policy.h include/graphics_supervisor_protocol.h | $(BUILD)
+	$(CLANG) $(USER_CFLAGS) -c $< -o $@
+
+$(BUILD)/user_graphics_policy.o: user/graphics_policy.c user/graphics_policy.h include/graphics_supervisor_protocol.h include/user_abi.h | $(BUILD)
 	$(CLANG) $(USER_CFLAGS) -c $< -o $@
 
 $(USER_SUPERVISOR): $(BUILD)/user_crt0_startup.o \
                     $(BUILD)/user_syscall.o \
-                    $(BUILD)/user_supervisor.o \
+                    $(BUILD)/user_supervisor.o $(BUILD)/user_graphics_policy.o \
                     user/supervisor.ld Makefile.msys2
 	mkdir -p $(dir $@)
 	$(LD) -m elf_x86_64 -nostdlib -static \
@@ -96,7 +102,7 @@ $(USER_SUPERVISOR): $(BUILD)/user_crt0_startup.o \
 	      -o $@ \
 	      $(BUILD)/user_crt0_startup.o \
 	      $(BUILD)/user_syscall.o \
-	      $(BUILD)/user_supervisor.o
+	      $(BUILD)/user_supervisor.o $(BUILD)/user_graphics_policy.o
 	$(CHECK_ELF_RELOCATIONS)
 
 $(BUILD)/user_worker_service.o: user/worker_service.c \
@@ -207,6 +213,24 @@ $(BUILD)/user_register_probe.o: user/register_reader_probe.c user/drivers/amd_po
 $(USER_REGISTER_PROBE): $(BUILD)/user_crt0_startup.o $(BUILD)/user_syscall.o $(BUILD)/user_register_probe.o $(BUILD)/user_amd_polaris_reader.o $(BUILD)/user_amd_polaris_display.o $(BUILD)/user_amd_polaris_plane.o user/display_service.ld Makefile.msys2
 	mkdir -p $(dir $@)
 	$(LD) -m elf_x86_64 -nostdlib -static -T user/display_service.ld -o $@ $(BUILD)/user_crt0_startup.o $(BUILD)/user_syscall.o $(BUILD)/user_register_probe.o $(BUILD)/user_amd_polaris_reader.o $(BUILD)/user_amd_polaris_display.o $(BUILD)/user_amd_polaris_plane.o
+	$(CHECK_ELF_RELOCATIONS)
+
+$(BUILD)/user_polaris_font.o: kernel/font8x8.c kernel/font8x8.h kernel/types.h | $(BUILD)
+	$(CLANG) $(USER_CFLAGS) -c $< -o $@
+$(BUILD)/user_amd_polaris_program.o: user/drivers/amd_polaris_program.c user/drivers/amd_polaris_program.h include/polaris_rebind_protocol.h include/amd_polaris_registers.h | $(BUILD)
+	$(CLANG) $(USER_CFLAGS) -c $< -o $@
+
+$(BUILD)/user_polaris_native.o: user/polaris_native.c user/drivers/amd_polaris_plane.h include/polaris_native_protocol.h include/polaris_plane_protocol.h include/amd_polaris_registers.h include/program_startup.h kernel/font8x8.h user/drivers/amd_polaris_program.h include/polaris_rebind_protocol.h | $(BUILD)
+	$(CLANG) $(USER_CFLAGS) -DPOLARIS_NATIVE_ROLE=1 -c $< -o $@
+$(BUILD)/user_polaris_rescue.o: user/polaris_native.c user/drivers/amd_polaris_plane.h include/polaris_native_protocol.h include/polaris_plane_protocol.h include/amd_polaris_registers.h include/program_startup.h kernel/font8x8.h user/drivers/amd_polaris_program.h include/polaris_rebind_protocol.h | $(BUILD)
+	$(CLANG) $(USER_CFLAGS) -DPOLARIS_NATIVE_ROLE=2 -c $< -o $@
+$(USER_POLARIS_NATIVE): $(BUILD)/user_polaris_native.o $(BUILD)/user_polaris_font.o $(BUILD)/user_amd_polaris_plane.o $(BUILD)/user_amd_polaris_program.o $(BUILD)/user_crt0_startup.o $(BUILD)/user_syscall.o user/display_service.ld Makefile.msys2
+	mkdir -p $(dir $@)
+	$(LD) -m elf_x86_64 -nostdlib -static -T user/display_service.ld -o $@ $(filter %.o,$^)
+	$(CHECK_ELF_RELOCATIONS)
+$(USER_POLARIS_RESCUE): $(BUILD)/user_polaris_rescue.o $(BUILD)/user_polaris_font.o $(BUILD)/user_amd_polaris_plane.o $(BUILD)/user_amd_polaris_program.o $(BUILD)/user_crt0_startup.o $(BUILD)/user_syscall.o user/display_service.ld Makefile.msys2
+	mkdir -p $(dir $@)
+	$(LD) -m elf_x86_64 -nostdlib -static -T user/display_service.ld -o $@ $(filter %.o,$^)
 	$(CHECK_ELF_RELOCATIONS)
 
 $(BUILD)/user_compositor_service.o: user/compositor_service.c \
@@ -525,7 +549,9 @@ USER_CFLAGS := --target=x86_64-unknown-none-elf -std=c11 -ffreestanding \
                -Wall -Wextra -Werror -O2
 
 KERNEL_CPPFLAGS := -Ikernel -Ikernel/shell -Ikernel/tests -Iinclude
-KERNEL_C_SOURCES := $(sort $(shell find kernel -type f -name '*.c'))
+# Retain the old synchronous executor as a host-test reference only.
+# Normal vendor sequencing runs in the protected primary/rescue ELF.
+KERNEL_C_SOURCES := $(filter-out kernel/polaris_program.c,$(sort $(shell find kernel -type f -name '*.c')))
 KERNEL_C_OBJECTS := $(patsubst %.c,$(BUILD)/%.o,$(KERNEL_C_SOURCES))
 KERNEL_HEADERS := $(sort $(shell find kernel include -type f -name '*.h'))
 NASM_PATH := $(shell command -v $(NASM) 2>/dev/null)
@@ -588,6 +614,16 @@ $(BUILD)/polaris-capture-config: polaris-capture-config-force | $(BUILD)
 	@rm -f "$@.tmp"
 $(BUILD)/kernel/polaris_live_capture.o: $(BUILD)/polaris-capture-config
 $(BUILD)/kernel/polaris_live_capture.o: KERNEL_CPPFLAGS += -DJCOS_POLARIS_LIVE_CAPTURE=$(POLARIS_LIVE_CAPTURE)
+
+.PHONY: polaris-native-config-force
+polaris-native-config-force:
+$(BUILD)/polaris-native-config: polaris-native-config-force | $(BUILD)
+	@case "$(POLARIS_NATIVE_WRITE)" in 0|1) ;; *) echo "POLARIS_NATIVE_WRITE must be 0 or 1" >&2; exit 1 ;; esac
+	@printf '%s\n' "$(POLARIS_NATIVE_WRITE)" > "$@.tmp"
+	@cmp -s "$@.tmp" "$@" || cp "$@.tmp" "$@"
+	@rm -f "$@.tmp"
+$(BUILD)/kernel/polaris_native.o $(BUILD)/kernel/polaris_watch.o: $(BUILD)/polaris-native-config
+$(BUILD)/kernel/polaris_native.o $(BUILD)/kernel/polaris_watch.o: KERNEL_CPPFLAGS += -DJCOS_POLARIS_NATIVE_WRITE=$(POLARIS_NATIVE_WRITE)
 
 $(KERNEL): $(BUILD)/arch.o $(KERNEL_C_OBJECTS) kernel/linker.ld Makefile.msys2
 	$(LD) -m elf_x86_64 -pie -Bsymbolic --no-dynamic-linker --no-undefined -nostdlib \
@@ -670,3 +706,23 @@ test-display-surface-wait:
 .PHONY: test-polaris-plane
 test-polaris-plane:
 	$(PYTHON) tools/test_polaris_plane.py --cc $(CLANG) --build-dir $(BUILD)/host-tests
+
+.PHONY: test-polaris-program
+test-polaris-program:
+	$(PYTHON) tools/test_polaris_program.py --cc $(CLANG) --build-dir $(BUILD)/host-tests
+
+.PHONY: test-polaris-native
+test-polaris-native:
+	$(PYTHON) tools/test_polaris_native.py --cc $(CLANG) --build-dir $(BUILD)/host-tests
+
+.PHONY: test-graphics-policy
+test-graphics-policy:
+	$(PYTHON) tools/test_graphics_policy.py --cc $(CLANG) --build-dir $(BUILD)/host-tests
+
+.PHONY: test-serial-worker
+test-serial-worker:
+	$(PYTHON) tools/test_serial_worker.py --cc $(CLANG) --build-dir $(BUILD)/host-tests
+
+.PHONY: test-polaris-broker
+test-polaris-broker:
+	$(PYTHON) tools/test_polaris_broker.py --cc $(CLANG) --build-dir $(BUILD)/host-tests

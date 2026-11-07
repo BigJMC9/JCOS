@@ -490,9 +490,11 @@ void display_probe_print(const BootInfo *boot) {
     terminal_write("BOOT DISPLAY INVENTORY ABI=");
     terminal_write_u64(BOOT_INFO_VERSION);
     terminal_putchar('\n');
-    terminal_writeln(framebuffer_firmware_valid() ?
-        "BACKEND: FIRMWARE GOP; NATIVE MODESETTING DISABLED." :
-        "BACKEND: NO QUALIFIED SCANOUT; NATIVE MODESETTING DISABLED.");
+    FramebufferOutputStatus output;framebuffer_output_status(&output);
+    if (framebuffer_firmware_valid()) terminal_writeln("BACKEND: FIRMWARE GOP; NATIVE MODESETTING DISABLED.");
+    else if (output.valid && (output.kind==FRAMEBUFFER_OUTPUT_NATIVE || output.kind==FRAMEBUFFER_OUTPUT_RESCUE))
+        terminal_writeln("BACKEND: VALIDATED RETAINED-SCANOUT NATIVE/RESCUE; FULL MODESETTING UNQUALIFIED.");
+    else terminal_writeln("BACKEND: NO QUALIFIED SCANOUT; NATIVE MODESETTING DISABLED.");
     FramebufferScanoutStatus scanout;
     framebuffer_scanout_status(&scanout);
     terminal_write("BOOT SCANOUT: ");
@@ -504,7 +506,7 @@ void display_probe_print(const BootInfo *boot) {
     terminal_write_u64(scanout.kernel_writers);
     terminal_putchar('\n');
     terminal_writeln("FIRMWARE RECOVERY: REQUIRES UNDISRUPTED BOOT SCANOUT / OPERATIONAL GPU.");
-    terminal_writeln("NATIVE RESCUE DRIVER: NOT IMPLEMENTED / NOT QUALIFIED.");
+    terminal_writeln("NATIVE RESCUE: EXPLICIT WRITE BUILD ONLY; QUALIFICATION IS PROFILE-SPECIFIC.");
     FramebufferInfo fb;
     if (framebuffer_info(&fb)) {
         field("GOP BASE=", fb.physical_base);

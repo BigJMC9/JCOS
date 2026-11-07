@@ -217,8 +217,9 @@ PciAssignment *pci_assignment_from_resource(DeviceResource *resource) {
 static bool assignment_authorized_locked(PciAssignment *assignment, Process *process,
     CapabilityHandle handle) {
     void *resolved = 0;
+    if (!assignment_valid_locked(assignment)) return false;
     bool process_valid = process_storage_in_use(process) && process->initialized &&
-        !process->kernel && process->id;
+        (!process->kernel || (assignment && assignment->supervisor_owned && process==process_kernel())) && process->id;
     CapabilityTable *caps = process_valid ? process_capabilities(process) : 0;
     return caps && assignment_valid_locked(assignment) &&
         assignment->state == PCI_ASSIGNMENT_ASSIGNED &&
@@ -227,8 +228,7 @@ static bool assignment_authorized_locked(PciAssignment *assignment, Process *pro
             CAPABILITY_RIGHT_MANAGE, &resolved) && resolved == &assignment->resource;
 }
 
-bool pci_assignment_claim(PciAssignment *assignment, Process *process,
-    CapabilityHandle *out_handle) {
+static bool claim(PciAssignment *assignment, Process *process,CapabilityHandle *out_handle,bool supervised) {
     if (!out_handle) return false;
     *out_handle = CAPABILITY_INVALID_HANDLE;
     if (!assignment || !process) return false;
@@ -236,7 +236,7 @@ bool pci_assignment_claim(PciAssignment *assignment, Process *process,
     u64 flags = assignment_irq_save();
     bool claimed = false;
     bool process_valid = process_storage_in_use(process) && process->initialized &&
-        !process->kernel && process->id;
+        (supervised ? (process->kernel && process==process_kernel()) : !process->kernel) && process->id;
     CapabilityTable *caps = process_valid ? process_capabilities(process) : 0;
     if (!caps || !assignment_valid_locked(assignment) ||
         assignment->state != PCI_ASSIGNMENT_AVAILABLE ||
@@ -248,12 +248,20 @@ bool pci_assignment_claim(PciAssignment *assignment, Process *process,
         goto done;
 
     assignment->owner_process_id = process->id;
+    assignment->supervisor_owned=supervised;
     assignment->state = PCI_ASSIGNMENT_ASSIGNED;
     claimed = true;
 
 done:
     assignment_irq_restore(flags);
     return claimed;
+}
+
+bool pci_assignment_claim(PciAssignment *assignment,Process *process,CapabilityHandle *out) {
+    return claim(assignment,process,out,false);
+}
+bool pci_assignment_claim_supervised(PciAssignment *assignment,CapabilityHandle *out) {
+    return claim(assignment,process_kernel(),out,true);
 }
 
 bool pci_assignment_authorized(PciAssignment *assignment, Process *process,

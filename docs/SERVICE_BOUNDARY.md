@@ -199,7 +199,7 @@ exact retained-buffer layout. It must supply the hardware validation separately.
 Native direct handoff binds a fresh descriptor generation to the existing lease;
 revocation during handoff prevents commit, and stale generations cannot revoke
 a replacement. Legacy firmware services/presentation cannot use that descriptor.
-There is no public constructor, native GPU write broker or automatic takeover.
+There is no public constructor or automatic takeover. A separate default-off monitor transaction now uses a restricted same-buffer write broker.
 
 
 The Ring3 Polaris plane module now proposes a five-step versioned same-surface
@@ -217,3 +217,54 @@ alongside0. Unknown bits and changes between witness samples refuse. This is
 a preservation policy: it neither writes that control nor supplies a GPU
 completion certificate. Actual physical capture refusal and later offline
 recipe replay remain distinct evidence.
+
+The native experiment pre-reserves distinct primary/rescue Ring3 executables,
+private state, endpoints and RO framebuffer mappings. Ring3 supplies fixed
+semantic rebind proposals; a kernel validator permits two pinned address
+stores only after GOP retirement. The kernel owns the supervised assignment;
+no device/IRQ/DMA grant crosses into either process. The primary's stopped/
+reaped state and removed mappings precede rescue writer promotion under the
+existing lease. Recovery uses the retained quarantined kernel assignment and
+one separate generation/round, never ordinary release/reassignment. This
+transitional monitor orchestration does not implement a general driver ABI
+or complete migration of graphics-supervisor policy into Ring3.
+
+The explicit graphics monitor uses private scalar heartbeat challenges; a
+reply must match the incarnation, role and challenge and the peer must reblock.
+Fault/spin diagnostics use a distinct bounded ACK receive because the peer
+intentionally never reblocks afterward. They add no startup capabilities or
+GPU authority. A separate Ring3 console performs measured work while the
+diagnosed driver is unresponsive. This is a transitional monitor test/control
+path; normal graphics supervision policy has not migrated into Ring3 yet.
+
+The private graphics policy exchange now asks the existing Ring3 supervisor
+to select continue,rescue or headless from versioned scalar health observations.
+Its ordered state ledger has no GPU addresses or device authority. The kernel
+client binds session/sequence to the exact supervisor process and thread;
+ambiguous results or replacement poison that session without replay/reconnect.
+Existing two-capability supervisor startup is unchanged. Kernel stage/liveness,
+lease,write-budget,revocation and quarantine enforcement remain authoritative.
+The monitor still schedules observations and applies bounded mechanisms;normal
+independent supervision outside that loop remains a separate migration.
+
+The independent graphics worker owns native command/observation execution.
+It has one privileged thread,two private endpoints and four kernel-only
+nontransferable capabilities;it adds no userspace startup grants or syscalls.
+Existing supervisor RPC/lifecycle admission is serialized across kernel clients.
+The worker samples health and applies bounded mechanisms;Ring3 chooses recovery.
+Private command sequence and worker/control identities prevent stale reuse.
+Unknown completion retains a poisoned channel with no replay or trusted-stack
+termination;failed-policy cleanup binds the original process/thread identity.
+This removes the monitor-loop dependency while broader userspace lifecycle/
+broker orchestration remains transitional.
+
+
+The rebind execution candidate places the vendor sequence in the protected
+primary/rescue ELF. Existing private endpoints carry bounded semantic
+operations to a finite kernel validator; no user MMIO mapping, raw offset,
+syscall or startup grant is added. The validator independently constrains
+the fixed operation set and checks hardware completion before output/lease
+publication. An ambiguous exchange consumes the attempt without replay.
+The old synchronous executor is now a host-test reference excluded from the
+kernel build. This moves execution sequencing into Ring3 while existing
+privileged device ownership and lifecycle mechanisms remain transitional.

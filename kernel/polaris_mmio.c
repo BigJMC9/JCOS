@@ -8,6 +8,8 @@
 #include "object_storage.h"
 #include "physmap.h"
 #include "device_mmio.h"
+#include "framebuffer.h"
+#include "display.h"
 
 static void *g_bindings[POLARIS_MMIO_BINDING_CAPACITY];
 static void *g_holds[POLARIS_MMIO_HOLD_CAPACITY];
@@ -93,7 +95,7 @@ static bool retained_identity(const PolarisMmioBinding *b) {
 }
 static bool owner_live(Process *owner) {
     ProcessExitInfo exit;
-    return owner && process_storage_in_use(owner) && owner->initialized && !owner->kernel &&
+    return owner && process_storage_in_use(owner) && owner->initialized &&
         owner->id && !process_exit_info(owner, &exit);
 }
 static bool kernel_context(VmPageMap *map, frame_t root) {
@@ -205,7 +207,7 @@ static bool read_leaf(PolarisMmioBinding *b, u32 page, u32 slot, u32 offset, u32
     frame_t frame;
     vm_flags_t flags;
     if (!vmm_query_page(b->map, address, &frame, &flags) ||
-        frame != phys_to_frame(b->plan.bar.base + page) || flags != VM_DEVICE ||
+        frame != phys_to_frame(b->plan.bar.base + page) || flags != (VM_DEVICE | ((b->rebind_enabled && page==0x6000U) ? VM_WRITE : 0)) ||
         !device_mmio_interrupts_enabled()) return false;
     /* No IRQ-off section spans this load. The retained hold prevents teardown.
      * A stalled physical transaction has no software-enforced bus timeout. */
@@ -270,7 +272,7 @@ static bool cleanup_locked(PolarisMmioBinding *b) {
         frame_t actual = FRAME_INVALID, old = FRAME_INVALID;
         vm_flags_t permissions = 0;
         if (!vmm_query_page(b->map, address, &actual, &permissions) ||
-            actual != expected || permissions != VM_DEVICE ||
+            actual != expected || permissions != (VM_DEVICE | ((b->rebind_enabled && b->plan.page_offsets[i]==0x6000U) ? VM_WRITE : 0)) ||
             !vmm_unmap_page(b->map, address, &old)) return false;
         --b->mapped_pages; /* Removal committed; retain the remaining exact prefix. */
         if (old != expected) { b->poisoned = true; return false; }
@@ -331,12 +333,12 @@ static bool page_not_ram(const BootInfo *boot, u64 physical) {
      * not absence here, supplies its extent; conflicting entries are refused. */
     return true;
 }
-bool polaris_mmio_prepare(PolarisMmioBinding *b, const BootInfo *boot,
-    PciAssignment *assignment, Process *owner, CapabilityHandle assignment_handle) {
+static bool prepare(PolarisMmioBinding *b, const BootInfo *boot,
+    PciAssignment *assignment, Process *owner, CapabilityHandle assignment_handle,bool supervised) {
     if (!b || !boot || !assignment || !owner) return false;
     u64 flags = irq_save();
     bool result = false;
-    if (registered(b) || !owner_live(owner) ||
+    if (registered(b) || !owner_live(owner) || (supervised ? owner!=process_kernel() : owner->kernel) ||
         !pci_assignment_authorized(assignment, owner, assignment_handle) ||
         pci_assignment_dma_gate_active(assignment)) goto done;
     for (u32 i = 0; i < POLARIS_MMIO_BINDING_CAPACITY; ++i) {
@@ -359,6 +361,7 @@ bool polaris_mmio_prepare(PolarisMmioBinding *b, const BootInfo *boot,
             vmm_query_page(&kernel->page_map, window + (u64)i * VM_PAGE_SIZE, 0, 0)) goto done;
     }
     k_memset(b, 0, sizeof(*b));
+    b->supervised=supervised;
     b->assignment = assignment;
     b->identity = g_next_binding_identity++;
     b->assignment_id = pci_assignment_resource(assignment)->id;
@@ -423,4 +426,73 @@ bool polaris_mmio_prepare_location(PolarisMmioBinding *b, const BootInfo *boot,
 done:
     irq_restore(flags);
     return result;
+}
+
+
+bool polaris_mmio_prepare(PolarisMmioBinding *b,const BootInfo *boot,PciAssignment *a,Process *o,CapabilityHandle cap) {
+    return prepare(b,boot,a,o,cap,false);
+}
+bool polaris_mmio_prepare_supervised(PolarisMmioBinding *b,const BootInfo *boot,PciAssignment *a,CapabilityHandle cap) {
+    return prepare(b,boot,a,process_kernel(),cap,true);
+}
+static PolarisMmioBinding *rebind_binding(PolarisMmioHold *h,u64 id) {
+    if (!id || !device_mmio_interrupts_enabled() ||
+        object_storage_find(g_holds,POLARIS_MMIO_HOLD_CAPACITY,h)>=POLARIS_MMIO_HOLD_CAPACITY ||
+        !h->initialized || h->identity!=id) return 0;
+    PolarisMmioBinding *b=h->binding;
+    FramebufferScanoutStatus status; framebuffer_scanout_status(&status);
+    if (!retained_identity(b) || b->identity!=h->binding_identity || !b->supervised ||
+        b->owner!=process_kernel() || !b->owner->kernel || !owner_live(b->owner) || !vmm_device_memory_supported() || b->closing || b->poisoned ||
+        !b->prepared || b->mapped_pages!=4 || !b->child_pinned || !b->access_pinned ||
+        b->active_holds!=1 || pci_assignment_dma_gate_active(b->assignment) ||
+        status.state!=FRAMEBUFFER_SCANOUT_RETIRED || !framebuffer_writers_idle() ||
+        !kernel_context(b->map,b->root_frame)) return 0;
+    PciAssignmentState state=pci_assignment_state(b->assignment);
+    if (state!=PCI_ASSIGNMENT_ASSIGNED && !(state==PCI_ASSIGNMENT_QUARANTINED && b->rebind_enabled)) return 0;
+    return b;
+}
+bool polaris_mmio_enable_rebind(PolarisMmioHold *h,u64 id) {
+    PolarisMmioBinding *b=rebind_binding(h,id);
+    if (!b || b->rebind_enabled || display_direct_state()!=DISPLAY_LEASE_KERNEL ||
+        pci_assignment_state(b->assignment)!=PCI_ASSIGNMENT_ASSIGNED || b->plan.page_offsets[0]!=0x6000U) return false;
+    if (!vmm_set_writable(b->map,b->virtual_base,phys_to_frame(b->plan.bar.base+0x6000ULL),VM_DEVICE,true)) return false;
+    b->rebind_enabled=true; b->rebind_next=0; return true;
+}
+bool polaris_mmio_arm_recovery(PolarisMmioHold *h,u64 id) {
+    PolarisMmioBinding *b=rebind_binding(h,id);
+    if (!b || !b->rebind_enabled || b->recovery_armed ||
+        display_direct_state()!=DISPLAY_LEASE_KERNEL ||
+        pci_assignment_state(b->assignment)!=PCI_ASSIGNMENT_QUARANTINED) return false;
+    b->recovery_armed=true; b->rebind_next=0; return true;
+}
+bool polaris_mmio_rebind_write(PolarisMmioHold *h,u64 id,PolarisDisplayRegister f,u32 value) {
+    PolarisMmioBinding *b=rebind_binding(h,id);
+    if (!b || !b->rebind_enabled || b->rebind_next>=2 ||
+        display_direct_state()!=DISPLAY_LEASE_KERNEL ||
+        f!=(b->rebind_next ? POLARIS_REG_PRIMARY_LOW : POLARIS_REG_PRIMARY_HIGH) ||
+        value!=(b->rebind_next ? 0U : 0xF4U) ||
+        (b->recovery_armed != (pci_assignment_state(b->assignment)==PCI_ASSIGNMENT_QUARANTINED))) return false;
+    frame_t frame; vm_flags_t flags; u32 offset;
+    if (!vmm_query_page(b->map,b->virtual_base,&frame,&flags) ||
+        frame!=phys_to_frame(b->plan.bar.base+0x6000ULL) || flags!=(VM_DEVICE|VM_WRITE) ||
+        !jcos_polaris_register_offset(0,f,b->plan.bar.size,&offset)) return false;
+    ++b->rebind_next; /* Consume before store; never silently replay an ambiguous operation. */
+    device_mmio_store32(b->virtual_base+(offset&0xFFFU),value); return true;
+}
+bool polaris_mmio_rebind_read(PolarisMmioHold *h,u64 id,u32 selector,u32 *out) {
+    if (!out) return false;
+    *out=0; PolarisMmioBinding *b=rebind_binding(h,id); u32 offset;
+    if (!b || !b->rebind_enabled || selector>=20) return false;
+    if (selector<15) {
+        if (!jcos_polaris_register_offset(0,(PolarisDisplayRegister)selector,b->plan.bar.size,&offset)) return false;
+    } else if (selector<18) {
+        if (!jcos_polaris_witness_offset(0,(PolarisPlaneWitnessRegister)(selector-15),b->plan.bar.size,&offset)) return false;
+    } else {
+        if (!b->location_mapped) return false;
+        offset=selector==18 ? POLARIS_MC_VM_FB_LOCATION_BYTE : POLARIS_HDP_NONSURFACE_BASE_BYTE;
+        return read_leaf(b,0x2000U,b->plan.page_count,offset,out);
+    }
+    u32 page=offset&~0xFFFU,slot=0;
+    while (slot<b->plan.page_count && b->plan.page_offsets[slot]!=page) ++slot;
+    return slot<b->plan.page_count && read_leaf(b,page,slot,offset,out);
 }

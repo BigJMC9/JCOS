@@ -7,8 +7,8 @@ access, DMA, interrupt, reset and output-restoration guarantees.
 | Level | Preconditions and behavior | Current implementation |
 |---|---|---|
 | Firmware framebuffer recovery | Firmware-established scanout is still operational and has not been disrupted. Stop/reap the failed display service, remove its mappings, then reclaim the exclusive framebuffer lease for emergency diagnostics. | Existing GOP service recovery and lease tests; physical environments require their own validation. |
-| Native GPU rescue | After native takeover, contain the primary driver, quarantine the device and retained DMA, and revoke its access. A separate minimal Ring3 rescue driver uses fresh, constrained recovery authority to reset/reinitialize a basic diagnostic display. | Required design; no native or rescue backend is implemented/qualified yet. |
-| Serial and controlled reboot | If in-place recovery is unsafe or fails, retain COM1 input/output and independent service progress. Keep unsafe resources quarantined. Offer a controlled reboot when its cleanup/storage contract permits it; firmware may initialize GOP on that boot. | Serial monitor and controlled reboot exist; behavior with a failed native GPU remains unqualified. |
+| Native GPU rescue | After native takeover, contain the primary driver, quarantine the device and retained DMA, and revoke its access. A separate minimal Ring3 rescue driver uses fresh, constrained recovery authority to reset/reinitialize a basic diagnostic display. | A default-off same-buffer experiment has observed RX 570/DP explicit-fault and monitor-detected-spin rescue cases; full modeset/reset, repetition and hardware-hang recovery remain unqualified. |
+| Serial and controlled reboot | If in-place recovery is unsafe or fails, retain COM1 input/output and independent service progress. Keep unsafe resources quarantined. Offer a controlled reboot when its cleanup/storage contract permits it; firmware may initialize GOP on that boot. | Observed rescue-fault serial/quarantine and controlled platform reset; return to JA OS required operator boot selection. Failed-GPU/bus-hang survival remains unqualified. |
 
 Native rescue programs the device itself. It does **not** invoke GOP after
 ExitBootServices, and does not require restarting the kernel when in-place
@@ -35,7 +35,10 @@ The existing DisplayLeaseState represents the first item only. The framebuffer
 now tracks boot scanout as unavailable, firmware-valid, retiring or retired.
 A separate active-output descriptor tracks firmware, native, rescue or
 quarantined output and a monotonic generation. Its publication and revocation
-mechanisms exist; a native hardware provider and device isolation remain open. A native transaction must retire firmware fallback **before granting
+mechanisms exist; a constrained default-off provider supplies same-buffer
+writes and reserved rescue, with observed explicit-fault and monitor-detected-spin cases.
+Broader hardware qualification and device isolation remain open. A native
+transaction must retire firmware fallback **before granting
 authority capable of disturbing scanout**, including a writable mapping,
 reset/power/translation operation or the first destructive write, even if the
 transaction later fails. Process exit, lease reclamation and timeout cannot
@@ -77,10 +80,10 @@ refused after successful initialization. Reservations and device resources
 remain retained. Retirement proves neither IRQ containment nor DMA isolation,
 and does not claim that native or rescue output exists.
 
-Normal boot and diagnostic commands do not retire the live framebuffer. The
-retirement entry has no userspace syscall or monitor command; a future qualified
-native-grant transaction must call it before exposing disruptive authority.
-The current image keeps firmware scanout active on the RX 570.
+Normal boot and automatic diagnostics do not retire live output. The explicit
+`POLARIS_NATIVE_WRITE=1` monitor experiment calls retirement before its RW
+grant. There is no standalone retirement syscall or command. Default builds
+keep firmware scanout active; the experimental transaction cannot return to it.
 
 ## Active native/rescue descriptor lifecycle
 
@@ -88,7 +91,7 @@ The privileged `framebuffer_native_install()` entry publishes a descriptor
 only after firmware retirement, drained kernel writers and a KERNEL CPU lease.
 Its caller must independently validate actual operational scanout first. The
 constructor performs no hardware operation and accepts no userspace request.
-No normal boot, monitor command or automatic test calls it on a live output.
+Normal boot and automatic tests do not call it on live output. The explicit same-buffer write experiment publishes only after its register/frame validation.
 
 The first RGB/BGR32 storage profile retains exactly the boot allocation,
 mapping/cache attributes, pixel format/masks, dimensions and stride. It cannot substitute
@@ -184,3 +187,116 @@ stale rendering and continued serial/terminal processing. Separate QEMU lease
 and service diagnostics check retirement refusal with a real handoff/live Ring3
 owner, then exercise the existing firmware-service fault/recovery path.
 These checks do not establish physical native recovery.
+
+The [same-buffer experiment](AMD_POLARIS_DISPLAY.md#explicit-same-buffer-write-and-reserved-rescue-experiment)
+reserves a distinct rescue process and read-only framebuffer pages before
+takeover. It grants no direct GPU authority to either Ring3 entry. A kernel
+supervised assignment retains ownership through quarantine; one narrow recovery
+round under its existing pins never clears exposure history or reassigns the
+device. Fresh text, monitor confirmation and serial continuity must be recorded
+separately. Its supported fault set preserves operational inherited timings;
+a GPU reset, general hardware-hang survival and IRQ/DMA isolation remain outside
+that profile.
+
+
+Controlled power commands have an explicit CPU-only native cleanup entry.
+They stop/reap owners, remove aliases/leaves and revoke the mediator capability
+before the ordinary clean-state check. They retain the quarantined device and
+exposure history and never initiate another GPU read/write/reset for shutdown.
+An incomplete teardown still refuses the controlled transition; no unrelated
+object-count or storage invariant is waived.
+
+The [observed RX 570 DisplayPort run](AMD_POLARIS_DISPLAY.md#observed-retained-scanout-rescue-run)
+completed the fixed primary and fresh rescue writes, separately confirmed both
+diagnostic displays, and reclaimed a readable kernel console without restarting
+the kernel. It preserves operational inherited timing and demonstrates one
+controlled software-owner fault. It does not exercise GPU reset, a failed GPU/
+interconnect, rescue failure, changed modes or repeated recovery. Earlier
+host-only lifecycle checks remain separate evidence.
+
+The explicit experiment also has bounded private heartbeat challenges and
+acknowledged fault/spin diagnostics for either current driver. A primary
+liveness failure selects the reserved rescue; standby or rescue liveness
+failure selects headless quarantine without another GPU round. Independent
+Ring3 console progress is measured at a diagnostic checkpoint. This monitor
+polling mechanism is not yet normal Ring3 supervisor policy, does not run
+through arbitrary long monitor commands, and cannot interrupt a stuck GPU
+bus transaction. Successful failed-path CPU cleanup revokes its mediator cap
+before ordinary power readiness; it never revalidates expired GOP.
+
+The [observed watchdog/rescue-failure run](AMD_POLARIS_DISPLAY.md#observed-watchdog-and-rescue-failure-run)
+measured independent Ring3 console work during a primary spin,completed
+automatic rescue,and retained serial control/quarantine after a deliberate
+rescue #UD without another GPU operation. The controlled platform reset
+booted Windows;the operator corrected boot priority before the captured JA OS
+USB boot and readable firmware console. This demonstrates the reset request
+and operator-assisted return,not unattended boot selection or arbitrary failed
+GPU recovery. Earlier explicit-fault results remain distinct evidence.
+
+The second fresh-boot v19 case separately exercised primary terminal #UD ->
+automatic rescue,then active rescue SPIN -> heartbeat failure/headless
+quarantine. Both independent Ring3 console checkpoints completed. Five
+exhausted-state requests were denied with no additional GPU access; serial
+and power readiness remained usable. Controlled reboot returned to a readable
+JA OS firmware console without operator intervention. This complements the
+earlier primary-SPIN/rescue-#UD case; it does not replace its assisted-return
+record. See the complementary run in [Polaris display](AMD_POLARIS_DISPLAY.md).
+
+The bounded policy runs continue/rescue/headless decisions in the
+existing Ring3 supervisor. Versioned scalar snapshots,monotonic session and
+sequence,and stable process/thread identity prevent stale/replacement reuse.
+Failed standby wins over primary failure; failed rescue closes output.
+The kernel independently enforces stage/writer validity,finite recovery,
+revocation and quarantine; policy failure selects safe CPU teardown.
+Scheduling is still monitor-driven. This does not yet establish autonomous
+normal supervision or new hardware recovery scope.
+
+A physical v20 case separately confirmed Ring3 action2 after primary spin ->
+fresh visible blue rescue,and action3 after active-rescue #UD -> headless
+quarantine with no further GPU MMIO operation. Independent console checkpoints,
+serial control,power readiness and five exhausted-state refusals passed.
+Controlled reboot returned unassisted to a readable firmware-backed JA OS
+console. This qualifies one retained-mode DP process-failure case,with monitor
+scheduling still in the kernel;see [Polaris display](AMD_POLARIS_DISPLAY.md).
+
+The worker candidate moves health scheduling and native command ownership out
+of the kernel monitor. Ring3 still chooses the recovery action;one privileged
+worker applies finite mechanisms through private ordered IPC. A poisoned
+control channel never replays a request or force-kills a callback. Worker stack/
+endpoints remain until callback return and proven thread death;status/finish/
+power performs the drain. Failed-policy cleanup retains exact process/thread
+identity through partial release and cannot stop a replacement. Power checks
+retain their existing baseline. Physical off-monitor/policy-failure evidence
+is pending;see [Polaris display](AMD_POLARIS_DISPLAY.md).
+
+
+Physical v21 checks cover delayed primary spin to fresh rescue and rescue
+exception to headless serial/shell control while the normal Ring3 shell is
+active. Separate fresh native boots cover policy exception and acknowledged
+policy spin,each draining CPU resources without further GPU operations and
+retaining clean power readiness. Reboot output was captured after every case;
+the first return also has operator-confirmed readable output and no intervention.
+See [the physical record](AMD_POLARIS_DISPLAY.md#observed-recovery-outside-the-monitor)
+for counters,capture limits and preserved host-tool corrections. These cases
+retain DP allocation/timing;GPU reset,arbitrary hardware failure,changed
+modes and hardware DMA isolation remain unqualified.
+
+
+The v22 candidate also moves the actual rebind sequence into the protected
+primary and fresh rescue process. An independent kernel gate mediates the
+existing finite semantic operation set through private IPC, with no raw BAR
+or register-offset interface. Output publication requires trusted completion
+and exact driver acknowledgment; partial/ambiguous execution fails closed
+without replay. The v21 physical observations above remain evidence for that
+older image; v22 physical execution/recovery is recorded below.
+
+
+Physical v22 qualification now covers Ring3-sequenced primary and fresh
+rescue execution, delayed primary spin/rescue exception outside the monitor,
+and separate policy exception/spin cases. All terminal paths retained normal
+shell and serial control and clean power readiness. Three controlled reset
+returns have serial captures; the first also has operator-confirmed readable
+output with no intervention. The first primary and rescue were separate
+PID/incarnation pairs28/23 and29/24. See
+[the execution record](AMD_POLARIS_DISPLAY.md#observed-ring3-execution-and-rescue).
+The scope remains the retained DP allocation/timing and software-owner faults.

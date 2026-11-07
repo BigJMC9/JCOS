@@ -12,3 +12,9 @@ u32 device_mmio_load32(u64 address) {
         : "=r"(value) : "r"(address) : "memory");
     return value;
 }
+
+void device_mmio_store32(u64 address,u32 value) {
+    /* Strict UC, aligned DWORD only; caller checks semantic value/retirement. */
+    __asm__ volatile ("mfence\n\tmovl %1, (%0)\n\tmfence"
+        : : "r"(address),"r"(value) : "memory");
+}

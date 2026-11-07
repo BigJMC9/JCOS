@@ -73,6 +73,11 @@ bool vmm_query_page(
     vm_flags_t *flags
 );
 
+/* Toggle only WRITE on an existing owned 4KiB leaf, exact frame/flags.
+ * No allocation, remapping, cache/user/execute change or global leaf allowed. */
+bool vmm_set_writable(VmPageMap *map,u64 address,frame_t expected,
+    vm_flags_t expected_flags,bool writable);
+
 bool vmm_map_range(
     VmPageMap *map, 
     u64 virtual_address, 

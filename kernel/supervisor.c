@@ -1,4 +1,5 @@
 #include "supervisor.h"
+#include "../include/graphics_supervisor_protocol.h"
 
 #include "address_space.h"
 #include "capability.h"
@@ -22,6 +23,7 @@
 
 typedef struct {
     ProgramInstance program;
+    u64 identity_pid,identity_tid;
     ProcessExitQueue exit_queue;
     Endpoint command_endpoint;
     Endpoint reply_endpoint;
@@ -43,6 +45,7 @@ static SupervisorRuntime g_supervisor;
 static ProcessExitInfo g_last_exit;
 static bool g_last_exit_valid;
 static SupervisorStopResult g_last_stop_result;
+static u64 g_rpc_owner;
 
 static u64 supervisor_interrupt_save(void) {
     u64 flags = 0;
@@ -74,6 +77,29 @@ static u64 supervisor_call_timeout_ticks(void) {
     if (!timer_initialized()) return 0;
     u32 frequency = timer_frequency();
     return frequency ? (u64)frequency * SUPERVISOR_CALL_TIMEOUT_SECONDS : 0;
+}
+
+/* Serialize the existing two-endpoint transport across privileged callers.
+ * Admission waiting sends no request and never clears a suspended owner's gate. */
+static bool supervisor_call_enter(void) {
+    Thread *current=thread_current();
+    if(!current || current->process!=process_kernel())return false;
+    u64 started=timer_initialized()?timer_ticks():0;
+    u64 limit=supervisor_call_timeout_ticks()*2;
+    for(;;) {
+        u64 flags=supervisor_interrupt_save();
+        if(!g_rpc_owner){g_rpc_owner=current->id;supervisor_interrupt_restore(flags);return true;}
+        bool recursive=g_rpc_owner==current->id;
+        supervisor_interrupt_restore(flags);
+        if(recursive || !(flags&SUPERVISOR_RFLAGS_IF) || !limit ||
+            timer_ticks()-started>=limit || !supervisor_schedule_once())return false;
+    }
+}
+static void supervisor_call_leave(void) {
+    u64 flags=supervisor_interrupt_save();
+    Thread *current=thread_current();
+    if(current && g_rpc_owner==current->id)g_rpc_owner=0;
+    supervisor_interrupt_restore(flags);
 }
 
 static Thread *supervisor_thread(void) {
@@ -319,7 +345,7 @@ retained:
     return false;
 }
 
-bool supervisor_start(void) {
+static bool supervisor_start_unlocked(void) {
     if (g_supervisor.state != SUPERVISOR_STATE_STOPPED || supervisor_needs_cleanup()) return false;
 
     Process *kernel_process = process_kernel();
@@ -383,6 +409,8 @@ bool supervisor_start(void) {
     if (!program_launch(&g_supervisor.program, &spec)) goto fail;
     if (!supervisor_wait_ready()) goto fail;
 
+    g_supervisor.identity_pid=g_supervisor.program.process.id;
+    g_supervisor.identity_tid=g_supervisor.program.thread.id;
     g_supervisor.state = SUPERVISOR_STATE_RUNNING;
     return true;
 
@@ -412,7 +440,7 @@ bool supervisor_idle(void) {
     return supervisor_running() && supervisor_ready();
 }
 
-static bool supervisor_request_reply(const IpcMessage *request, u64 expected_reply, IpcMessage *reply) {
+static bool supervisor_request_reply_unlocked(const IpcMessage *request, u64 expected_reply, IpcMessage *reply) {
     if (!request || !reply || !supervisor_idle()) return false;
     Process *kernel_process = process_kernel();
     if (!kernel_process || !ipc_try_send(kernel_process, g_supervisor.kernel_send_handle, request)) return false;
@@ -436,6 +464,23 @@ static bool supervisor_request_reply(const IpcMessage *request, u64 expected_rep
     return true;
 }
 
+static bool supervisor_request_reply(const IpcMessage *request,u64 expected_reply,IpcMessage *reply) {
+    if(!supervisor_call_enter())return false;
+    bool ok=supervisor_request_reply_unlocked(request,expected_reply,reply);
+    supervisor_call_leave();return ok;
+}
+bool supervisor_graphics_exchange(u64 session,u64 sequence,u64 snapshot,u64 *action) {
+    if (!action || !session || !sequence) return false;
+    *action=GRAPHICS_POLICY_REJECT;
+    IpcMessage request,reply;k_memset(&request,0,sizeof(request));
+    request.word_count=4;request.words[0]=SUPERVISOR_MESSAGE_GRAPHICS_POLICY;
+    request.words[1]=session;request.words[2]=sequence;request.words[3]=snapshot;
+    if (!supervisor_request_reply(&request,SUPERVISOR_REPLY_GRAPHICS_POLICY,&reply) ||
+        reply.word_count!=4 || reply.words[1]!=session || reply.words[2]!=sequence ||
+        reply.words[3]>GRAPHICS_POLICY_HEADLESS) return false;
+    *action=reply.words[3];return true;
+}
+
 bool supervisor_ping(u64 cookie, u64 *out_cookie) {
     if (!out_cookie) return false;
     IpcMessage request;
@@ -451,7 +496,7 @@ bool supervisor_ping(u64 cookie, u64 *out_cookie) {
     return true;
 }
 
-SupervisorStopResult supervisor_stop_bounded(void) {
+static SupervisorStopResult supervisor_stop_bounded_unlocked(void) {
     g_last_stop_result = SUPERVISOR_STOP_NONE;
     SupervisorLifecycleState state = supervisor_state();
     if (state == SUPERVISOR_STATE_STOPPED) return SUPERVISOR_STOP_NONE;
@@ -508,7 +553,7 @@ bool supervisor_stop(void) {
     return result == SUPERVISOR_STOP_GRACEFUL || result == SUPERVISOR_STOP_FORCED;
 }
 
-bool supervisor_recover(void) {
+static bool supervisor_recover_unlocked(void) {
     SupervisorLifecycleState state = supervisor_state();
     if (state == SUPERVISOR_STATE_STOPPED) return true;
     if (state == SUPERVISOR_STATE_RUNNING) return false;
@@ -550,7 +595,7 @@ bool supervisor_test_arm_shutdown_hang(void) {
         reply.word_count == 1U;
 }
 
-bool supervisor_test_fault(void) {
+static bool supervisor_test_fault_unlocked(void) {
     if (!supervisor_idle()) return false;
 
     u64 expected_pid = g_supervisor.program.process.id;
@@ -585,4 +630,46 @@ bool supervisor_stack_guarded(void) {
     AddressSpace *space = process_address_space(&g_supervisor.program.process);
     return space && user_stack_mapping_valid(space, USER_STACK_INITIAL_BASE,
         g_supervisor.program.stack_frame);
+}
+
+bool supervisor_start(void) {
+    if(!supervisor_call_enter())return false;
+    bool ok=supervisor_start_unlocked();supervisor_call_leave();return ok;
+}
+SupervisorStopResult supervisor_stop_bounded(void) {
+    if(!supervisor_call_enter())return SUPERVISOR_STOP_FAILED;
+    SupervisorStopResult result=supervisor_stop_bounded_unlocked();
+    supervisor_call_leave();return result;
+}
+bool supervisor_recover(void) {
+    if(!supervisor_call_enter())return false;
+    bool ok=supervisor_recover_unlocked();supervisor_call_leave();return ok;
+}
+bool supervisor_test_fault(void) {
+    if(!supervisor_call_enter())return false;
+    bool ok=supervisor_test_fault_unlocked();supervisor_call_leave();return ok;
+}
+bool supervisor_test_spin(void) {
+    if(!supervisor_call_enter())return false;
+    bool ok=false;
+    if(supervisor_idle()) {
+        IpcMessage q,r;k_memset(&q,0,sizeof(q));k_memset(&r,0,sizeof(r));
+        q.word_count=1;q.words[0]=SUPERVISOR_MESSAGE_DIAGNOSTIC_SPIN;
+        u64 timeout=supervisor_call_timeout_ticks();
+        ok=timeout && ipc_try_send(process_kernel(),g_supervisor.kernel_send_handle,&q) &&
+            ipc_receive_blocking_for(process_kernel(),g_supervisor.kernel_receive_handle,&r,timeout) &&
+            r.word_count==1 && r.words[0]==SUPERVISOR_REPLY_DIAGNOSTIC_SPIN;
+    }
+    supervisor_call_leave();return ok;
+}
+
+bool supervisor_stop_identity(u64 process_id,u64 thread_id) {
+    if(!process_id || !thread_id || !supervisor_call_enter())return false;
+    bool ok=true;
+    /* A replacement is never stopped on behalf of a stale graphics session. */
+    if(g_supervisor.identity_pid==process_id && g_supervisor.identity_tid==thread_id) {
+        SupervisorStopResult result=supervisor_stop_bounded_unlocked();
+        ok=result==SUPERVISOR_STOP_GRACEFUL || result==SUPERVISOR_STOP_FORCED;
+    }
+    supervisor_call_leave();return ok;
 }

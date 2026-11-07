@@ -8,6 +8,7 @@
 #include "display_probe.h"
 #include "polaris_read_profile.h"
 #include "polaris_live_capture.h"
+#include "polaris_watch.h"
 #include "pmm.h"
 #include "vmm.h"
 #include "address_space.h"
@@ -5679,6 +5680,23 @@ static void command_display_firmware(void) {
     display_probe_firmware_print(g_boot);
 }
 
+static void command_polaris_native(void) {polaris_watch_begin(g_boot);}
+static void command_polaris_rescue(void) {polaris_watch_rescue();}
+static void command_polaris_finish(void) {polaris_watch_finish();}
+static void command_polaris_status(void) {polaris_watch_status();}
+static void command_polaris_test(const char *args) {
+    if (k_streq(args,"primary fault")) polaris_watch_diagnostic(1,false);
+    else if (k_streq(args,"primary spin")) polaris_watch_diagnostic(1,true);
+    else if (k_streq(args,"rescue fault")) polaris_watch_diagnostic(2,false);
+    else if (k_streq(args,"rescue spin")) polaris_watch_diagnostic(2,true);
+    else if (k_streq(args,"policy fault")) polaris_watch_policy_diagnostic(false);
+    else if (k_streq(args,"policy spin")) polaris_watch_policy_diagnostic(true);
+    else if (k_streq(args,"primary spin-later")) polaris_watch_arm(1,true);
+    else if (k_streq(args,"rescue fault-later")) polaris_watch_arm(2,false);
+    else if (k_streq(args,"policy fault-later")) polaris_watch_arm(3,false);
+    else if (k_streq(args,"policy spin-later")) polaris_watch_arm(3,true);
+    else terminal_writeln("USAGE: polaris-test primary|rescue|policy fault|spin|spin-later|fault-later");
+}
 static void command_polaris_capture(void) { polaris_live_capture_run(g_boot); }
 
 static void command_display_readiness(void) {
@@ -6338,6 +6356,10 @@ static void command_power(void) {
 }
 
 static void command_shutdown(void) {
+    if (!polaris_watch_power_prepare()) {
+        terminal_writeln("POWER: NATIVE CPU CLEANUP INCOMPLETE; GPU QUARANTINE RETAINED.");
+        return;
+    }
     PowerResult ready = power_check_shutdown();
     if (ready != POWER_RESULT_OK) {
         command_power_result("SHUTDOWN", ready);
@@ -6352,6 +6374,10 @@ static void command_shutdown(void) {
 }
 
 static void command_reboot(void) {
+    if (!polaris_watch_power_prepare()) {
+        terminal_writeln("POWER: NATIVE CPU CLEANUP INCOMPLETE; GPU QUARANTINE RETAINED.");
+        return;
+    }
     PowerResult ready = power_check_reboot();
     if (ready != POWER_RESULT_OK) {
         command_power_result("REBOOT", ready);
@@ -6611,6 +6637,11 @@ static void shell_registry_init(void) {
     shell_add_command("power", "power", "show shutdown/reboot readiness", SHELL_GROUP_SYSTEM, command_power, 0, true);
     shell_add_command("acpi", "acpi", "show ACPI discovery results", SHELL_GROUP_HARDWARE, command_acpi, 0, true);
     shell_add_command("pci", "pci", "list discovered PCI devices", SHELL_GROUP_HARDWARE, command_pci, 0, true);
+    shell_add_command("polaris-native","polaris-native","explicit fixed-buffer GPU write experiment",SHELL_GROUP_HARDWARE,command_polaris_native,0,true);
+    shell_add_command("polaris-rescue","polaris-rescue","fault primary and enter reserved rescue once",SHELL_GROUP_HARDWARE,command_polaris_rescue,0,true);
+    shell_add_command("polaris-finish","polaris-finish","reclaim validated native diagnostic console",SHELL_GROUP_HARDWARE,command_polaris_finish,0,true);
+    shell_add_command("polaris-test","polaris-test primary|rescue|policy fault|spin|spin-later|fault-later","explicit driver fault/spin; watchdog observes outcome",SHELL_GROUP_HARDWARE,0,command_polaris_test,true);
+    shell_add_command("polaris-status","polaris-status","CPU-only graphics liveness and stage counters",SHELL_GROUP_HARDWARE,command_polaris_status,0,true);
     shell_add_command("polaris-capture", "polaris-capture", "explicit RX 570 read experiment; separate build profile",
         SHELL_GROUP_HARDWARE, command_polaris_capture, 0, true);
     shell_add_command("display-readiness", "display-readiness", "RX 570 read qualification blockers; no GPU access",

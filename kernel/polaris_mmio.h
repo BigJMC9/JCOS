@@ -39,6 +39,8 @@ typedef struct {
     bool prepared;
     bool closing;
     bool poisoned;
+    bool supervised, rebind_enabled, recovery_armed;
+    u32 rebind_next;
     bool initialized;
 } PolarisMmioBinding;
 
@@ -97,6 +99,18 @@ bool polaris_mmio_plan(const BootInfo *boot, const PciDevice *device,
  * false may retain a registered cleanup record and both assignment pins. */
 bool polaris_mmio_prepare(PolarisMmioBinding *binding, const BootInfo *boot,
     PciAssignment *assignment, Process *owner, CapabilityHandle assignment_handle);
+/* Restricted supervised retained-scanout lane. No userspace MMIO grant.
+ * Kernel owns the assignment. Promote pipe0 DCP leaf only after retirement.
+ * Exactly HIGH/LOW once per primary/recovery round, fixed recorded GPU base.
+ * One recovery round uses existing pins while parent stays QUARANTINED. */
+bool polaris_mmio_prepare_supervised(PolarisMmioBinding *binding,const BootInfo *boot,
+    PciAssignment *assignment,CapabilityHandle assignment_handle);
+bool polaris_mmio_enable_rebind(PolarisMmioHold *hold,u64 identity);
+bool polaris_mmio_arm_recovery(PolarisMmioHold *hold,u64 identity);
+bool polaris_mmio_rebind_write(PolarisMmioHold *hold,u64 identity,PolarisDisplayRegister field,u32 value);
+/* Named display0..14,witness15..17,location18..19; fixed pipe0 only. */
+bool polaris_mmio_rebind_read(PolarisMmioHold *hold,u64 identity,u32 selector,u32 *out);
+
 bool polaris_mmio_binding_valid(const PolarisMmioBinding *binding);
 bool polaris_mmio_binding_prepared(const PolarisMmioBinding *binding);
 u32 polaris_mmio_binding_count(void);

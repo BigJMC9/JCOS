@@ -1,6 +1,9 @@
 #include "lib/syscall.h"
 #include "../include/program_startup.h"
 #include "../include/supervisor_protocol.h"
+#include "graphics_policy.h"
+
+static GraphicsPolicy g_graphics;
 
 static int g_hang_on_shutdown;
 
@@ -61,6 +64,20 @@ void jcos_main(const JcosProgramStartup *startup) {
             continue;
         }
 
+        if (request.words[0] == SUPERVISOR_MESSAGE_GRAPHICS_POLICY) {
+            JcosIpcMessage reply;
+            clear_message(&reply);
+            reply.word_count = 4U;
+            reply.words[0] = SUPERVISOR_REPLY_GRAPHICS_POLICY;
+            reply.words[1] = request.word_count > 1U ? request.words[1] : 0;
+            reply.words[2] = request.word_count > 2U ? request.words[2] : 0;
+            reply.words[3] = request.word_count == 4U ?
+                graphics_policy_decide(&g_graphics, request.words[1], request.words[2], request.words[3]) :
+                GRAPHICS_POLICY_REJECT;
+            if (!jcos_ipc_send_blocking(reply_cap, &reply)) jcos_thread_exit();
+            continue;
+        }
+
         if (request.words[0] == SUPERVISOR_MESSAGE_DIAGNOSTIC_ARM_SHUTDOWN_HANG) {
             JcosIpcMessage reply;
             clear_message(&reply);
@@ -69,6 +86,16 @@ void jcos_main(const JcosProgramStartup *startup) {
             reply.words[0] = SUPERVISOR_REPLY_DIAGNOSTIC_ARMED;
             if (!jcos_ipc_send_blocking(reply_cap, &reply)) jcos_thread_exit();
             continue;
+        }
+
+        if (request.words[0] == SUPERVISOR_MESSAGE_DIAGNOSTIC_SPIN) {
+            if (request.word_count != 1U) jcos_thread_exit();
+            JcosIpcMessage reply;
+            clear_message(&reply);
+            reply.word_count = 1U;
+            reply.words[0] = SUPERVISOR_REPLY_DIAGNOSTIC_SPIN;
+            if (!jcos_ipc_send_blocking(reply_cap, &reply)) jcos_thread_exit();
+            hang_forever();
         }
 
         if (request.words[0] == SUPERVISOR_MESSAGE_DIAGNOSTIC_FAULT) {

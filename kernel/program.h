@@ -131,6 +131,12 @@ bool program_reap(ProgramInstance *instance);
  */
 bool program_terminate(ProgramInstance *instance);
 
+/* Privileged exact borrowed mapping WRITE change. Caller excludes the program
+ * while changing pages. Partial failure retains mapped pages for teardown;
+ * never resume on false. No frames/tables allocated; cache/USER/NX unchanged. */
+bool program_borrowed_set_writable(ProgramInstance *instance,u64 expected_pid,
+    bool writable);
+
 bool program_instance_needs_cleanup(const ProgramInstance *instance);
 
 /* Monotonic diagnostic/publication counter; increments only after scheduler_add commits. */

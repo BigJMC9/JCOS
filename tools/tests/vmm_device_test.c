@@ -71,6 +71,19 @@ int main(void) {
     VmmTestPageWalk walk;
     CHECK(vmm_test_page_walk(&map, address, &walk) && walk.effective_flags == VM_DEVICE &&
         walk.pt_flags == VM_DEVICE);
+    *leaf_entry(&map,address)|=(1ULL<<5)|(1ULL<<6);
+    u64 before=*leaf_entry(&map,address);
+    CHECK(!vmm_set_writable(&map,address,mmio+1,VM_DEVICE,true));
+    CHECK(!vmm_set_writable(&map,address,mmio,VM_DEVICE|VM_USER,true));
+    CHECK(vmm_set_writable(&map,address,mmio,VM_DEVICE,true));
+    CHECK(*leaf_entry(&map,address)==(before|2ULL));
+    CHECK(vmm_set_writable(&map,address,mmio,VM_DEVICE|VM_WRITE,false));
+    CHECK(*leaf_entry(&map,address)==before);
+    *leaf_entry(&map,address)|=1ULL<<8;
+    CHECK(!vmm_set_writable(&map,address,mmio,VM_DEVICE,true));
+    *leaf_entry(&map,address)=before;
+    CHECK(!vmm_set_writable(&map,address+1,mmio,VM_DEVICE,true));
+    cr4|=1ULL<<17;CHECK(!vmm_set_writable(&map,address,mmio,VM_DEVICE,true));cr4=0;
     CHECK(vmm_unmap_page(&map, address, &actual) && actual == mmio);
     CHECK(vmm_map_page(&map, address, mmio, VM_UNCACHED));
     CHECK(vmm_query_page(&map, address, &actual, &flags) && flags == VM_UNCACHED);
