@@ -7,6 +7,7 @@
 #include "display_probe_test.h"
 #include "polaris_read_profile_test.h"
 #include "display_service_test.h"
+#include "native_presentation_test.h"
 #include "display_surface_test.h"
 
 #include "capability_test.h"
@@ -105,6 +106,8 @@ static void kernel_test_set_deep_runs(const char *name, u32 runs) {
 static void kernel_test_registry_init(void) {
     if (g_test_registry_initialized) return;
     g_test_registry_initialized = true;
+    kernel_test_add_live("native-presentation","generation-bound normal GUI,app input and isolated presenter/compositor recovery",
+        KERNEL_TEST_ACCEPTANCE,native_presentation_test_run,native_presentation_test_cleanup_run);
     kernel_test_add_live("graphics-worker","periodic independent work, actual Ring3 policy/driver failures and safe worker drain",
         KERNEL_TEST_ACCEPTANCE,graphics_worker_test_run,graphics_worker_test_cleanup_run);
     kernel_test_add_live("graphics-policy","Ring3 recovery decisions, stale-session refusals and unchanged supervisor authority",

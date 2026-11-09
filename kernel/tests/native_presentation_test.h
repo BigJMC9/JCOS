@@ -1,0 +1,5 @@
+#ifndef JA_OS_NATIVE_PRESENTATION_TEST_H
+#define JA_OS_NATIVE_PRESENTATION_TEST_H
+void native_presentation_test_run(void);
+void native_presentation_test_cleanup_run(void);
+#endif

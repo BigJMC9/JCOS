@@ -7,14 +7,14 @@
  * poller but forwards ordinary key events to the Ring3 console/shell policy
  * service. Escape or the userspace `monitor` command returns to the kernel
  * emergency/development monitor. */
-bool userspace_shell_run(void);
+bool userspace_shell_run(const BootInfo *boot);
 /* CPU-only diagnostic state;does not grant shell or device authority. */
 bool userspace_shell_active(void);
 
 /* Boot policy wrapper. A successful activation counts as the default-shell
  * handoff even though this call later returns when the operator requests the
  * emergency monitor. */
-bool userspace_shell_run_boot_default(void);
+bool userspace_shell_run_boot_default(const BootInfo *boot);
 u64 userspace_shell_session_count(void);
 u64 userspace_shell_boot_handoff_count(void);
 

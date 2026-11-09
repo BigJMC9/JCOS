@@ -6,6 +6,8 @@
 #if JCOS_POLARIS_NATIVE_WRITE
 #include "polaris_driver.h"
 #include "graphics_supervisor.h"
+#include "graphical_session.h"
+#define PRESENTER_DRAIN_SECONDS 8ULL
 #include "supervisor.h"
 #include "polaris_mmio.h"
 #include "polaris_observation.h"
@@ -32,9 +34,14 @@ static struct {
     u64 hold_id,output_id,start,last_heartbeat,challenge,heartbeats;
     u32 frequency,stage,diagnostic_mask;
     bool attempted,mutated,original_render,recovery_authorized,policy_closed;
+    bool presenter_parked,recovery_pending,terminal_cleanup_pending;
+    u64 recovery_started,recovery_output_id;
+    bool reconnect_attempted;
     PolarisDriver *writer;
 } g;
 static void recover_native(bool induce);
+static void resume_recovery(void);
+static bool presenter_released(void);
 static bool policy_close(void) {
     if (!g.policy.session || g.policy_closed) return true;
     g.policy_closed=true;
@@ -76,16 +83,22 @@ static bool release_writer(PolarisDriver *d) {
     return ok;
 }
 static void failed(void) {
+    g.recovery_pending=false;g.presenter_parked=false;g.terminal_cleanup_pending=false;
     terminal_writeln("NATIVE OPERATION FAILED; STOPPING OWNERS / RETAINING DEVICE QUARANTINE.");
     if (g.output_id) (void)framebuffer_output_revoke(g.output_id);
     bool q=quarantine(),a=true;
     if (g.writer) a=release_writer(g.writer);
     bool b=polaris_driver_stop(&g.primary),c=polaris_driver_stop(&g.rescue);
     bool clean=stop_io();g.stage=3;
-    bool drained=q&&a&&b&&c&&clean;
+    bool cpu_closed=q&&a&&b&&c&&clean,idle=presenter_released();
+    bool drained=cpu_closed&&idle;
     if (drained) drained=drop_cap();
     (void)policy_close();
-    if(g.policy.failed)drained=supervisor_stop_identity(g.policy.process_id,g.policy.thread_id)&&drained;
+    bool policy_stopped=!g.policy.failed || supervisor_stop_identity(g.policy.process_id,g.policy.thread_id);
+    drained=policy_stopped&&drained;
+    /* Only an otherwise complete CPU teardown may defer its final capability.
+     * Ambiguous device/service cleanup is retained for explicit recovery. */
+    g.terminal_cleanup_pending=cpu_closed&&policy_stopped&&!idle;
     if (framebuffer_firmware_valid() && !g.writer) terminal_set_render_enabled(g.original_render);
     terminal_writeln(drained ? "CPU RESOURCES DRAINED; GPU PARENT QUARANTINED; SERIAL CONTROL ACTIVE." :
         "CLEANUP INCOMPLETE; EXACT LEDGERS/PINS RETAINED; SERIAL CONTROL ACTIVE.");
@@ -179,7 +192,7 @@ static bool show(PolarisDriver *d,bool rescue) {
     ProgramBorrowedMappingSpec mapping;FramebufferInfo info;u64 fb;
     if (!d->process_id || managed_service_process_id(&d->service)!=d->process_id ||
         !framebuffer_native_install(&g.info,rescue,&g.output_id)) return false;
-    g.writer=d;
+    g.writer=d;g.presenter_parked=false;
     if (!display_direct_prepare_native(g.output_id,POLARIS_NATIVE_FB_VA,&mapping,&info,&fb) ||
         mapping.physical_base!=g.info.physical_base || mapping.size!=0x300000 ||
         !program_borrowed_set_writable(&d->service.program,managed_service_process_id(&d->service),true) ||
@@ -238,16 +251,23 @@ void polaris_native_begin(const BootInfo *boot) {
 fail:
     failed();
 }
-static void recover_native(bool induce) {
-    if (g.stage!=1 || !g.recovery_authorized) {failed();return;}
-    g.recovery_authorized=false;
-    /* The kernel revokes first, then induces the supported process fault.
-     * No failed heap/register dump or parent reassignment supplies recovery. */
-    g.stage=4;
-    if ((g.output_id && !framebuffer_output_revoke(g.output_id)) || !quarantine()) {failed();return;}
-    IpcMessage q,r;k_memset(&q,0,sizeof(q));q.word_count=4;q.words[0]=POLARIS_NATIVE_HEADER(POLARIS_NATIVE_FAULT);
-    if (induce) (void)managed_service_call(&g.primary.service,&g.primary.connection,&q,&r);
-    if (!release_writer(&g.primary) || !polaris_mmio_arm_recovery(&g.hold,g.hold_id)) {failed();return;}
+static bool presenter_released(void) {
+    return graphical_session_drained() && display_direct_state()==DISPLAY_LEASE_KERNEL &&
+        framebuffer_writers_idle();
+}
+static bool recovery_context_valid(void) {
+    return timer_initialized() && g.frequency && timer_frequency()==g.frequency &&
+        device_mmio_interrupts_enabled() && scheduler_preemption_enabled() &&
+        supervisor_running() && supervisor_process_id()==g.policy.process_id &&
+        supervisor_thread_id()==g.policy.thread_id &&
+        managed_service_state(&g.rescue.service)==MANAGED_SERVICE_RUNNING &&
+        managed_service_process_id(&g.rescue.service)==g.rescue.process_id;
+}
+static void resume_recovery(void) {
+    if (!g.recovery_pending || !presenter_released() || !recovery_context_valid()) {failed();return;}
+    /* Consume before arming; never retry an ambiguous register conversation. */
+    g.recovery_pending=false;
+    if (!polaris_mmio_arm_recovery(&g.hold,g.hold_id)) {failed();return;}
     terminal_writeln("OLD PRIMARY STOPPED/REAPED; MMIO PARENT STILL QUARANTINED; RESERVED RESCUE ENTERING.");
     PolarisPlaneWitness witness;PolarisProgramPlan plan;
     if (!observe(&witness) || !polaris_driver_plan(&g.rescue,2,&witness,&plan) ||
@@ -258,9 +278,99 @@ static void recover_native(bool induce) {
         action!=GRAPHICS_POLICY_KEEP) {failed();return;}
     terminal_writeln("FRESH RING3 RESCUE PATTERN ACTIVE; VERIFY MONITOR. USE polaris-finish FOR CONSOLE.");
 }
+static void recover_native(bool induce) {
+    if (g.stage!=1 || !g.recovery_authorized) {failed();return;}
+    g.recovery_authorized=false;g.stage=4;g.recovery_output_id=g.output_id;
+    /* Close new admission before stopping the backend. A GUI writable alias
+     * belongs to its control thread: request no competing cleanup or IPC here. */
+    if ((g.output_id && !framebuffer_output_revoke(g.output_id)) || !quarantine()) {failed();return;}
+    IpcMessage q,r;k_memset(&q,0,sizeof(q));q.word_count=4;q.words[0]=POLARIS_NATIVE_HEADER(POLARIS_NATIVE_FAULT);
+    if (induce) (void)managed_service_call(&g.primary.service,&g.primary.connection,&q,&r);
+    if (!release_writer(&g.primary)) {failed();return;}
+    g.presenter_parked=false;g.recovery_pending=true;g.recovery_started=timer_ticks();
+    if (presenter_released()) {resume_recovery();return;}
+    terminal_writeln("NATIVE OUTPUT REVOKED; WAITING FOR GUI OWNER TEARDOWN BEFORE RESCUE.");
+    terminal_writeln("EIGHT-SECOND CPU DRAIN ADMISSION; NO GPU OPERATION WHILE ALIASES REMAIN.");
+}
+/* Explicit CPU-writer handoff; the backend and reserved rescue keep their
+ * private control endpoints. Normal composition uses a separate service. */
+static bool park_presenter(void) {
+    PolarisDriver *d=g.stage==1 ? &g.primary : &g.rescue;
+    if ((g.stage!=1 && g.stage!=2) || g.presenter_parked || g.writer!=d ||
+        !framebuffer_output_matches(g.output_id) || !graphical_session_drained() ||
+        display_direct_state()!=DISPLAY_LEASE_USER ||
+        display_direct_owner_process_id()!=d->process_id ||
+        !managed_service_idle(&d->service)) {
+        terminal_writeln("REFUSED: IDLE NATIVE OWNER AND DRAINED GUI REQUIRED; NO HANDOFF.");return false;
+    }
+    /* Downgrade every borrowed PTE before reclaiming the CPU lease. A partial
+     * downgrade failure stops the old process; it never admits a second writer. */
+    if (!program_borrowed_set_writable(&d->service.program,d->process_id,false) ||
+        !display_direct_reclaim(d->process_id)) {failed();return false;}
+    g.writer=0;g.presenter_parked=true;terminal_set_render_enabled(true);
+    terminal_writeln("NATIVE BACKEND RO; NORMAL GUI ADMITTED; RESERVED RESCUE AND HEARTBEATS RETAINED.");
+    terminal_writeln("USE usershell THEN gui; GPU BUDGET UNCHANGED; ORIGINAL GOP REMAINS RETIRED.");
+    return true;
+}
+void polaris_native_present(void) {(void)park_presenter();}
+bool polaris_native_launch(const BootInfo *boot) {
+    /* This entry cannot adopt/restart an existing backend or consume rescue.
+     * Existing preparation admits Ring3 BEGIN/PRIMARY before handoff. */
+    if (!boot || g.attempted || g.stage || !graphical_session_drained()) return false;
+    polaris_native_begin(boot);
+    if (g.stage!=1) return false;
+    if (!recovery_context_valid() || g.challenge==~0ULL ||
+        !polaris_driver_ping(&g.primary,++g.challenge)) {failed();return false;}
+    return park_presenter();
+}
+bool polaris_native_reconnect(u64 old_output) {
+    /* Caller supplies a consumed ticket from the old GUI control thread,not a
+     * userspace address. Check the exact recovery epoch before any RPC. */
+    if (!old_output || g.stage!=2 || g.reconnect_attempted || g.presenter_parked ||
+        g.recovery_output_id!=old_output || g.output_id<=old_output ||
+        !framebuffer_output_matches(g.output_id) || !graphical_session_drained() ||
+        !framebuffer_writers_idle() || !recovery_context_valid() ||
+        g.writer!=&g.rescue || display_direct_state()!=DISPLAY_LEASE_USER ||
+        display_direct_owner_process_id()!=g.rescue.process_id ||
+        !managed_service_idle(&g.rescue.service)) {
+        terminal_writeln("GUI RECONNECT REFUSED: EXACT LOST OUTPUT AND DRAINED NEW RESCUE REQUIRED.");return false;
+    }
+    /* Consume before transport;an ambiguous policy/heartbeat reply is not replayed. */
+    g.reconnect_attempted=true;
+    u64 action;
+    if (g.challenge==~0ULL || !polaris_driver_ping(&g.rescue,++g.challenge) ||
+        !graphics_supervisor_request(&g.policy,GRAPHICS_POLICY_CLIENT_RECONNECT,
+            GRAPHICS_POLICY_RECONNECT_FACTS,&action) || action!=GRAPHICS_POLICY_CONNECT) {
+        terminal_writeln("GUI RECONNECT POLICY/HEARTBEAT FAILED; NO RETRY.");failed();return false;
+    }
+    terminal_writeln("RING3 POLICY AUTHORIZED ONE FRESH GUI CONNECTION; NO GPU OPERATION.");
+    return park_presenter();
+}
 void polaris_native_rescue(void) {request_rescue(true);}
 void polaris_native_poll(void) {
+    if (g.stage==3 && g.terminal_cleanup_pending) {
+        if (presenter_released()) {
+            /* Consume once. No service RPC, MMIO, assignment or GUI cleanup. */
+            g.terminal_cleanup_pending=false;
+            terminal_writeln(drop_cap() ?
+                "TERMINAL GUI OWNERS DRAINED; RETAINED CPU CAPABILITY RELEASED; NO GPU OPERATION." :
+                "TERMINAL CPU CAPABILITY RELEASE FAILED; RETAINED FOR EXPLICIT CLEANUP; NO GPU RETRY.");
+        }
+        return;
+    }
+    if (g.stage==4 && g.recovery_pending) {
+        if (!recovery_context_valid() || timer_ticks()-g.recovery_started>=(u64)g.frequency*PRESENTER_DRAIN_SECONDS) {
+            terminal_writeln("RESCUE ADMISSION FAILED; GUI/CPU OWNERSHIP NOT PROVEN DRAINED; NO GPU RETRY.");failed();return;
+        }
+        if (presenter_released()) {
+            terminal_writeln("GUI OWNERS RELEASED; RESERVED RESCUE MAY PROCEED.");resume_recovery();
+        }
+        return;
+    }
     if (g.stage!=1 && g.stage!=2) return;
+    if(!framebuffer_output_matches(g.output_id)) {
+        terminal_writeln("NATIVE OUTPUT GENERATION LOST; FAILING CLOSED.");failed();return;
+    }
     if(!supervisor_running() || supervisor_process_id()!=g.policy.process_id ||
         supervisor_thread_id()!=g.policy.thread_id) {
         terminal_writeln("RING3 GRAPHICS POLICY IDENTITY LOST; FAILING CLOSED.");failed();return;
@@ -308,7 +418,7 @@ void polaris_native_poll(void) {
 static void diagnostic(u32 role,bool spin,bool probe) {
     PolarisDriver *d=role==1 ? &g.primary : &g.rescue;
     if ((role!=1 && role!=2) || (role==1 ? g.stage!=1 : g.stage!=2) ||
-        g.writer!=d || (g.diagnostic_mask&(1U<<role))) {
+        (g.writer!=d && !g.presenter_parked) || (g.diagnostic_mask&(1U<<role))) {
         terminal_writeln("REFUSED: ONE DIAGNOSTIC PER ACTIVE PRIMARY/RESCUE; NO GPU RETRY.");return;
     }
     g.diagnostic_mask|=1U<<role;
@@ -335,17 +445,18 @@ bool polaris_native_can_diagnostic(u32 role) {
     if(role==3)return (g.stage==1 || g.stage==2) && !(g.diagnostic_mask&8U);
     return (role==1 ? g.stage==1 : role==2 && g.stage==2) && !(g.diagnostic_mask&(1U<<role));
 }
-bool polaris_native_terminal(void) {return !g.attempted || g.stage==3;}
+bool polaris_native_terminal(void) {return !g.attempted || (g.stage==3 && !g.terminal_cleanup_pending);}
 void polaris_native_abort(void) {if(g.attempted)failed();}
 static void policy_diagnostic(bool spin,bool probe) {
-    if((g.stage!=1 && g.stage!=2) || !g.writer || (g.diagnostic_mask&8U) ||
+    if((g.stage!=1 && g.stage!=2) || (!g.writer && !g.presenter_parked) || (g.diagnostic_mask&8U) ||
         supervisor_process_id()!=g.policy.process_id || supervisor_thread_id()!=g.policy.thread_id) {
         terminal_writeln("REFUSED: ONE POLICY DIAGNOSTIC DURING ACTIVE NATIVE OUTPUT.");return;
     }
     g.diagnostic_mask|=8U;
     bool injected=spin ? supervisor_test_spin() : supervisor_test_fault();
     PolarisDriverProgress p;
-    bool progress=injected && (!probe || polaris_driver_console_progress(g.writer,false,&p));
+    PolarisDriver *active=g.stage==1 ? &g.primary : &g.rescue;
+    bool progress=injected && (!probe || polaris_driver_console_progress(active,false,&p));
     if(!injected){terminal_writeln("POLICY DIAGNOSTIC DELIVERY FAILED; FAILING CLOSED.");failed();return;}
     if(!progress){terminal_writeln("POLICY FAILURE INDEPENDENT CONSOLE WORK: FAILED");failed();return;}
     if(probe) {
@@ -364,28 +475,38 @@ void polaris_native_status(void) {
     terminal_write(" HEARTBEATS=");terminal_write_u64(g.heartbeats);
     terminal_write(" DIAGNOSTIC MASK=");terminal_write_hex(g.diagnostic_mask);terminal_putchar('\n');
     terminal_writeln("ONCE-PER-BOOT GPU BUDGET; STATUS PERFORMS NO GPU IO.");
+    terminal_write("SUPERVISED GUI: BACKEND RO=");terminal_write(g.presenter_parked ? "YES" : "NO");
+    terminal_write(" RESCUE WAIT=");terminal_writeln(g.recovery_pending ? "YES" : "NO");
+    terminal_write("TERMINAL CPU DRAIN WAIT=");terminal_writeln(g.terminal_cleanup_pending ? "YES" : "NO");
 }
 void polaris_native_finish(void) {
     if (g.stage!=1 && g.stage!=2) {terminal_writeln("NO VALIDATED NATIVE/RESCUE OUTPUT TO FINISH.");return;}
+    if (!graphical_session_drained()) {terminal_writeln("REFUSED: GUI OWNER MUST FINISH CLEANUP FIRST.");return;}
     if (!release_writer(g.stage==1 ? &g.primary : &g.rescue) ||
         !polaris_driver_stop(&g.primary) || !polaris_driver_stop(&g.rescue) ||
         !quarantine() || !stop_io() || !drop_cap() || !policy_close()) {failed();return;}
-    g.stage=3;terminal_set_render_enabled(true);
+    g.stage=3;g.presenter_parked=false;terminal_set_render_enabled(true);
     terminal_writeln("VALIDATED NATIVE/RESCUE CONSOLE RECLAIMED; ORIGINAL GOP REMAINS RETIRED.");
     terminal_writeln("GPU PARENT QUARANTINED; NO DMA/IRQ/RESET OR NEW MODE CLAIM.");
 }
 bool polaris_native_power_prepare(void) {
     if (!g.attempted) return true;
+    if (!graphical_session_drained()) return false;
+    g.recovery_pending=false;g.presenter_parked=false;
     g.stage=3; /* Power transition never initiates another GPU operation. */
     if (g.writer && !release_writer(g.writer)) return false;
     if (!polaris_driver_stop(&g.primary) || !polaris_driver_stop(&g.rescue) ||
         !quarantine() || !stop_io() || !drop_cap()) return false;
     (void)policy_close();
     if(g.policy.failed && !supervisor_stop_identity(g.policy.process_id,g.policy.thread_id))return false;
+    g.terminal_cleanup_pending=false;
     if (framebuffer_output_valid()) terminal_set_render_enabled(true);
     return true;
 }
 #else
+bool polaris_native_launch(const BootInfo *boot){(void)boot;return false;}
+bool polaris_native_reconnect(u64 old_output){(void)old_output;return false;}
+void polaris_native_present(void){terminal_writeln("POLARIS NATIVE WRITES DISABLED IN THIS BUILD.");}
 void polaris_native_background_diagnostic(u32 r,bool s){(void)r;(void)s;}
 void polaris_native_background_policy_diagnostic(bool s){(void)s;}
 bool polaris_native_can_diagnostic(u32 r){(void)r;return false;}

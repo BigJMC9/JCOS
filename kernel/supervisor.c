@@ -477,7 +477,7 @@ bool supervisor_graphics_exchange(u64 session,u64 sequence,u64 snapshot,u64 *act
     request.words[1]=session;request.words[2]=sequence;request.words[3]=snapshot;
     if (!supervisor_request_reply(&request,SUPERVISOR_REPLY_GRAPHICS_POLICY,&reply) ||
         reply.word_count!=4 || reply.words[1]!=session || reply.words[2]!=sequence ||
-        reply.words[3]>GRAPHICS_POLICY_HEADLESS) return false;
+        reply.words[3]>GRAPHICS_POLICY_CONNECT) return false;
     *action=reply.words[3];return true;
 }
 

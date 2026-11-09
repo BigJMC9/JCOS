@@ -58,7 +58,7 @@ int main(void){
  GraphicsPolicy p={0};
  CHECK(graphics_policy_decide(&p,8,1,GRAPHICS_POLICY_VERSION|GRAPHICS_POLICY_BEGIN)==GRAPHICS_POLICY_ACCEPT);
  CHECK(graphics_policy_decide(&p,9,1,GRAPHICS_POLICY_VERSION|GRAPHICS_POLICY_BEGIN)==GRAPHICS_POLICY_REJECT);
- for(unsigned event=1;event<=6;++event){
+ for(unsigned event=1;event<=7;++event){
    GraphicsPolicy q=p;
    CHECK(graphics_policy_decide(&q,7,2,GRAPHICS_POLICY_VERSION|event)==GRAPHICS_POLICY_REJECT);
    CHECK(graphics_policy_decide(&q,8,1,GRAPHICS_POLICY_VERSION|event)==GRAPHICS_POLICY_REJECT);
@@ -99,6 +99,26 @@ int main(void){
    CHECK(!graphics_supervisor_request(&s,GRAPHICS_POLICY_CLOSE,0,&action)&&exchanges==after);
    if(test<3||test==6)CHECK(count==after);
  }
+ unsigned reconnect_cases=0;
+ for(unsigned stage=0;stage<5;++stage)for(unsigned flags=0;flags<128;++flags){
+   GraphicsPolicy q={0};
+   CHECK(graphics_policy_decide(&q,1,1,GRAPHICS_POLICY_VERSION|GRAPHICS_POLICY_BEGIN)==GRAPHICS_POLICY_ACCEPT);
+   if(stage>=1)CHECK(take(&q,GRAPHICS_POLICY_PRIMARY,0)==GRAPHICS_POLICY_KEEP);
+   if(stage>=2)CHECK(take(&q,GRAPHICS_POLICY_REQUEST_RESCUE,0)==GRAPHICS_POLICY_RECOVER);
+   if(stage>=3)CHECK(take(&q,GRAPHICS_POLICY_RESCUED,0)==GRAPHICS_POLICY_KEEP);
+   if(stage==4)CHECK(take(&q,GRAPHICS_POLICY_CLOSE,0)==GRAPHICS_POLICY_HEADLESS);
+   GraphicsPolicy before=q;u64 facts=(u64)flags<<8;
+   u64 decision=take(&q,GRAPHICS_POLICY_CLIENT_RECONNECT,facts);
+   if(stage==3&&facts==GRAPHICS_POLICY_RECONNECT_FACTS){
+     CHECK(decision==GRAPHICS_POLICY_CONNECT&&q.client_reconnected==1);
+     before=q;CHECK(take(&q,GRAPHICS_POLICY_CLIENT_RECONNECT,facts)==GRAPHICS_POLICY_REJECT&&!memcmp(&q,&before,sizeof(q)));
+     CHECK(take(&q,GRAPHICS_POLICY_OBSERVE,GRAPHICS_POLICY_RESCUE_LIVE|GRAPHICS_POLICY_PROBED|GRAPHICS_POLICY_RESCUE_PONG)==GRAPHICS_POLICY_KEEP);
+   }else CHECK(decision==GRAPHICS_POLICY_REJECT&&!memcmp(&q,&before,sizeof(q)));
+   ++reconnect_cases;
+ }
+ GraphicsPolicy legacy={0};CHECK(graphics_policy_decide(&legacy,1,1,(1ULL<<56)|GRAPHICS_POLICY_BEGIN)==GRAPHICS_POLICY_REJECT&&!legacy.session);
+ CHECK(reconnect_cases==640);
+ printf("PASS:640 reconnect stage/fact cases,one-shot reconnection,no replay/ledger change on refusal,legacy protocol refused.\n");
  printf("PASS: %u malformed envelope-bit refusals,64 stage/health observations,stale session/sequence and closed-state refusal;8 production-client identity/transport/corrupt/local-validation/no-replay cases;no hardware.\n",envelopes);
  CHECK(observations==64);
  return 0;

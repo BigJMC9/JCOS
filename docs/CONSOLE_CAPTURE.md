@@ -149,3 +149,99 @@ for the COM header, [QEMU character backends](https://www.qemu.org/docs/master/s
 for logfile/TCP options, and [SerialPort byte reads](https://learn.microsoft.com/en-us/dotnet/api/system.io.ports.serialport.read?view=netframework-4.8.1)
 for the host API. The UART register profile follows the
 [16550-compatible TI register description](https://www.ti.com/lit/ds/symlink/tl16c550c.pdf).
+
+
+## Serial control of native GUI presentation
+
+On 2026-11-07, v23 on the same Z390/RX570 DisplayPort target accepted normal
+GUI text over COM7 after native and fresh-rescue owner cleanup. The operator
+confirmed readable NATIVE23 and RESCUE23 in separate GUI sessions. Escape
+returned to the normal shell; help, independent diagnostics and two controlled
+reboot returns passed, both readable and unassisted. Six additional automated
+GUI/input/composition/resource-baseline cycles contained presenter/compositor
+exceptions. Raw capture is scoped to the recorded sessions and partial boots;
+see [the native GUI record](AMD_POLARIS_DISPLAY.md#observed-normal-gui-on-native-and-rescue-output)
+for the image identity, initial-prefix exclusion and host-tool corrections.
+
+
+The v24 supervised GUI run retained COM7 control through primary spin and rescue
+exception with the GUI active. The operator confirmed NATIVE24 and RESCUE24 and
+one readable,unassisted controlled reboot. Thirteen active logs preserve71273 RX
+and884 host TX bytes;passive capture received no initial boot bytes and gaps are
+excluded. Concurrent worker/control-thread output can interleave within a line.
+Raw bytes are preserved;line-atomic logging is not guaranteed. Offline byte
+partition checks verify both complete known journals;original failed host
+assertions and CPU-only continuations remain saved. The pre-prepare readiness
+refusal is distinct from the successful prepared reboot. See
+[the supervised record](AMD_POLARIS_DISPLAY.md#observed-supervised-gui-and-fresh-rescue).
+
+
+The v25 terminal CPU-cleanup candidate defers its final capability release until
+original GUI/lease/writer-pin drain. Partial teardown and failed final revoke
+remain retained. The read-only power query can collect a completed worker without
+polling or stopping active/pending graphics. Host104 controller/worker/build
+checks and four clean QEMU boots pass;normal88/88,deep88/88/611. The subsequent physical automatic
+release/readiness result is recorded below. Capture the new
+`TERMINAL CPU DRAIN WAIT` status and terminal capability-release journal;raw
+concurrent lines may still interleave. See
+[the cleanup candidate](AMD_POLARIS_DISPLAY.md#deferred-terminal-cpu-cleanup-candidate).
+
+
+Physical v25 acceptance now confirms automatic final capability release after
+a GUI-active rescue exception and original-GUI drain. Before any explicit
+power_prepare or status collection,the read-only power query reported shutdown/
+reboot ready and storage safe. The completed worker was collected;retired GOP
+access stayed refused and serial control survived. Ten GUI sessions,six full
+baselines and one readable/unassisted controlled reboot passed. Eleven active
+sessions preserved71664 RX/890 TX plus1694 initial boot bytes;raw concurrent
+journals remain saved. All captures passed with no GPU replay. See
+[the automatic cleanup record](AMD_POLARIS_DISPLAY.md#observed-automatic-terminal-cleanup)
+for the image,fixed114-load/four-store scope and remaining limits.
+
+
+The v26 implementation adds explicit `gui reconnect` after loss and complete cleanup
+of a native GUI. A consumed ticket pins the lost output; the Ring3 supervisor
+admits one fresh GUI only after the kernel proves the exact rescue epoch and
+exclusive ownership. It creates fresh client/surface/input identities and does
+not restore or replay old state. Run it after rescue is ready; a request is
+single-use even if it fails. No new GPU operation or driver restart is implied.
+Host122 controller/640 policy cases and GUI ticket gates pass; four clean QEMU
+boots pass,normal88/88 and deep88/88/611. QEMU covers real Ring3 command parsing,
+policy CONNECT/duplicate refusal and firmware/no-ticket refusal. The subsequent
+physical reconnection result is recorded below. See
+[the reconnection profile](AMD_POLARIS_DISPLAY.md#explicit-gui-reconnection).
+
+
+Physical v26 acceptance now confirms normal Ring3 `gui reconnect` after native
+GUI loss, complete old-GUI drain and fresh rescue. One CONNECT authorization
+created output-generation-2 clients with new app/input/presenter/compositor
+identities; visible RECON26 input was confirmed. No manual rescue presenter
+handoff, old-state replay or additional GPU operation occurred. Duplicate and
+terminal requests were refused. Ten GUI sessions, six complete baselines,
+automatic cleanup after rescue failure, pre-prepare power readiness and readable
+unassisted reboot passed. Twelve active captures preserve 69153 RX/872 TX bytes;
+initial boot was not captured. The unchanged image used 114 loads/four stores.
+See [the physical reconnect record](AMD_POLARIS_DISPLAY.md#observed-explicit-gui-reconnection)
+for exact identities, byte scopes and remaining hardware limits.
+
+
+The normal Ring3 shell now offers `gui native` for the first qualified takeover
+and GUI launch. One serialized worker request retains existing policy admission,
+exact hardware checks, a fresh primary heartbeat and RO handoff before normal
+GUI construction. Refusal starts no implicit firmware GUI and preserves the
+shell. Existing or exhausted backends cannot be reinitialized through this entry;
+normal `gui` and one-use rescue `gui reconnect` remain distinct requests. No GPU
+budget, register set or authority changes. Positive hardware acceptance of this
+new launch path is now recorded below. See [normal-shell native launch](AMD_POLARIS_DISPLAY.md#native-gui-launch-from-the-normal-shell).
+
+
+Physical v27 acceptance confirms `gui native` from the normal Ring3 shell without
+manual monitor takeover or handoff, visible NATIVE27 input, repeat-launch refusal,
+and GUI-active primary failure followed by fresh rescue/`gui reconnect` with
+visible RECON27 input. Ten GUI sessions, six complete baselines, automatic final
+CPU cleanup after rescue failure, pre-prepare power readiness and readable
+unassisted reboot passed. All eleven active serial captures passed; the unchanged
+image used 114 loads/four stores with no replay. Captures preserve 69324 RX/849 TX
+plus 1694 attributed post-page-table boot bytes; two leading NUL bytes are saved
+and excluded. See [the normal-shell launch hardware record](AMD_POLARIS_DISPLAY.md#observed-normal-shell-native-launch)
+for identities, byte scopes and remaining limits.

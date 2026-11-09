@@ -5682,6 +5682,7 @@ static void command_display_firmware(void) {
 
 static void command_polaris_native(void) {polaris_watch_begin(g_boot);}
 static void command_polaris_rescue(void) {polaris_watch_rescue();}
+static void command_polaris_present(void) {polaris_watch_present();}
 static void command_polaris_finish(void) {polaris_watch_finish();}
 static void command_polaris_status(void) {polaris_watch_status();}
 static void command_polaris_test(const char *args) {
@@ -6336,6 +6337,7 @@ static void command_power_result(const char *action, PowerResult result) {
 }
 
 static void command_power(void) {
+    polaris_watch_collect();
     PowerResult shutdown = power_check_shutdown();
     PowerResult reboot = power_check_reboot();
 
@@ -6484,7 +6486,7 @@ typedef struct {
 static void command_clear(void) { terminal_clear(); }
 
 static void command_usershell(void) {
-    if (userspace_shell_run()) return;
+    if (userspace_shell_run(g_boot)) return;
     terminal_set_color(terminal_error_color());
     terminal_writeln("USERSPACE SHELL HANDOFF FAILED; KERNEL MONITOR REMAINS ACTIVE.");
     terminal_set_color(terminal_default_color());
@@ -6639,6 +6641,7 @@ static void shell_registry_init(void) {
     shell_add_command("pci", "pci", "list discovered PCI devices", SHELL_GROUP_HARDWARE, command_pci, 0, true);
     shell_add_command("polaris-native","polaris-native","explicit fixed-buffer GPU write experiment",SHELL_GROUP_HARDWARE,command_polaris_native,0,true);
     shell_add_command("polaris-rescue","polaris-rescue","fault primary and enter reserved rescue once",SHELL_GROUP_HARDWARE,command_polaris_rescue,0,true);
+    shell_add_command("polaris-present","polaris-present","park backend RO; supervise normal GUI and keep rescue reserved",SHELL_GROUP_HARDWARE,command_polaris_present,0,true);
     shell_add_command("polaris-finish","polaris-finish","reclaim validated native diagnostic console",SHELL_GROUP_HARDWARE,command_polaris_finish,0,true);
     shell_add_command("polaris-test","polaris-test primary|rescue|policy fault|spin|spin-later|fault-later","explicit driver fault/spin; watchdog observes outcome",SHELL_GROUP_HARDWARE,0,command_polaris_test,true);
     shell_add_command("polaris-status","polaris-status","CPU-only graphics liveness and stage counters",SHELL_GROUP_HARDWARE,command_polaris_status,0,true);

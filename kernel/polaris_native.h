@@ -10,8 +10,14 @@ void polaris_native_background_diagnostic(u32 role,bool spin);
 void polaris_native_background_policy_diagnostic(bool spin);
 void polaris_native_policy_diagnostic(bool spin);
 void polaris_native_begin(const BootInfo *boot);
+/* First takeover and RO presenter handoff under the same serialized owner. */
+bool polaris_native_launch(const BootInfo *boot);
 void polaris_native_rescue(void);
 void polaris_native_finish(void);
+/* Keep backend/rescue live;downgrade its FB mapping before normal GUI admission. */
+void polaris_native_present(void);
+/* One policy-authorized new GUI on the exact rescue generation;no GPU IO. */
+bool polaris_native_reconnect(u64 old_output);
 void polaris_native_poll(void);
 /* One acknowledged diagnostic per active primary/rescue incarnation. */
 void polaris_native_diagnostic(u32 role,bool spin);

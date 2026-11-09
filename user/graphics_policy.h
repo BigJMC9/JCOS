@@ -5,6 +5,7 @@
 typedef struct {
     JcosU64 session,sequence;
     JcosU32 stage;
+    JcosU32 client_reconnected;
 } GraphicsPolicy;
 /* Invalid/replayed envelopes return REJECT without changing the ledger.
  * Closed sessions cannot be reopened; a later distinct session must increase. */

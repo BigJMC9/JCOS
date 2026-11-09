@@ -278,27 +278,46 @@ void display_surface_test_cleanup_run(void) {
     report("APP / SERVICE / SURFACES RELEASED", cleanup_all());
 }
 
+static u64 input_wait_irq_save(void) {
+    u64 flags;
+    __asm__ volatile ("pushfq; popq %0" : "=r"(flags) : : "memory");
+    interrupts_disable();
+    return flags;
+}
+static void input_wait_irq_restore(u64 flags) {
+    if (flags & (1ULL << 9)) interrupts_enable();
+}
 static bool wait_app_dead(void) {
+    if (!g_exit_queue_created) return false;
     u64 timeout = timeout_ticks();
     if (!timeout) return false;
     u64 started = timer_ticks();
-
-    while (g_app.thread.state != THREAD_STATE_DEAD) {
-        if ((u64)(timer_ticks() - started) >= timeout) return false;
-        if (g_app.thread.state == THREAD_STATE_READY) {
-            if (!g_app.thread.on_run_queue || !g_app.thread.interrupt_context_ready ||
-                !g_app.thread.interrupt_rsp || thread_wait_active(&g_app.thread)) return false;
-        } else if (g_app.thread.state == THREAD_STATE_BLOCKED) {
-            if (g_app.thread.on_run_queue || !g_app.thread.interrupt_context_ready ||
-                !g_app.thread.interrupt_rsp || !thread_wait_active(&g_app.thread)) return false;
-        } else {
-            return false;
+    Thread *thread = &g_app.thread;
+    for (;;) {
+        /* Completion and IPC wake reservations require one coherent UP snapshot,
+         * just like the focused-client/service waits. READY can still own the
+         * completed wait until its resumed syscall removes that reservation. */
+        u64 flags = input_wait_irq_save();
+        u32 pending = process_exit_queue_pending_count(&g_exit_queue);
+        bool dead = thread->state == THREAD_STATE_DEAD && !thread->on_run_queue &&
+            !thread->interrupt_context_ready && !thread->interrupt_rsp && !thread_wait_active(thread);
+        if (pending == 1U && dead) {
+            bool complete = process_exit_queue_watch_count(&g_exit_queue) == 0U;
+            input_wait_irq_restore(flags);
+            return complete;
         }
-        if (!scheduler_yield()) return false;
+        bool valid = pending <= 1U && (u64)(timer_ticks() - started) < timeout;
+        if (thread->state == THREAD_STATE_READY)
+            valid = valid && thread->on_run_queue && thread->interrupt_context_ready && thread->interrupt_rsp;
+        else if (thread->state == THREAD_STATE_BLOCKED)
+            valid = valid && !thread->on_run_queue && thread->interrupt_context_ready &&
+                thread->interrupt_rsp && thread_wait_active(thread);
+        else if (thread->state != THREAD_STATE_DEAD) valid = false;
+        if (!valid) {input_wait_irq_restore(flags);return false;}
+        bool scheduled = scheduler_yield();
+        input_wait_irq_restore(flags);
+        if (!scheduled) return false;
     }
-
-    return !g_app.thread.on_run_queue && !g_app.thread.interrupt_context_ready &&
-        !g_app.thread.interrupt_rsp && !thread_wait_active(&g_app.thread);
 }
 
 static bool drain_exit(ProcessExitInfo *out) {
@@ -461,15 +480,6 @@ static bool input_app_terminal(u32 index) {
         !thread_wait_active(thread);
 }
 
-static u64 input_wait_irq_save(void) {
-    u64 flags;
-    __asm__ volatile ("pushfq; popq %0" : "=r"(flags) : : "memory");
-    interrupts_disable();
-    return flags;
-}
-static void input_wait_irq_restore(u64 flags) {
-    if (flags & (1ULL << 9)) interrupts_enable();
-}
 static bool wait_input_app_dead(u32 index) {
     if (index >= DISPLAY_INPUT_CLIENT_COUNT || !g_input_exit_queue_created[index]) return false;
     u64 timeout = timeout_ticks();
@@ -974,6 +984,7 @@ void display_surface_test_run(void) {
     u64 session_runs_before = graphical_session_run_count();
     bool session_started = graphical_session_start() && graphical_session_active() &&
         graphical_session_run_count() == session_runs_before + 1ULL &&
+        !graphical_session_drained() &&
         display_service_running() && compositor_service_running() &&
         display_service_focus_slot() == 0U &&
         display_service_input_client_count() == 1U;
@@ -991,6 +1002,7 @@ void display_surface_test_run(void) {
     if (!session_input) goto fail;
 
     bool session_stopped = graphical_session_stop() && !graphical_session_active() &&
+        graphical_session_drained() &&
         compositor_service_state() == MANAGED_SERVICE_STOPPED &&
         display_service_state() == MANAGED_SERVICE_STOPPED &&
         display_direct_state() == DISPLAY_LEASE_KERNEL && baseline_matches(&baseline);

@@ -1034,9 +1034,509 @@ Initial boot coverage is partial, and gaps between sessions are not a
 continuous log. Runtime UART checks reported no drops,timeouts or stalls.
 
 The image and production implementation are unchanged since the software
-freeze. The machine is now fresh firmware-backed v22,stage0/heartbeat0/
+freeze. At that checkpoint the machine was fresh firmware-backed v22,stage0/heartbeat0/
 testmask0,COM7 released. This qualifies the named Ring3-sequenced execution
 and software-failure paths under retained DP timing. Remaining userspace
 lifecycle/presentation integration,physical active-output policy replacement,
 changed modes/HDMI,GPU reset/arbitrary hardware hangs and memory isolation
 remain separate work.
+
+
+## Normal presentation after native-owner cleanup
+
+The v23 build connects the normal Ring3 display service, separate
+compositor and bounded application surface to the current validated native or
+rescue output. After `polaris-finish` stops and reaps the old native/rescue
+owners, `gui` uses that generation under the existing exclusive framebuffer
+lease. It adds no GPU operation, mode, allocation or capability authority.
+The ordinary `display_service_start()` remains firmware-only; the explicit
+native entry requires the exact current nonzero generation and retired GOP.
+Stale, revoked, active and incompletely released ownership is refused.
+
+This is presentation on an already validated scanout. The finite hardware
+experiment is exhausted after `polaris-finish`: there is no remaining reserved
+GPU rescue process, reset attempt or automatic native-backend restart. A
+normal presenter/compositor process fault can be contained and cleaned up,
+then a fresh session can reuse the same output if it remains valid. If the
+hardware or that validation fails, independent serial/reboot diagnostics remain
+necessary. Revoking a descriptor alone does not revoke an existing user mapping;
+its owner must still be stopped and reaped before replacement admission.
+
+`python tools/test_native_presentation.py` runs nine host cases against the
+production framebuffer, lease, terminal and display-service code. RAM stands in
+for MMIO and launch/IPC are doubles. Cases cover successful native/rescue
+presentation admission, launch/commit/configuration failures, retained cleanup,
+revocation, stale generation, and unchanged firmware bitmask configuration.
+These are process/ownership model checks, not hardware qualification.
+
+`test native-presentation` on a normal firmware boot only checks refused native
+admission and explicitly reports that no native presentation was exercised.
+After a real native/rescue operation and successful `polaris-finish`, it runs
+three real GUI sessions, app input and separate compositor presentation. It
+injects presenter and compositor exceptions in separate sessions, checks fresh
+process identities, retained lease, native console reclamation and full object,
+page and capability baselines. It never constructs native output or programs
+the GPU. Manual `gui` remains available after the test.
+
+Candidate image SHA-256: c116f5a4d7fe3f7750e7db93e03b85bef448b3056b93518417bd7ff4501a179d.
+Software validation: Four clean QEMU boots PASS: focused, multi, normal88/88 and deep88/88 across611 iterations; actual firmware GUI/serial input/console restoration and native-admission refusals PASS. The physical result follows below; v22 observations remain separate.
+
+
+## Observed normal GUI on native and rescue output
+
+Two native boots on 2026-11-07 used the unchanged v23 image
+c116f5a4d7fe3f7750e7db93e03b85bef448b3056b93518417bd7ff4501a179d
+on the Z390/F10/RX570/Philips DisplayPort profile. Four preflight suites passed;
+a second firmware boot repeated the admission-only check. These limited
+firmware checks are separate from the two positive native presentation tests.
+
+The first primary, PID25/incarnation21, completed its rebind and the operator
+confirmed green correctly oriented output. After explicit owner cleanup,
+`test native-presentation` ran three real sessions on native generation1.
+App input and separate compositor presentation passed in each session.
+Presenter and compositor exceptions were contained in separate sessions;
+fresh identities, retained lease, native console reclamation and full resource
+baselines passed. A subsequent normal `gui` session visibly displayed host-entered
+`NATIVE23`, confirmed by the operator. Escape returned to the normal shell,
+help completed, and exhausted primary/rescue requests were refused.
+
+A second native boot used primary PID4/incarnation2. An explicit primary
+exception stopped and reaped that owner before fresh rescue PID5/incarnation3
+completed its own rebind. The operator confirmed correct blue rescue text.
+After cleanup, three positive sessions ran on rescue generation2 with the same
+input, composition, exception and complete-baseline checks. A subsequent
+normal GUI visibly displayed host-entered `RESCUE23`. Escape and shell help
+worked again. Both controlled reboots returned to readable JA OS prompts
+without boot-menu, reset or power intervention, independently confirmed.
+
+That is eight GUI sessions: six automated and two operator-observed sessions,
+with two presenter and two compositor exceptions plus the separate primary
+exception that entered fresh rescue. These are supported CPU-process failures
+on retained operational scanout. After terminal owner cleanup there is no
+reserved GPU rescue process or rearmed native attempt; full backend restart
+and client reconnection remain separate work.
+
+Three rebinds used174 register loads/six fixed store attempts, no replay, and
+one poll each. Each advanced three frames. Normal GUI/input/fault/cleanup and
+exhausted-request checks added no GPU register operation after owner finish.
+Presentation still writes the exclusively mapped retained framebuffer.
+
+Active captures contain72680 RX/783 host TX bytes. The initial1824-byte
+reset transcript includes131 unattributed pre-reset bytes, retained and
+excluded, plus1693 post-reset boot bytes. Image-scoped RX is74373;all saved
+raw RX is74504. Boot coverage is partial and inter-session gaps are excluded.
+UART diagnostics reported no drops, timeouts or stalls. A wrong host scanout
+text expectation stopped capture after successful primary rebind; its failed
+record is preserved and CPU-only continuation used the actual retired/GOP-refused
+journal. Offline checker corrections are also retained. No hardware operation
+was replayed and no image or production-code change was needed.
+
+The software freeze has253 entries, with a separate physical inspection and
+checksum manifest. The target is fresh firmware-backed v23,stage0/heartbeats0/
+mask0,COM7 released. Full GPU lifecycle/restart, active-output policy replacement,
+changed modes/HDMI, GPU reset/arbitrary hardware hangs and memory isolation
+remain unqualified by this pass.
+
+
+## Supervised GUI candidate
+
+The v24 candidate adds `polaris-present` after a successful native or rescue
+rebind. It downgrades every backend framebuffer PTE to read-only before returning
+the existing CPU lease to the kernel. The backend and reserved rescue stay alive
+on their private control endpoints; `usershell` then `gui` uses the normal
+separate display service and compositor. Heartbeats and Ring3 recovery decisions
+continue while the GUI owns its own exclusive writable mapping. The terminal
+`polaris-finish` path remains available after GUI cleanup.
+
+A primary failure first revokes that output generation and stops/reaps the old
+backend. The GUI control thread observes revoked output and tears down its own
+app/compositor/presenter state. The graphics worker neither races that cleanup
+nor uses the GUI's reply endpoints. It waits for all GUI resource ledgers,
+the KERNEL lease and kernel writer pins to drain before arming the one reserved
+rescue. An eight-second CPU-drain admission budget and exact live policy/rescue
+identity checks bound this wait. Timeout or lost context closes the attempt
+without rescue register operations, retaining uncertain ownership for cleanup.
+This is a software admission bound, not an interruptible GPU transaction or
+whole-system recovery-latency guarantee.
+
+Once fresh rescue has restored diagnostic output, `polaris-present` can admit
+a new normal GUI on that new generation. This is explicit application relaunch,
+not transparent state restoration. The fixed two primary/two rescue register
+stores, one attempt each, remain unchanged. No new register, user ABI, raw BAR,
+allocation, mode, reset or DMA/IRQ authority is added. A refused power transition
+while GUI ownership remains live also keeps backend supervision running.
+
+The host controller now covers96 cases, including16 supervised GUI/deferred
+rescue cases: actual core code with service/device doubles. They cover live
+GUI heartbeat progress, RO handoff, unknown ledgers/writer pins, drain deadline,
+policy/rescue identity failure, power refusal and terminal no-replay paths.
+Worker tests cover command dispatch and refused power retaining the worker.
+The real Ring3 RAM test upgrades then downgrades a framebuffer and verifies
+that an attempted write faults with no allocation. Normal GUI tests check the
+drained-resource query against live sessions and full teardown.
+
+Candidate image SHA-256: 6d95ea13a14922708c6b832b8069e0177ae526a8e75b5b87e5aa13c2bc6fe617.
+Four clean final-image QEMU boots PASS:focused,multi,normal88/88 and deep88/88 across611 iterations. Actual Ring3 RW-to-RO write-protection fault and normal GUI/drained-ledger checks PASS. Subsequent physical supervised GUI evidence is recorded below.
+The subsequent v24 physical supervised GUI/backend failure and fresh rescue
+record follows; the v23 terminal-handoff evidence above remains separate.
+
+
+## Observed supervised GUI and fresh rescue
+
+On 2026-11-07 the Z390 Gaming X/F10, i7-9700K and RX570
+1002:67DF revEF/subsystem1458:2310 passed the supervised GUI profile on the
+Philips272M8 over DisplayPort. The unchanged v24 image SHA-256 is
+6d95ea13a14922708c6b832b8069e0177ae526a8e75b5b87e5aa13c2bc6fe617.
+The 273-entry software freeze remains separate from the physical record in
+`build/rx570-session-v24/hardware`.
+
+After the primary diagnostic rebind, `polaris-present` parked the backend RO
+while its heartbeat and reserved rescue remained alive. Three actual normal
+GUI/input/composition sessions passed, including separate presenter/compositor
+exceptions and three complete resource baselines; heartbeats progressed250 to254.
+The operator confirmed serial-entered NATIVE24 in a fourth normal GUI.
+Escape and normal shell help returned successfully.
+
+A delayed primary spin then ran with an explicit GUI-active witness. The Ring3
+policy selected recovery, the old output was revoked, and the original GUI
+thread completed its own teardown. The worker recorded GUI owners released
+before the reserved rescue's first preparation read or store. The independent
+rescue process26/incarnation22 restored the blue diagnostic display, confirmed
+readable by the operator. Primary process25/incarnation21 and rescue completed
+with frame deltas3 and6 respectively. The fixed total was114 register loads,
+four store attempts, two polls and no replay.
+
+Rescue `polaris-present` admitted generation2. Three more actual presentation
+sessions and complete baselines passed, including separate presenter/compositor
+exceptions; heartbeats progressed392 to395. A normal GUI visibly displayed
+serial-entered RESCUE24, then Escape/help returned. A tenth GUI session was
+active when the delayed rescue invalid-opcode fault occurred. The Ring3 policy
+selected headless: no qualified output remained, the old GOP stayed retired,
+the GUI drained itself, and independent serial shell help remained operational.
+Five exhausted native/rescue/present/diagnostic requests were refused with no
+further GPU operation.
+
+Asynchronous terminal cleanup retained a kernel ledger while GUI teardown was
+still pending. The pre-prepare `power` query correctly reported non-quiescent
+objects. The controlled `reboot` command subsequently completed graphics
+`power_prepare`, passed the existing object invariants and reset. JA OS returned
+with fresh firmware scanout,stage0/heartbeats0/mask0 and power readiness YES.
+The operator confirmed readable output with no boot-menu,reset or power
+intervention. Automatic terminal-ledger draining remains follow-up work.
+
+Thirteen active serial captures contain71273 RX and884 host TX bytes, including
+the controlled reset; the passive watchers received no initial boot bytes.
+Inter-session gaps are excluded, and flashed image identity is operator-confirmed
+without USB byte readback. UART counters reported zero drops/timeouts/no stall.
+Concurrent worker and GUI serial lines interleaved. An offline exact two-stream
+byte partition verifies both complete journals in the357-byte primary and286-byte
+rescue regions; the original bytes are retained unchanged. The primary host
+cleanup-string assertion and the later pre-prepare readiness assertion remain
+saved as FAILED records. CPU-only continuations verified state and performed
+the normal prepared reboot; neither GPU operation was repeated.
+
+This pass qualifies ten actual GUI sessions on this retained DP allocation and
+software-owner fault profile. Initial GUI clients exit on generation revocation;
+rescue GUI relaunch is explicit. General GPU-owner restart, client state recovery,
+automatic terminal-ledger drain,new modes,HDMI,GPU hardware reset/arbitrary
+bus hangs and physical DMA/IRQ/IOMMU isolation remain open. Firmware-inherited
+bus mastering is still unisolated.
+
+
+## Deferred terminal CPU cleanup candidate
+
+V25 addresses the retained kernel capability observed during v24 rescue-fault
+GUI teardown. An otherwise complete terminal CPU teardown keeps its worker until
+original GUI ledgers,KERNEL lease and kernel writer pins drain. It then consumes
+one final capability-release attempt. No GPU operation,service RPC,assignment
+mutation or competing GUI cleanup occurs. Partial quarantine,MMIO or exact-policy
+teardown failures remain retained for explicit cleanup. Failed final revoke is
+not automatically retried. Unproven ownership can retain the CPU-only wait
+indefinitely;this adds no GPU retry or display-recovery guarantee.
+
+A read-only power query may collect a completed worker through its existing
+serialized channel. It neither polls nor stops an active backend or pending
+terminal drain. Controlled reboot preparation remains available. User binaries,
+ABI,register sets and once-per-boot hardware budgets are unchanged. Serial line
+interleaving remains a separate limitation.
+
+Host104 controller cases pass,including eight terminal-drain cases and the
+previous96 scenarios. Worker/admission tests cover completed-worker collection,
+active/pending preservation and no core polling. Four clean QEMU boots pass:
+focused,multi,normal88/88 and deep88/88 across611 iterations. All26 packaged user
+payloads equal v24;ELFs have no runtime relocations. Default-off native/capture
+build gates pass. The physical terminal cleanup result is recorded below.
+
+Tested image SHA-256: 912aa3d0a4452b5dda7ab358f207c1b7e7406feee3876679d05fb682a30daa6f in `build/rx570-drain-v25`.
+The subsequent hardware run repeats active-GUI primary/rescue failures and
+captures automatic capability release and readiness before explicit reboot
+preparation. V24 software273/hardware147 records and the earlier pre-prepare
+readiness refusal remain preserved separately.
+
+
+## Observed automatic terminal cleanup
+
+On 2026-11-07, the unchanged v25 image
+912aa3d0a4452b5dda7ab358f207c1b7e7406feee3876679d05fb682a30daa6f passed
+physical terminal CPU cleanup on Z390 Gaming X/F10,i7-9700K,RX570
+1002:67DF revEF/subsystem1458:2310 and Philips272M8 over DisplayPort.
+The 257-entry software freeze remains unchanged; the separate physical record
+is in `build/rx570-drain-v25/hardware`.
+
+Ten actual GUI sessions passed: six automated input/composition cycles with
+complete resource baselines, two visual sessions showing NATIVE25/RESCUE25,
+and two sessions explicitly active during primary spin/rescue exception.
+The automated suites contained two presenter and two compositor exceptions;
+primary heartbeats progressed53 to56, rescue176 to180. Primary process25/inc21
+and fresh rescue26/inc22 rebinds advanced3 and6 frames respectively. Old-GUI
+ledgers,lease and writer pins drained before the reserved rescue operations.
+Exactly114 register loads/four fixed stores/two polls occurred,without replay.
+
+After the GUI-active rescue invalid-opcode fault, the Ring3 policy selected
+headless. The old GUI returned to its serial shell and the periodic worker
+recorded exactly one automatic final CPU-capability release. No explicit
+finish,power_prepare,status collection or reboot preceded that release. Normal
+shell help and monitor entry then succeeded. The first `power` query collected
+the completed worker and reported shutdown/reboot ready and storage safe.
+Following status showed terminal CPU drain wait NO and no live worker identity.
+No GPU operation followed rescue failure,including five exhausted requests.
+Saved GOP geometry remains available as metadata;access stayed refused while
+no qualified output existed.
+
+The controlled reboot subsequently returned to fresh firmware scanout,status0/
+heartbeats0/mask0 and power readiness YES. The operator confirmed readable output
+without boot-menu,reset or power intervention. Initial primary,rescue and both
+normal GUI displays were also confirmed readable and correctly oriented.
+
+Eleven active captures contain71664 RX/890 host TX bytes. Passive capture adds
+1694 initial post-page-table boot bytes,for73358 image-scoped and total saved
+RX bytes. Loader/earlier boot bytes and inter-session gaps are outside coverage;
+image flashing is operator-confirmed without USB byte readback. UART counters
+reported zero drops/timeouts/no stall. Exact two-stream byte partitions verify
+the complete interleaved worker/GUI journals in357-byte primary and286-byte
+rescue regions,without altering the raw bytes. All eleven active capture
+sessions passed;no host assertion correction or GPU replay was needed.
+
+This qualifies automatic cleanup after the tested software-owner failure and
+otherwise successful CPU teardown. Ambiguous teardown,failed final revoke and
+unproven ownership still retain resources;their refusal paths have host coverage.
+The profile remains operational retained DisplayPort scanout. General driver
+restart/client reconnection,state restoration,new modes,HDMI,hardware GPU reset,
+arbitrary bus hangs and physical DMA/IRQ/IOMMU isolation remain separate work.
+Firmware-inherited bus mastering remains unisolated.
+
+
+## Explicit GUI reconnection
+
+The v26 implementation adds `gui reconnect` to the normal userspace shell. After a
+native-backed GUI loses its output, the original control thread must completely
+remove its app, input portal, surface, presenter and compositor before retaining
+a one-use lost-output ticket. Firmware sessions, normal Escape, service failure
+on an otherwise valid output, and incomplete cleanup create no ticket. Starting
+another GUI clears any outstanding ticket.
+
+After the fresh rescue display is ready, `gui reconnect` consumes that ticket
+and asks the existing Ring3 graphics supervisor to admit one new session. The
+kernel checks the exact old/replacement output generations, the rescue process
+and policy identities, all GUI ledgers and writer pins, and the rescue's current
+exclusive CPU lease. It requires a fresh rescue heartbeat. The Ring3 policy
+allows reconnection once in its rescue stage; the kernel consumes the attempt
+before transport and enforces the same bound independently. Unknown or ambiguous
+results are not replayed. A request issued too early or a failed launch consumes
+the ticket; this entry point does not retry or restore application state.
+
+Once authorized, the backend is downgraded RO before reclaiming the CPU lease.
+The normal GUI creates new app, surface, input and service identities on the
+new rescue generation. No old input, surface contents, pending operation or app
+state is copied. The shell announces the fresh-session behavior and startup logs
+record connection identities. Backend/rescue supervision remains active. No
+GPU operation, new mode, raw BAR grant, VRAM allocation or reset is added, and
+the existing once-per-boot primary/rescue programming budget is unchanged.
+Initial native takeover still uses the existing explicit preparation path;
+this is client reconnection, not general GPU-owner restart.
+
+The private graphics-policy envelope is version2; unknown/legacy versions and
+replayed or wrongly staged requests are refused. Kernel and supervisor are
+packaged together. The normal console adds a shell action, with no new syscall
+or client capability. Only supervisor.elf and consoleservice.elf change among
+26 user payloads; primary, rescue, presenter, compositor and app ELFs are unchanged.
+
+Host checks pass 122 controller cases, including 18 reconnect/unsafe-CONNECT
+cases, plus 640 policy stage/fact cases, existing envelope/health checks and 11
+GUI-ledger ticket gates. Actual Ring3 policy tests exercise CONNECT and duplicate
+refusal without GPU I/O. Four clean QEMU boots pass: focused, multi, normal
+88/88 and deep88/88 across611 iterations. Actual Ring3 `gui reconnect` refuses
+an ineligible firmware session while preserving the normal shell. This emulator
+result does not establish positive native client reconnection.
+
+Tested image SHA-256: 23537263f3411634e9dfcaf66fc56fbdc2c68a68074e3be328bcf33bfe951f48 in `build/rx570-reconnect-v26`.
+The physical pass below qualifies that sequence for the retained DisplayPort
+profile. V25 software257/hardware137 evidence remains separate. General GPU
+lifecycle/restart, state restoration, changed modes/HDMI, hardware GPU reset and
+DMA/IRQ/IOMMU isolation remain open.
+
+
+## Observed explicit GUI reconnection
+
+On 2026-11-09, image
+23537263f3411634e9dfcaf66fc56fbdc2c68a68074e3be328bcf33bfe951f48 passed
+physical `gui reconnect` acceptance on Z390 Gaming X/F10, i7-9700K, RX 570
+1002:67DF rev EF/subsystem 1458:2310 and Philips Momentum 272M8 over DisplayPort.
+The 276-entry software freeze is unchanged. Separate raw logs, plans and offline
+inspection are in `build/rx570-reconnect-v26/hardware`. Flashing is operator
+confirmed; no USB byte readback is claimed.
+
+The normal GUI was active during the delayed primary spin. The original GUI
+control thread stopped its clients and released the display resources before
+any reserved-rescue preparation reads or stores. The fresh blue rescue display
+was visually confirmed. From the returned normal Ring3 shell, `gui reconnect`
+then consumed the lost-output ticket and received exactly one Ring3 CONNECT
+authorization. No manual rescue `polaris-present` or intervening diagnostic GUI
+was used. The rescue backend became RO before the fresh GUI started on output
+generation 2, replacing lost generation 1.
+
+The old app PID 41/input 5/presenter PID 39 incarnation 31/compositor PID 40
+incarnation 32 became app PID 44/input 6/presenter PID 42 incarnation 33/
+compositor PID 43 incarnation 34. All recorded connection identities changed.
+The operator confirmed correctly oriented NATIVE26 and RECON26 input on the
+normal GUI, as well as green primary and blue rescue banners. Escape and shell
+help worked. Another `gui reconnect` after normal Escape was refused without
+starting a session. No old application, input or surface state was restored.
+
+Ten GUI sessions ran: six automated input/composition cycles with six complete
+resource baselines, two visually checked sessions, and two sessions active during
+backend failures. The suites included two presenter and two compositor exceptions.
+Primary heartbeats progressed 29 to 34; rescue 134 to 138. Primary PID 25/inc 21
+and fresh rescue PID 26/inc 22 advanced 3 and 6 frames respectively. The entire
+native boot used exactly 114 register loads, four fixed store attempts and two
+polls: one primary transaction and one rescue transaction. Reconnection added
+no GPU operation or programming-budget rearm.
+
+A subsequent rescue exception while another GUI was active selected headless
+operation. The original GUI drained and exactly one automatic final CPU
+capability release occurred. The first power query, before status or explicit
+reboot preparation, reported shutdown/reboot ready and storage safe. The worker
+was collected, no qualified scanout remained, and saved GOP access stayed refused.
+Normal shell control survived; terminal `gui reconnect` and five exhausted GPU
+requests were refused without hardware operations. A controlled reboot returned
+to firmware scanout, stage 0/heartbeats 0/mask 0 and power readiness. The operator
+confirmed readable output without boot-menu, reset or power intervention.
+
+All twelve active serial sessions passed, preserving 69153 RX and 872 host TX
+bytes. The closed passive logger captured zero initial-boot bytes; the initial
+boot, earlier loader output and inter-session gaps are outside coverage. The
+controlled reboot is captured. Observed UART counters reported zero drops, zero
+timeouts and no stall. Exact two-stream byte partitions verify the complete
+interleaved worker/GUI journals, including the lost-ticket message, in 441-byte
+primary and 370-byte rescue regions. Raw bytes are unchanged. No host capture
+assertion correction, production change or hardware replay was required.
+
+This qualifies explicit fresh client reconnection after the tested software
+owner failure on the retained DisplayPort profile. Initial takeover remains
+explicit. Full GPU-owner lifecycle/restart, application state restoration, changed
+modes, HDMI, GPU reset/arbitrary hardware hangs and DMA/IRQ/IOMMU isolation remain
+open. Firmware-inherited bus mastering remains unisolated.
+
+
+## Native GUI launch from the normal shell
+
+`gui native` requests the first qualified native takeover and opens the normal
+GUI directly from the Ring3 shell. It uses the existing exact-board/firmware/
+power/serial profile, reserved primary and rescue processes, Ring3 BEGIN/PRIMARY
+policy admission and once-per-boot rebind. No emergency-monitor command is needed
+for this launch. The trusted boot descriptor is passed through the kernel shell
+context; userspace supplies neither a boot pointer nor register addresses.
+
+One serialized graphics-worker request performs preparation, checks the current
+policy/rescue identities and a fresh primary heartbeat, then downgrades the
+backend framebuffer mapping RO and reclaims its CPU lease before GUI admission.
+The GUI constructor independently requires a current native output generation.
+A refused or uncertain launch starts no GUI implicitly, including no firmware
+GUI fallback, and the shell remains available. Existing `gui` still uses the
+currently valid output. The native launch entry refuses an existing or exhausted
+backend; normal Escape does not rearm GPU programming. Use `gui` for another
+session on healthy output, or the qualified `gui reconnect` after fresh rescue.
+
+No new syscall, boot ABI, graphics-policy version, capability grant, GPU operation,
+register budget, mode, VRAM allocation, reset, IRQ or DMA access is introduced.
+Native primary/rescue executables and the supervisor are unchanged from the
+physically tested reconnect build; only the console user payload changes.
+General GPU-owner restart and automatic boot takeover remain separate work.
+
+The software evidence and image identity are frozen in
+`build/rx570-launch-v27/validation.json`. The subsequent physical launch pass is
+recorded below. The earlier reconnect hardware record remains separate and
+qualifies its own unchanged image.
+
+Software qualification passes 136 production controller cases, including 14
+launch scenarios, plus worker, presentation, ticket, policy and build checks.
+Four clean QEMU boots pass: focused, multiple GPUs, normal 88/88 and deep
+88/88 across 611 iterations. The actual Ring3 shell refuses unsupported native
+launch and malformed commands without register access or an implicit GUI, then
+still runs the normal firmware GUI. No native output is fabricated.
+Tested image SHA-256: 1e880898115770c27bd3b2f068a03427a87c7f025c62f69b56c2ad6b0fe7d77c.
+
+
+## Observed normal-shell native launch
+
+On 2026-11-09, image
+1e880898115770c27bd3b2f068a03427a87c7f025c62f69b56c2ad6b0fe7d77c passed
+physical `gui native` acceptance on Z390 Gaming X/F10, i7-9700K, RX 570
+1002:67DF rev EF/subsystem 1458:2310 and Philips Momentum 272M8 over DisplayPort.
+The 273-entry software freeze remains unchanged. Separate plans, raw logs and
+inspection are in `build/rx570-launch-v27/hardware`. Flashing is operator confirmed
+without USB byte readback.
+
+The normal Ring3 shell issued `gui native` from fresh firmware output. One worker
+request completed the existing primary/rescue reservation, policy admission and
+fixed rebind, then handed the backend framebuffer RO to the normal presenter.
+No manual monitor takeover or presenter handoff command was used. The operator
+confirmed NATIVE27 input on the correctly oriented GUI. Initial app PID 29/input
+1/presenter PID 27 incarnation 23/compositor PID 28 incarnation 24 used native
+output generation 1. Escape and shell help worked. Another `gui native` was
+refused without another GUI or register operation.
+
+Three primary and three rescue presentation cycles passed with six complete
+resource baselines, including two presenter and two compositor exceptions.
+Heartbeats progressed 40 to 44 and 194 to 198. A further GUI was active during
+the delayed primary spin. Its original control thread drained the clients and
+lease before reserved-rescue preparation reads or stores. The fresh blue rescue
+banner was visually confirmed. Normal `gui reconnect` received one Ring3 CONNECT
+and created generation-2 clients without manual rescue presenter handoff.
+Lost app PID 41/input 5/presenter PID 39 incarnation 31/compositor PID 40
+incarnation 32 became app PID 44/input 6/presenter PID 42 incarnation 33/
+compositor PID 43 incarnation 34. The operator confirmed readable RECON27 input.
+Duplicate reconnect after Escape and terminal reconnect were refused.
+
+Ten GUI sessions ran in total: six automated baseline cycles, two visual sessions
+and two active during backend injections. Primary PID 25/incarnation 21 and fresh
+rescue PID 26/incarnation 22 advanced 3 and 6 frames. Exactly 114 register loads,
+four fixed store attempts and two polls occurred: one primary and one rescue
+transaction. Reconnect, repeat launch and exhausted requests added no hardware
+operation, retry or programming-budget rearm. No old application state was restored.
+
+A rescue exception during the last GUI selected headless operation. After the
+original GUI drained, exactly one automatic final CPU capability release occurred.
+The first power query, before status or explicit preparation, collected the
+completed worker and reported shutdown/reboot ready and storage safe. Serial
+shell control survived, no qualified output remained, and retired GOP access
+stayed refused. Five exhausted device requests performed no GPU operation.
+Controlled reboot returned to fresh firmware scanout, stage 0/heartbeats 0/mask 0
+and power readiness. The operator confirmed readable output without boot-menu,
+reset or power intervention.
+
+All eleven active captures passed, preserving 69324 RX/849 host TX bytes.
+Passive capture saved 1696 bytes: two leading NUL bytes remain saved and excluded
+as unattributed; 1694 following bytes capture the post-page-table boot through
+the normal shell. Image-scoped RX totals 71018; all saved raw RX totals 71020.
+Earlier boot/loader output and inter-session gaps are outside coverage. Observed
+UART counters reported zero drops, zero timeouts and no stall. Exact two-stream
+partitions verify complete 441-byte primary and 370-byte rescue worker/GUI
+interleavings without rewriting raw bytes. No host capture assertion correction,
+production change or GPU replay was required.
+
+This qualifies explicit first native GUI launch and fresh client reconnection
+for the retained DisplayPort profile and tested software-owner failures. General
+GPU-owner restart, automatic boot takeover, state restoration, changed modes,
+HDMI, hardware GPU reset/arbitrary hangs and DMA/IRQ/IOMMU isolation remain open.
+Firmware-inherited bus mastering remains unisolated.

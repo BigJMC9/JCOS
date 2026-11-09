@@ -889,6 +889,8 @@ static int shell_execute(ShellState *shell, JcosCapabilityHandle portal_cap,
                 "run PATH           launch a foreground ELF selected in Ring3\n"
                 "play TITLE         play badapple or caramel (Escape stops)\n"
                 "gui                start the R8 graphical session (Escape returns)\n"
+                "gui native         start qualified native display and GUI\n"
+                "gui reconnect      fresh session after display recovery; old app state ends\n"
                 "service CMD worker manage an ordinary background service\n"
                 "  CMD: start stop restart replace status fault\n"
                 "monitor            return input to the kernel emergency monitor\n"
@@ -969,6 +971,20 @@ static int shell_execute(ShellState *shell, JcosCapabilityHandle portal_cap,
             *out_result = JCOS_CONSOLE_SHELL_RESULT_OK;
             return 1;
         }
+    } else if (text_equal(normalized, "gui native")) {
+        if (!portal_write(portal_cap, "STARTING QUALIFIED NATIVE DISPLAY AND GUI - ESCAPE TO RETURN\n")) return 0;
+        shell->active = SHELL_STATE_SUSPENDED;
+        shell_reset_line(shell);
+        *out_action = JCOS_CONSOLE_SHELL_ACTION_NATIVE_GRAPHICS;
+        *out_result = JCOS_CONSOLE_SHELL_RESULT_OK;
+        return 1;
+    } else if (text_equal(normalized, "gui reconnect")) {
+        if (!portal_write(portal_cap, "REQUESTING FRESH GUI AFTER DISPLAY RECOVERY - PREVIOUS APP STATE IS NOT RESTORED\n")) return 0;
+        shell->active = SHELL_STATE_SUSPENDED;
+        shell_reset_line(shell);
+        *out_action = JCOS_CONSOLE_SHELL_ACTION_RECONNECT_GRAPHICS;
+        *out_result = JCOS_CONSOLE_SHELL_RESULT_OK;
+        return 1;
     } else if (text_equal(normalized, "gui")) {
         if (!portal_write(portal_cap, "STARTING R8 GRAPHICAL SESSION - ESCAPE TO RETURN\n")) return 0;
         shell->active = SHELL_STATE_SUSPENDED;

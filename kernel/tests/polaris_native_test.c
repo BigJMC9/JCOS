@@ -145,6 +145,12 @@ void polaris_native_test_run(void) {
             bool bounded=!managed_service_call(&primary.service,&primary.connection,&q,&r);
             report("PRIMARY SPIN / BOUNDED RPC FAILURE",bounded);if (!bounded) goto fail;
         } else {
+            u64 before=pmm_stats().free_pages;
+            bool downgraded=program_borrowed_set_writable(&primary.service.program,pid,true) &&
+                program_borrowed_set_writable(&primary.service.program,pid,false) &&
+                address_space_query_page(process_address_space(&primary.service.program.process),m.virtual_base,&frame,&flags) &&
+                frame==phys_to_frame(storage) && flags==VM_USER && before==pmm_stats().free_pages;
+            report("ACTUAL RW TO RO DOWNGRADE / NO ALLOCATION / WRITE REVOKED",downgraded);if(!downgraded)goto fail;
             bool denied=!polaris_driver_draw(&primary);
             report("PRIMARY STORE THROUGH RO RESERVATION FAULTS",denied);if (!denied) goto fail;
         }

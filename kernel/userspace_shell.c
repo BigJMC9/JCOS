@@ -32,7 +32,7 @@ static bool userspace_shell_recover(void) {
     return true;
 }
 
-static bool userspace_shell_run_session(bool boot_default) {
+static bool userspace_shell_run_session(bool boot_default,const BootInfo *boot) {
     if (!system_console_shell_activate()) return false;
 
     ++g_userspace_shell_sessions;
@@ -100,10 +100,18 @@ static bool userspace_shell_run_session(bool boot_default) {
             continue;
         }
 
-        if (action == JCOS_CONSOLE_SHELL_ACTION_RUN_GRAPHICS) {
+        if (action == JCOS_CONSOLE_SHELL_ACTION_RUN_GRAPHICS ||
+            action == JCOS_CONSOLE_SHELL_ACTION_RECONNECT_GRAPHICS ||
+            action == JCOS_CONSOLE_SHELL_ACTION_NATIVE_GRAPHICS) {
             userspace_shell_cursor_end();
-            if (!graphical_session_run()) {
-                serial_write("R8 GUI: interactive graphical session failed; display was reclaimed.\n");
+            if (!(action == JCOS_CONSOLE_SHELL_ACTION_RUN_GRAPHICS ?
+                    graphical_session_run() : action == JCOS_CONSOLE_SHELL_ACTION_NATIVE_GRAPHICS ?
+                    graphical_session_native(boot) : graphical_session_reconnect())) {
+                serial_write(action == JCOS_CONSOLE_SHELL_ACTION_NATIVE_GRAPHICS ?
+                    "GUI: native launch unavailable; serial shell remains active.\n" :
+                    action == JCOS_CONSOLE_SHELL_ACTION_RECONNECT_GRAPHICS ?
+                    "GUI: reconnection unavailable; serial shell remains active.\n" :
+                    "R8 GUI: interactive graphical session failed; display was reclaimed.\n");
             }
             if (!system_console_shell_activate()) {
                 if (!userspace_shell_recover()) return false;
@@ -135,14 +143,14 @@ static bool userspace_shell_run_session(bool boot_default) {
     }
 }
 
-bool userspace_shell_run(void) {
+bool userspace_shell_run(const BootInfo *boot) {
     g_session_active=true;
-    bool ok=userspace_shell_run_session(false);g_session_active=false;return ok;
+    bool ok=userspace_shell_run_session(false,boot);g_session_active=false;return ok;
 }
 
-bool userspace_shell_run_boot_default(void) {
+bool userspace_shell_run_boot_default(const BootInfo *boot) {
     g_session_active=true;
-    bool ok=userspace_shell_run_session(true);g_session_active=false;return ok;
+    bool ok=userspace_shell_run_session(true,boot);g_session_active=false;return ok;
 }
 
 u64 userspace_shell_session_count(void) {

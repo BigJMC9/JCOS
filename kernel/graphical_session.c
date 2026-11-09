@@ -11,6 +11,7 @@
 #include "ipc.h"
 #include "lib.h"
 #include "process_exit_queue.h"
+#include "polaris_watch.h"
 #include "program.h"
 #include "scheduler.h"
 #include "serial.h"
@@ -38,6 +39,16 @@ static bool g_active;
 static u64 g_writer_pid;
 static u64 g_run_count;
 static u64 g_event_count;
+/* One consumed reconnect ticket,never framebuffer/mapping ownership. */
+static u64 g_lost_output;
+static void remember_lost_output(u64 identity,bool stopped) {
+    g_lost_output=stopped && identity && !framebuffer_output_matches(identity) &&
+        graphical_session_drained() ? identity : 0;
+}
+u64 graphical_session_take_reconnect(void) {
+    u64 lost=g_lost_output;g_lost_output=0;
+    return lost && graphical_session_drained() && !framebuffer_output_matches(lost) ? lost : 0;
+}
 
 static u64 timeout_ticks(void) {
     if (!timer_initialized()) return 0ULL;
@@ -174,6 +185,15 @@ static bool release_writer(void) {
     return true;
 }
 
+bool graphical_session_drained(void) {
+    return !g_active && !g_exit_queue_created && !g_writer_pid &&
+        !program_instance_needs_cleanup(&g_app) && !g_client.active &&
+        !g_client.endpoint_created && !display_surface_valid(&g_surface) &&
+        compositor_service_state() == MANAGED_SERVICE_STOPPED &&
+        display_service_state() == MANAGED_SERVICE_STOPPED &&
+        !display_service_surface_count() && !display_service_input_client_count();
+}
+
 bool graphical_session_cleanup(void) {
     bool retained = g_active || g_exit_queue_created || g_writer_pid ||
         program_instance_needs_cleanup(&g_app) || g_client.active ||
@@ -228,6 +248,7 @@ static bool child_authority_exact(void) {
 }
 
 bool graphical_session_start(void) {
+    g_lost_output=0;
     const char *failure = 0;
 
     if (g_active) {
@@ -241,7 +262,12 @@ bool graphical_session_start(void) {
 
     FramebufferInfo info;
     k_memset(&info, 0, sizeof(info));
-    if (!framebuffer_info(&info)) {
+    FramebufferOutputStatus output;
+    framebuffer_output_status(&output);
+    if (!output.valid || !framebuffer_output_info(&info) ||
+        !framebuffer_output_matches(output.identity) ||
+        (output.kind != FRAMEBUFFER_OUTPUT_FIRMWARE && output.kind != FRAMEBUFFER_OUTPUT_NATIVE &&
+         output.kind != FRAMEBUFFER_OUTPUT_RESCUE)) {
         serial_write("R8 GUI START FAILED: framebuffer descriptor unavailable.\n");
         return false;
     }
@@ -292,7 +318,8 @@ bool graphical_session_start(void) {
         failure = "surface create";
         goto fail;
     }
-    if (!display_service_start()) {
+    bool started = output.identity ? display_service_start_native(output.identity) : display_service_start();
+    if (!started) {
         failure = "display service start";
         goto fail;
     }
@@ -382,6 +409,15 @@ bool graphical_session_start(void) {
     g_active = true;
     g_event_count = 0ULL;
     if (g_run_count != ~0ULL) ++g_run_count;
+    serial_write("GUI OUTPUT GENERATION=");
+    serial_write_u64(display_service_output_identity());
+    serial_write(output.identity ? " NATIVE/RESCUE; FIRMWARE REMAINS RETIRED.\n" : " FIRMWARE.\n");
+    serial_write("GUI CLIENT PID=");serial_write_u64(g_app.process.id);
+    serial_write(" INPUT=");serial_write_u64(display_service_input_client_id(&g_client));
+    serial_write(" PRESENTER PID=");serial_write_u64(display_service_process_id());
+    serial_write(" INC=");serial_write_u64(display_service_incarnation());
+    serial_write(" COMPOSITOR PID=");serial_write_u64(compositor_service_process_id());
+    serial_write(" INC=");serial_write_u64(compositor_service_incarnation());serial_write("\n");
     serial_write("R8 GUI: interactive graphical session active; Escape returns to shell.\n");
     return true;
 
@@ -403,6 +439,7 @@ static bool input_stage_failure(const char *stage) {
 
 bool graphical_session_handle_event(const KeyEvent *event) {
     if (!g_active || !event || !display_service_running() ||
+        !framebuffer_output_matches(display_service_output_identity()) ||
         !compositor_service_running() || !app_blocked() ||
         display_service_focus_slot() != GRAPHICAL_SESSION_SLOT)
         return input_stage_failure("SESSION PRECONDITION");
@@ -590,10 +627,12 @@ u64 graphical_session_event_count(void) {
 
 bool graphical_session_run(void) {
     if (!graphical_session_start()) return false;
+    u64 identity=display_service_output_identity();
     bool normal_exit = false;
 
     for (;;) {
         if (!g_active || !display_service_running() || !compositor_service_running() ||
+            !framebuffer_output_matches(display_service_output_identity()) ||
             g_app.thread.state == THREAD_STATE_DEAD) {
             serial_write("R8 GUI: session component stopped unexpectedly; reclaiming display.\n");
             break;
@@ -617,5 +656,33 @@ bool graphical_session_run(void) {
     }
 
     bool stopped = graphical_session_stop();
+    remember_lost_output(identity,stopped && !normal_exit);
+    if(g_lost_output)serial_write("GUI: display connection lost; gui reconnect requests a fresh session after rescue.\n");
     return normal_exit && stopped;
+}
+/* Explicit first takeover;qualified native output is required before GUI start. */
+bool graphical_session_native(const BootInfo *boot) {
+    if (!boot || !graphical_session_drained() || !polaris_watch_launch(boot)) {
+        serial_write("GUI NATIVE REFUSED: QUALIFIED FIRST TAKEOVER AND DRAINED GUI REQUIRED.\n");return false;
+    }
+    FramebufferOutputStatus output;framebuffer_output_status(&output);
+    if (!output.valid || output.kind!=FRAMEBUFFER_OUTPUT_NATIVE || !output.identity ||
+        !framebuffer_output_matches(output.identity)) return false;
+    serial_write("GUI NATIVE: QUALIFIED BACKEND RO; STARTING FRESH NORMAL GUI.\n");
+    return graphical_session_run();
+}
+/* The normal shell explicitly requests reconnection;Ring3 graphics policy makes
+ * the one-shot admission decision. The old app/input/surface are never reused. */
+bool graphical_session_reconnect(void) {
+    u64 old=graphical_session_take_reconnect();
+    if (!old || !polaris_watch_reconnect(old)) {
+        serial_write("GUI RECONNECT REFUSED: NO ELIGIBLE LOST SESSION OR RECOVERY NOT READY.\n");return false;
+    }
+    FramebufferOutputStatus output;framebuffer_output_status(&output);
+    if (!output.valid || output.kind!=FRAMEBUFFER_OUTPUT_RESCUE || output.identity<=old ||
+        !framebuffer_output_matches(output.identity)) return false;
+    serial_write("GUI RECONNECT OLD OUTPUT=");serial_write_u64(old);
+    serial_write(" NEW OUTPUT=");serial_write_u64(output.identity);
+    serial_write("; FRESH APPLICATION/INPUT/SURFACE; PREVIOUS STATE NOT REPLAYED.\n");
+    return graphical_session_run();
 }

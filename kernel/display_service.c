@@ -18,6 +18,7 @@
 #define DISPLAY_SERVICE_WAIT_SECONDS 2ULL
 
 static ManagedService g_display_service;
+static u64 g_output_identity;
 static DisplaySurface *g_surfaces[JCOS_DISPLAY_SURFACE_CAPACITY];
 static DisplayServiceInputClient *g_input_clients[JCOS_DISPLAY_SURFACE_CAPACITY];
 static u64 g_next_input_client_id = 1ULL;
@@ -66,11 +67,14 @@ static bool input_client_registered(const DisplayServiceInputClient *client) {
 
 static bool lease_release_after_service(u64 owner_pid) {
     DisplayLeaseState lease = display_direct_state();
-    if (lease == DISPLAY_LEASE_KERNEL) return true;
-    if (lease == DISPLAY_LEASE_HANDOFF) return display_direct_abort();
-    if (lease == DISPLAY_LEASE_USER) return owner_pid && display_direct_reclaim(owner_pid);
-    return false;
+    bool released = lease == DISPLAY_LEASE_KERNEL ||
+        (lease == DISPLAY_LEASE_HANDOFF ? display_direct_abort() :
+         lease == DISPLAY_LEASE_USER && owner_pid && display_direct_reclaim(owner_pid));
+    if (released) g_output_identity = 0ULL;
+    return released;
 }
+
+u64 display_service_output_identity(void) { return g_output_identity; }
 
 static bool wait_failed(void) {
     if (!timer_initialized()) return false;
@@ -87,7 +91,7 @@ static bool wait_failed(void) {
     }
 }
 
-bool display_service_start(void) {
+static bool start_output(u64 output_identity) {
     if (display_service_surface_count() || display_service_input_client_count() ||
         compositor_service_state() != MANAGED_SERVICE_STOPPED ||
         managed_service_state(&g_display_service) != MANAGED_SERVICE_STOPPED ||
@@ -99,8 +103,11 @@ bool display_service_start(void) {
     k_memset(&mapping, 0, sizeof(mapping));
     k_memset(&info, 0, sizeof(info));
 
-    if (!display_direct_prepare(DISPLAY_SERVICE_FB_BASE, &mapping, &info, &user_framebuffer))
-        return false;
+    bool prepared = output_identity ?
+        display_direct_prepare_native(output_identity, DISPLAY_SERVICE_FB_BASE, &mapping, &info, &user_framebuffer) :
+        display_direct_prepare(DISPLAY_SERVICE_FB_BASE, &mapping, &info, &user_framebuffer);
+    if (!prepared) return false;
+    g_output_identity = output_identity;
 
     ManagedServiceSpec spec;
     k_memset(&spec, 0, sizeof(spec));
@@ -121,12 +128,14 @@ bool display_service_start(void) {
 
     if (!managed_service_start_ex(&g_display_service, &spec, &extras)) {
         if (managed_service_state(&g_display_service) == MANAGED_SERVICE_STOPPED)
-            (void)display_direct_abort();
+            (void)lease_release_after_service(0);
         return false;
     }
 
     if (display_direct_commit(&g_display_service.program.process)) {
-        if (configure_pixel_masks(&info)) return true;
+        if (framebuffer_output_matches(g_output_identity) &&
+            configure_pixel_masks(&info) &&
+            framebuffer_output_matches(g_output_identity)) return true;
 
         u64 owner_pid = g_display_service.program.process.id;
         ManagedServiceStopResult stopped = managed_service_stop_bounded(&g_display_service);
@@ -143,8 +152,22 @@ bool display_service_start(void) {
     return false;
 }
 
+bool display_service_start(void) { return start_output(0); }
+
+bool display_service_start_native(u64 identity) {
+    FramebufferOutputStatus output;
+    framebuffer_output_status(&output);
+    FramebufferScanoutStatus scanout;
+    framebuffer_scanout_status(&scanout);
+    if (!identity || !output.valid || output.identity != identity ||
+        (output.kind != FRAMEBUFFER_OUTPUT_NATIVE && output.kind != FRAMEBUFFER_OUTPUT_RESCUE) ||
+        scanout.state != FRAMEBUFFER_SCANOUT_RETIRED) return false;
+    return start_output(identity);
+}
+
 bool display_service_surface_attach_slot(DisplaySurface *surface, u32 slot) {
-    if (!surface_slot_valid(slot) || !display_surface_valid(surface) || g_surfaces[slot] ||
+    if (!framebuffer_output_matches(g_output_identity) ||
+        !surface_slot_valid(slot) || !display_surface_valid(surface) || g_surfaces[slot] ||
         !wait_idle() ||
         !g_display_service.program.process_created) return false;
 
@@ -166,6 +189,7 @@ bool display_service_surface_slot_attached(u32 slot) {
 
 bool display_service_surface_slot_mapping_valid(u32 slot) {
     return (
+            framebuffer_output_matches(g_output_identity) &&
             surface_slot_valid(slot) && 
             g_surfaces[slot] &&
             g_display_service.program.process_created &&
@@ -208,7 +232,7 @@ static bool wait_idle(void) {
 }
 
 static bool connect(ManagedServiceConnection *connection) {
-    return connection && wait_idle() &&
+    return connection && framebuffer_output_matches(g_output_identity) && wait_idle() &&
         managed_service_connect_kernel(&g_display_service, connection);
 }
 
@@ -242,7 +266,8 @@ bool display_service_surface_configure(u32 slot, u32 x, u32 y,
 
     FramebufferInfo info;
     k_memset(&info, 0, sizeof(info));
-    if (!framebuffer_info(&info) || !info.width || !info.height ||
+    if (!framebuffer_output_matches(g_output_identity) ||
+        !framebuffer_output_info(&info) || !info.width || !info.height ||
         x >= info.width || y >= info.height ||
         width > info.width - x || height > info.height - y) return false;
 
@@ -250,7 +275,11 @@ bool display_service_surface_configure(u32 slot, u32 x, u32 y,
 }
 
 bool display_service_compose(u32 *out_count, u32 *out_sample) {
-    return compositor_service_compose(out_count, out_sample);
+    if (!out_count || !out_sample) return false;
+    *out_count = 0U;
+    *out_sample = 0U;
+    return framebuffer_output_matches(g_output_identity) &&
+        compositor_service_compose(out_count, out_sample);
 }
 
 static bool focus_request(u32 slot) {

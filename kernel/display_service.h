@@ -32,6 +32,10 @@ typedef struct {
 } DisplayServiceInputClient;
 
 bool display_service_start(void);
+/* Explicit current native/rescue generation only; no GPU operation or GOP
+ * reactivation. Caller must first remove the previous writable owner. */
+bool display_service_start_native(u64 expected_output_identity);
+u64 display_service_output_identity(void);
 bool display_service_stop(void);
 bool display_service_recover(void);
 bool display_service_cleanup(void);

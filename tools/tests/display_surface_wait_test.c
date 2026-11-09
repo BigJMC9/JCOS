@@ -4,12 +4,14 @@
 #include "../../kernel/tests/display_surface_test.c"
 static int irq_disabled, pending_completion, calls, schedules, mode, waiting;
 static u64 ticks;
-static Thread *child(void) { return &g_input_apps[0].thread; }
+static int standalone;
+static Thread *child(void) { return standalone ? &g_app.thread : &g_input_apps[0].thread; }
+static ProcessExitQueue *queue(void) { return standalone ? &g_exit_queue : &g_input_exit_queues[0]; }
 static void complete(void) {
     Thread *t=child();
     t->state=THREAD_STATE_DEAD; t->on_run_queue=false;
     t->interrupt_context_ready=false; t->interrupt_rsp=0; waiting=0;
-    g_input_exit_queues[0].pending_count=1; g_input_exit_queues[0].watch_count=0;
+    queue()->pending_count=1; queue()->watch_count=0;
 }
 void interrupts_disable(void) { irq_disabled=1; }
 void interrupts_enable(void) {
@@ -36,7 +38,7 @@ bool scheduler_yield(void) {
     pending_completion=0; complete(); return true;
 }
 static void reset(int scenario) {
-    mode=scenario; irq_disabled=pending_completion=calls=schedules=waiting=0; ticks=0;
+    standalone=0;mode=scenario; irq_disabled=pending_completion=calls=schedules=waiting=0; ticks=0;
     g_input_exit_queue_created[0]=true;
     g_input_exit_queues[0].pending_count=0; g_input_exit_queues[0].watch_count=1;
     Thread *t=child(); t->state=THREAD_STATE_READY; t->on_run_queue=true;
@@ -63,6 +65,14 @@ int main(void) {
     reset(8); child()->state=THREAD_STATE_BLOCKED; child()->on_run_queue=false; waiting=1;
     CHECK(wait_input_app_dead(0) && schedules==1 && !irq_disabled);
     CHECK(!wait_input_app_dead(2));
-    puts("PASS: production focused-client wait; completion between queue/thread observations, already dead, scheduled wake, blocked IPC, timeout, schedule failure and malformed terminal state.");
+    reset(9);standalone=1;g_exit_queue_created=true;g_exit_queue.pending_count=0;g_exit_queue.watch_count=1;
+    g_app.thread.state=THREAD_STATE_READY;g_app.thread.on_run_queue=true;
+    g_app.thread.interrupt_context_ready=true;g_app.thread.interrupt_rsp=1;waiting=1;
+    CHECK(wait_app_dead() && schedules==1 && !irq_disabled); /* READY may retain its completed IPC wait until resumed. */
+    reset(1);standalone=1;g_exit_queue_created=true;g_exit_queue.pending_count=0;g_exit_queue.watch_count=1;
+    g_app.thread.state=THREAD_STATE_READY;g_app.thread.on_run_queue=true;
+    g_app.thread.interrupt_context_ready=true;g_app.thread.interrupt_rsp=1;
+    CHECK(wait_app_dead() && !irq_disabled); /* completion between queue and thread observations */
+    puts("PASS: production standalone and focused-client waits; completion between queue/thread observations, already dead, scheduled wake, blocked IPC, timeout, schedule failure and malformed terminal state.");
     return 0;
 }

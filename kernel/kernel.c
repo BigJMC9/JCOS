@@ -922,7 +922,7 @@ void kernel_main(BootInfo *boot) {
     system_console_writeln("TYPE help AT THE USER SHELL PROMPT; TYPE monitor OR PRESS ESC FOR THE KERNEL MONITOR.");
     system_console_putchar('\n');
 
-    if (!userspace_shell_run_boot_default()) {
+    if (!userspace_shell_run_boot_default(boot)) {
         serial_write("R7 SHELL: default userspace shell unavailable; entering kernel emergency monitor.\n");
         terminal_set_color(terminal_error_color());
         terminal_writeln("USERSPACE SHELL UNAVAILABLE. ENTERING KERNEL EMERGENCY MONITOR.");
