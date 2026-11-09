@@ -58,6 +58,10 @@ void jcos_main(const JcosProgramStartup *s) {
         JcosU32 op=(JcosU32)q.words[0];
         if (op==POLARIS_NATIVE_PING && !q.words[2] && !q.words[3]) {
             r.words[2]=POLARIS_NATIVE_ROLE;r.words[3]=q.words[1];
+        } else if (op==POLARIS_NATIVE_RETAINED && POLARIS_NATIVE_ROLE==POLARIS_NATIVE_ROLE_PRIMARY &&
+                   !identity && !attempted && !drawn && q.words[1] && !q.words[2] && !q.words[3]) {
+            identity=q.words[1];attempted=1; /* No CONFIG/STEP/EXECUTE/DRAW in this entry. */
+            r.words[2]=POLARIS_NATIVE_RETAINED;r.words[3]=identity;
         } else if (op==POLARIS_NATIVE_CONFIG && !identity && q.words[1] && !drawn) {
             identity=q.words[1];
             witness.values[0][0]=witness.values[1][0]=0;

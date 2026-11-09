@@ -10,7 +10,7 @@
 #include "userspace_shell.h"
 #include "graphical_session.h"
 static SerialWorker worker;
-enum {BEGIN=1,RESCUE,DIAGNOSTIC,POLICY,STATUS,FINISH,POWER,ARM,PRESENT,COLLECT,RECONNECT,LAUNCH};
+enum {BEGIN=1,RESCUE,DIAGNOSTIC,POLICY,STATUS,FINISH,POWER,ARM,PRESENT,COLLECT,RECONNECT,LAUNCH,RESTART};
 static u32 pending_role;
 static bool pending_spin;
 static u64 pending_since;
@@ -51,9 +51,11 @@ static u32 dispatch(void *unused,u32 op,u64 arg) {
         terminal_write(" PERIODIC CALLS=");terminal_write_u64(worker.periodic_calls);terminal_putchar('\n');
         break;
     case PRESENT:polaris_native_present();break;
+    case RESTART:
     case LAUNCH:
     case RECONNECT: {
-        bool connected=op==LAUNCH ? polaris_native_launch((const BootInfo*)arg) : polaris_native_reconnect(arg);
+        if(op==RESTART && pending_role)return 0;
+        bool connected=op==RESTART ? polaris_native_restart() : op==LAUNCH ? polaris_native_launch((const BootInfo*)arg) : polaris_native_reconnect(arg);
         bool terminal=polaris_native_terminal();
         if(terminal)pending_role=0;
         return (connected?SERIAL_WORKER_OK:0)|(terminal?SERIAL_WORKER_STOP:0);
@@ -109,6 +111,14 @@ void polaris_watch_diagnostic(u32 role,bool spin){if(inactive())polaris_native_d
 void polaris_watch_policy_diagnostic(bool spin){if(inactive())polaris_native_policy_diagnostic(spin);else(void)call(POLICY,spin?1:0);}
 void polaris_watch_arm(u32 role,bool spin){if(inactive())terminal_writeln("REFUSED: ACTIVE GRAPHICS WORKER REQUIRED.");else(void)call(ARM,((u64)role<<1)|(spin?1:0));}
 void polaris_watch_status(void){if(inactive())polaris_native_status();else(void)call(STATUS,0);}
+bool polaris_watch_restart(void) {
+    if(inactive())return false;
+    bool accepted=false;
+    if(!serial_worker_call(&worker,RESTART,0,&accepted)) {
+        terminal_writeln("PRIMARY CPU RESTART TRANSPORT INCOMPLETE; NO REPLAY.");return false;
+    }
+    return accepted;
+}
 bool polaris_watch_reconnect(u64 old_output) {
     if(!old_output || inactive())return false;
     bool accepted=false;
@@ -127,6 +137,7 @@ bool polaris_watch_power_prepare(void) {
     return call(POWER,0) && !serial_worker_present(&worker);
 }
 #else
+bool polaris_watch_restart(void){return false;}
 bool polaris_watch_launch(const BootInfo *boot){(void)boot;return false;}
 bool polaris_watch_reconnect(u64 old_output){(void)old_output;return false;}
 void polaris_watch_collect(void){}

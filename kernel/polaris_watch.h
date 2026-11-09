@@ -4,6 +4,7 @@
 void polaris_watch_arm(u32 role,bool spin);
 void polaris_watch_begin(const BootInfo *boot);
 bool polaris_watch_launch(const BootInfo *boot);
+bool polaris_watch_restart(void);
 void polaris_watch_rescue(void);
 void polaris_watch_diagnostic(u32 role,bool spin);
 void polaris_watch_policy_diagnostic(bool spin);

@@ -268,3 +268,38 @@ publication. An ambiguous exchange consumes the attempt without replay.
 The old synchronous executor is now a host-test reference excluded from the
 kernel build. This moves execution sequencing into Ring3 while existing
 privileged device ownership and lifecycle mechanisms remain transitional.
+
+
+A planned primary graphics-driver replacement uses Ring3 policy admission and
+completion with one kernel-enforced attempt. The kernel proves old CPU mappings,
+endpoints and private pages drained before service storage reuse; scanout and the
+device binding remain retained. The new primary receives a RO framebuffer and a
+private adoption entry that cannot reprogram or draw. Its PID/service incarnation
+changes independently of the unchanged output generation. This CPU lifetime
+boundary is not evidence of GPU reset, DMA quiescence or device reassignment.
+
+
+`displayrom` inspects the selected RX 570's bounded firmware ROM RAM copy through
+an isolated Ring3 service. The v11 boot handoff preserves a dedicated LoaderData
+allocation for the boot; only complete copies in reserved RAM map RO/NX. Two
+private IPC endpoints are the only capabilities. The diagnostic neither executes
+ATOM tables nor accesses a device ROM BAR or GPU registers. Parser refusals leave
+the current display path untouched; incomplete CPU teardown retains ownership.
+Software host/audit and four QEMU boots pass, including actual 64-page RO/NX,
+checksum refusal and resource baselines. Physical board-ROM acceptance is recorded below.
+See [firmware ROM connector inventory](AMD_POLARIS_DISPLAY.md#firmware-rom-connector-inventory).
+
+
+Physical v29 acceptance records a complete 118784-byte firmware RAM copy, accepted
+59904-byte first legacy image/ObjectInfo1.3 and four stable CRC32 E2CB542E reports
+around native takeover and controlled reboot. The directory contains DP objects
+3113/3213/3313 and HDMI-A object310C; active port/encoder/link routing remains
+unknown. Native GUI input was visibly correct; four GUI sessions/three complete
+baselines, presenter/compositor exception cleanup, serial/power readiness and
+readable unassisted reboot passed. Only the original primary transaction used
+GPU access:60loads/two stores/one poll. ROM inventory added none. Four active
+captures saved40256RX/395TX plus1694 attributed passive boot bytes;seven leading
+bytes stay saved/excluded. No actual ROM blob export or new rescue/restart case.
+See [physical ROM inventory](AMD_POLARIS_DISPLAY.md#observed-firmware-rom-connector-inventory)
+for offsets, provenance, byte scopes and limitations. Native modes/link programming
+and hardware reset/isolation remain open.

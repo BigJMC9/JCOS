@@ -10,7 +10,8 @@ static SerialWorkerDispatch callback;
 static void *context;
 static unsigned phase,begins,polls,immediate,background,bg_policy,presents,gui_witness,reconnects;
 static u64 ticks;
-static unsigned launches,starts;
+static unsigned launches,starts,restarts;
+static bool restart_accept;
 static bool launch_accept=true,reserve_refused,transport_refused;
 static bool shell,spin_seen,power_refused,gui,terminal_pending;
 void terminal_writeln(const char *s){if(!strcmp(s,"OFF-MONITOR GUI ACTIVE=YES."))++gui_witness;}
@@ -33,6 +34,7 @@ bool serial_worker_call(SerialWorker *w,u32 op,u64 arg,bool *ok){
 }
 void polaris_native_begin(const BootInfo *b){(void)b;++begins;phase=1;}
 bool polaris_native_launch(const BootInfo *b){CHECK(b);++launches;phase=launch_accept?1:0;return launch_accept;}
+bool polaris_native_restart(void){++restarts;return restart_accept;}
 void polaris_native_rescue(void){phase=2;}
 void polaris_native_present(void){++presents;}
 bool polaris_native_reconnect(u64 old){++reconnects;return phase==2&&old==11;}
@@ -49,6 +51,7 @@ void polaris_native_background_diagnostic(u32 role,bool spin){CHECK(role==1||rol
 void polaris_native_background_policy_diagnostic(bool spin){++bg_policy;spin_seen=spin;}
 int main(void){
  BootInfo boot;memset(&boot,0,sizeof(boot));
+ CHECK(!polaris_watch_restart()&&!restarts);
  polaris_watch_collect();polaris_watch_present();CHECK(!presents);CHECK(!polaris_watch_reconnect(11)&&!reconnects);
  polaris_watch_begin(&boot);CHECK(phase==1&&begins==1&&live->active);
  polaris_watch_begin(&boot);CHECK(begins==1);polaris_watch_present();CHECK(presents==1&&phase==1&&live->active);
@@ -79,9 +82,13 @@ int main(void){
  launch_accept=false;CHECK(!polaris_watch_launch(&boot)&&launches==1&&!live->active);
  launch_accept=true;CHECK(polaris_watch_launch(&boot)&&launches==2&&live->active);
  prior_starts=starts;CHECK(!polaris_watch_launch(&boot)&&starts==prior_starts&&launches==2);
+ CHECK(!polaris_watch_restart()&&restarts==1&&live->active);restart_accept=true;
+ CHECK(polaris_watch_restart()&&restarts==2&&live->active);
+ polaris_watch_arm(1,true);CHECK(!polaris_watch_restart()&&restarts==2&&live->active);
  CHECK(polaris_watch_power_prepare()&&!live->active);
  transport_refused=true;CHECK(!polaris_watch_launch(&boot)&&launches==2&&live->active);transport_refused=false;
  CHECK(polaris_watch_power_prepare()&&!live->active);
+ puts("PASS: retained restart worker,inactive/refused/accepted/armed guards,no replay or GPU operation;core doubles.");
  puts("PASS: normal native launch adapter,null/active/reservation/refusal/success/ambiguous-transport paths;one serialized callback,no replay,retained transport failure;no hardware.");
  puts("PASS: production watch adapter serialized ownership,delayed minimum/shell/role guards,cancel/no replay,no background console-probe path,active-begin refusal and stop/power cleanup,read-only collection preserves active/pending backend and reaps terminal worker without core polling;core/IPC doubles,no hardware.");
  return 0;

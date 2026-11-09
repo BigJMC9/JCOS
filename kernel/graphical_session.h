@@ -31,6 +31,7 @@ u64 graphical_session_event_count(void);
 bool graphical_session_run(void);
 /* Explicit first native launch;refusal never starts a firmware GUI implicitly. */
 bool graphical_session_native(const BootInfo *boot);
+bool graphical_session_restart_driver(void);
 /* Consume only a proven drained,lost native GUI generation. No state replay. */
 u64 graphical_session_take_reconnect(void);
 bool graphical_session_reconnect(void);

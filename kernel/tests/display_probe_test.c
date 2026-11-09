@@ -1,4 +1,5 @@
 #include "display_probe_test.h"
+#include "polaris_rom_test.h"
 #include "polaris_mmio_plan_test.h"
 
 #include "display.h"
@@ -408,6 +409,7 @@ void display_probe_test_run(void) {
     bool binding = firmware_binding_vectors();
     bool edid = edid_vectors();
     bool mmio = polaris_mmio_plan_test();
+    bool rom = polaris_rom_test();
     report("DISPLAY IDENTITY / 64-BIT BAR BOUNDS / UNKNOWN SIZES", identity);
     report("BOUNDED CAPABILITY PREFIXES / MALFORMED CHAINS REJECTED", caps);
     report("EXACT FIRMWARE PCI PROVENANCE / UNKNOWN OWNER REFUSED", provenance);
@@ -419,6 +421,6 @@ void display_probe_test_run(void) {
     report("BOUNDED EDID BASE BLOCK / CHECKSUM REFUSALS", edid);
     report("POLARIS BAR5 / COMPLETE RAW DESCRIPTOR / D0 / FOUR-PAGE PLAN", mmio);
     terminal_writeln("MODEL AND INVENTORY CHECK ONLY; NO NATIVE HARDWARE QUALIFICATION.");
-    terminal_writeln(identity && caps && provenance && physical && resources && lists && queries && binding && edid && mmio ?
+    terminal_writeln(identity && caps && provenance && physical && resources && lists && queries && binding && edid && mmio && rom ?
         "DISPLAY PROBE QUALIFICATION TEST: PASS" : "DISPLAY PROBE QUALIFICATION TEST: FAILED");
 }

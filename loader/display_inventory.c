@@ -160,6 +160,32 @@ static void invalidate_bar_inventory(BootInfo *boot) {
     }
 }
 
+static void capture_rom(EFI_BOOT_SERVICES *services, BootInfo *boot, EFI_PCI_IO_PROTOCOL *pci) {
+    const void *source = pci->RomImage;
+    u64 size = pci->RomSize;
+    boot->framebuffer_rom_reported_size = size;
+    boot->framebuffer_rom_status = BOOT_DISPLAY_ROM_ABSENT;
+    if (!source || !size) return;
+    boot->framebuffer_rom_status = BOOT_DISPLAY_ROM_TOO_LARGE;
+    if (size > BOOT_DISPLAY_ROM_LIMIT) return;
+    boot->framebuffer_rom_status = BOOT_DISPLAY_ROM_INVALID;
+    if ((u64)source > ~0ULL - size) return;
+    boot->framebuffer_rom_status = BOOT_DISPLAY_ROM_ALLOCATION;
+    if (!services->AllocatePages) return;
+    EFI_PHYSICAL_ADDRESS base = 0;
+    UINTN pages = (size + 4095U) / 4096U;
+    if (EFI_ERROR(services->AllocatePages(AllocateAnyPages, EfiLoaderData, pages, &base))) return;
+    /* Firmware allocation remains reserved even if the source changes. */
+    boot->framebuffer_rom_base = base;
+    boot->framebuffer_rom_status = BOOT_DISPLAY_ROM_CHANGED;
+    if (pci->RomImage != source || pci->RomSize != size) return;
+    boot_display_zero((void *)(UINTN)base, pages * 4096U);
+    boot_display_copy((void *)(UINTN)base, source, size);
+    if (pci->RomImage != source || pci->RomSize != size) return;
+    boot->framebuffer_rom_size = (u32)size;
+    boot->framebuffer_rom_status = BOOT_DISPLAY_ROM_COPIED;
+}
+
 static void capture_pci(EFI_BOOT_SERVICES *services, BootInfo *boot, EFI_HANDLE handle) {
     EFI_PCI_IO_PROTOCOL *pci = selected_controller(services, handle);
     if (!pci) return;
@@ -194,6 +220,8 @@ static void capture_pci(EFI_BOOT_SERVICES *services, BootInfo *boot, EFI_HANDLE 
     boot->framebuffer_pci_class_revision = config[2];
     boot->framebuffer_pci_subsystem = config[11U];
     boot->framebuffer_pci_valid = 1U;
+    /* Exact selected AMD controller, RAM copy only; no PCI/ROM BAR writes. */
+    if (config[0] == 0x67DF1002U) capture_rom(services, boot, pci);
 }
 
 void loader_capture_display_inventory(EFI_BOOT_SERVICES *services, BootInfo *boot,

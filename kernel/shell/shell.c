@@ -9,6 +9,7 @@
 #include "polaris_read_profile.h"
 #include "polaris_live_capture.h"
 #include "polaris_watch.h"
+#include "polaris_rom.h"
 #include "pmm.h"
 #include "vmm.h"
 #include "address_space.h"
@@ -5704,6 +5705,8 @@ static void command_display_readiness(void) {
     polaris_read_profile_print(g_boot);
 }
 
+static void command_display_rom(void) {polaris_rom_print(g_boot);}
+
 static void command_display_probe(void) {
     display_probe_print(g_boot);
 }
@@ -6649,6 +6652,8 @@ static void shell_registry_init(void) {
         SHELL_GROUP_HARDWARE, command_polaris_capture, 0, true);
     shell_add_command("display-readiness", "display-readiness", "RX 570 read qualification blockers; no GPU access",
         SHELL_GROUP_HARDWARE, command_display_readiness, 0, true);
+    shell_add_command("displayrom", "displayrom", "Ring3 inventory of selected firmware ROM RAM copy; no GPU access",
+        SHELL_GROUP_HARDWARE, command_display_rom, 0, true);
     shell_add_command("displayprobe", "displayprobe", "read-only display PCI/GOP inventory; no native takeover",
         SHELL_GROUP_HARDWARE, command_display_probe, 0, true);
     shell_add_command("serialinfo", "serialinfo", "show COM1 settings and bounded transmit/drop counters",

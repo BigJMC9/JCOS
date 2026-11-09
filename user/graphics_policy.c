@@ -1,16 +1,16 @@
 #include "graphics_policy.h"
-enum { IDLE,ARMED,PRIMARY,RECOVERING,RESCUE,CLOSED };
+enum { IDLE,ARMED,PRIMARY,RECOVERING,RESCUE,CLOSED,RESTARTING };
 JcosU64 graphics_policy_decide(GraphicsPolicy *p,JcosU64 session,JcosU64 sequence,JcosU64 snapshot) {
     JcosU64 event=snapshot&0xFFULL,facts=snapshot&GRAPHICS_POLICY_FACTS;
     if (!p || !session || !sequence ||
         snapshot!=(GRAPHICS_POLICY_VERSION|event|facts) ||
-        event<GRAPHICS_POLICY_BEGIN || event>GRAPHICS_POLICY_CLIENT_RECONNECT ||
+        event<GRAPHICS_POLICY_BEGIN || event>GRAPHICS_POLICY_PRIMARY_RESTARTED ||
         (event==GRAPHICS_POLICY_OBSERVE && (facts&~GRAPHICS_POLICY_OBSERVE_FACTS)) ||
-        (event!=GRAPHICS_POLICY_OBSERVE && event!=GRAPHICS_POLICY_CLIENT_RECONNECT && facts)) return GRAPHICS_POLICY_REJECT;
+        (event!=GRAPHICS_POLICY_OBSERVE && event!=GRAPHICS_POLICY_CLIENT_RECONNECT && event!=GRAPHICS_POLICY_RESTART_PRIMARY && facts)) return GRAPHICS_POLICY_REJECT;
     if (event==GRAPHICS_POLICY_BEGIN) {
         if ((p->stage!=IDLE && p->stage!=CLOSED) || session<=p->session || sequence!=1)
             return GRAPHICS_POLICY_REJECT;
-        p->session=session;p->sequence=sequence;p->stage=ARMED;p->client_reconnected=0;
+        p->session=session;p->sequence=sequence;p->stage=ARMED;p->client_reconnected=0;p->driver_restarted=0;
         return GRAPHICS_POLICY_ACCEPT;
     }
     if (p->stage==IDLE || session!=p->session || p->sequence==~0ULL ||
@@ -21,6 +21,11 @@ JcosU64 graphics_policy_decide(GraphicsPolicy *p,JcosU64 session,JcosU64 sequenc
     else if (event==GRAPHICS_POLICY_PRIMARY && p->stage==ARMED) {next=PRIMARY;action=GRAPHICS_POLICY_KEEP;}
     else if (event==GRAPHICS_POLICY_RESCUED && p->stage==RECOVERING) {next=RESCUE;action=GRAPHICS_POLICY_KEEP;}
     else if (event==GRAPHICS_POLICY_REQUEST_RESCUE && p->stage==PRIMARY) {next=RECOVERING;action=GRAPHICS_POLICY_RECOVER;}
+    else if (event==GRAPHICS_POLICY_RESTART_PRIMARY && p->stage==PRIMARY &&
+             !p->driver_restarted && facts==GRAPHICS_POLICY_RESTART_FACTS) {
+        p->driver_restarted=1;next=RESTARTING;action=GRAPHICS_POLICY_RESTART;
+    }
+    else if (event==GRAPHICS_POLICY_PRIMARY_RESTARTED && p->stage==RESTARTING) {next=PRIMARY;action=GRAPHICS_POLICY_KEEP;}
     else if (event==GRAPHICS_POLICY_CLIENT_RECONNECT && p->stage==RESCUE &&
              !p->client_reconnected && facts==GRAPHICS_POLICY_RECONNECT_FACTS) {
         p->client_reconnected=1;action=GRAPHICS_POLICY_CONNECT;

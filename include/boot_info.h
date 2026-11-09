@@ -11,7 +11,15 @@ typedef signed int         s32;
 typedef signed long long   s64;
 
 #define BOOT_INFO_MAGIC 0x4A434F53424F4F54ULL  /* "JCOSBOOT" */
-#define BOOT_INFO_VERSION 10U
+#define BOOT_INFO_VERSION 11U
+#define BOOT_DISPLAY_ROM_LIMIT (256U * 1024U)
+#define BOOT_DISPLAY_ROM_NONE 0U
+#define BOOT_DISPLAY_ROM_ABSENT 1U
+#define BOOT_DISPLAY_ROM_TOO_LARGE 2U
+#define BOOT_DISPLAY_ROM_INVALID 3U
+#define BOOT_DISPLAY_ROM_ALLOCATION 4U
+#define BOOT_DISPLAY_ROM_CHANGED 5U
+#define BOOT_DISPLAY_ROM_COPIED 6U
 #define BOOT_DISPLAY_BAR_COUNT 6U
 #define BOOT_DISPLAY_EDID_BYTES 128U
 #define BOOT_DISPLAY_BAR_VALID    (1U << 0)
@@ -145,6 +153,13 @@ typedef struct {
     BootDisplayBarAudit framebuffer_bar_audit[BOOT_DISPLAY_BAR_COUNT];
     BootDisplayBarQuery framebuffer_bar_queries[BOOT_DISPLAY_BAR_COUNT];
     u32 framebuffer_bar_query_index[BOOT_DISPLAY_BAR_COUNT];
+    /* EfiLoaderData copy, never an option-ROM BAR or a firmware pointer.
+     * Storage remains reserved for the boot, even if the source changes.
+     * Only COPIED with a bounded nonzero size permits a RO user mapping. */
+    u64 framebuffer_rom_base;
+    u64 framebuffer_rom_reported_size;
+    u32 framebuffer_rom_size;
+    u32 framebuffer_rom_status;
 } BootInfo;
 
 _Static_assert(__builtin_offsetof(BootInfo, kernel_stack_top) == 0, "entry stack offset");
@@ -157,6 +172,7 @@ _Static_assert(__builtin_offsetof(BootInfo, framebuffer_bar_audit) == 480, "GOP 
 _Static_assert(sizeof(BootDisplayBarQuery) == 120, "boot display query layout");
 _Static_assert(__builtin_offsetof(BootInfo, framebuffer_bar_queries) == 864, "boot query offset");
 _Static_assert(__builtin_offsetof(BootInfo, framebuffer_bar_query_index) == 1584, "boot query binding offset");
-_Static_assert(sizeof(BootInfo) == 1608, "boot handoff v10 layout");
+_Static_assert(__builtin_offsetof(BootInfo, framebuffer_rom_base) == 1608, "ROM handoff offset");
+_Static_assert(sizeof(BootInfo) == 1632, "boot handoff v11 layout");
 
 #endif

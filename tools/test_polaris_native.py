@@ -8,10 +8,10 @@ exe=out/("polaris-native-controller.exe" if os.name=="nt" else "polaris-native-c
 subprocess.run([a.cc,"-std=c11","-O2","-Wall","-Wextra","-Werror","-DJCOS_POLARIS_NATIVE_WRITE=1","-Ikernel","-Iinclude",
  "tools/tests/polaris_native_controller_test.c","kernel/polaris_native.c","kernel/graphics_supervisor.c","user/graphics_policy.c","kernel/polaris_program.c","kernel/polaris_plane.c",
  "kernel/polaris_vram.c","kernel/polaris_observation.c","user/drivers/amd_polaris_plane.c","kernel/lib.c","-o",str(exe)],cwd=root,check=True)
-for case in range(136):
+for case in range(165):
     r=subprocess.run([str(exe),str(case)],stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
     if r.returncode: print(r.stdout);r.check_returncode()
-print("PASS: production native controller happy path,35 failures,2 watchdog and3 power-cleanup cases,16 heartbeat/diagnostic/progress and18 Ring3 policy/transport/identity/unsafe-action and5 core policy-failure injection and16 supervised GUI/deferred-rescue and8 terminal CPU-drain and18 explicit GUI reconnect/unsafe-CONNECT and14 normal native launch cases; retirement/order,exclusive writers,one reserved rescue,quarantine,no rearm and retained failed cleanup; no hardware.")
+print("PASS: production native controller happy path,35 failures,2 watchdog and3 power-cleanup cases,16 heartbeat/diagnostic/progress and18 Ring3 policy/transport/identity/unsafe-action and5 core policy-failure injection and16 supervised GUI/deferred-rescue and8 terminal CPU-drain and18 explicit GUI reconnect/unsafe-CONNECT and14 normal native launch and29 retained primary restart cases; retirement/order,exclusive writers,one reserved rescue,quarantine,no rearm and retained failed cleanup; no hardware.")
 
 # The controller uses service doubles; separately execute the real RPC helpers
 # with corrupt reply envelopes, ACK failures and unrelated-service witnesses.

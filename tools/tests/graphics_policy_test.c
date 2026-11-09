@@ -58,7 +58,7 @@ int main(void){
  GraphicsPolicy p={0};
  CHECK(graphics_policy_decide(&p,8,1,GRAPHICS_POLICY_VERSION|GRAPHICS_POLICY_BEGIN)==GRAPHICS_POLICY_ACCEPT);
  CHECK(graphics_policy_decide(&p,9,1,GRAPHICS_POLICY_VERSION|GRAPHICS_POLICY_BEGIN)==GRAPHICS_POLICY_REJECT);
- for(unsigned event=1;event<=7;++event){
+ for(unsigned event=1;event<=9;++event){
    GraphicsPolicy q=p;
    CHECK(graphics_policy_decide(&q,7,2,GRAPHICS_POLICY_VERSION|event)==GRAPHICS_POLICY_REJECT);
    CHECK(graphics_policy_decide(&q,8,1,GRAPHICS_POLICY_VERSION|event)==GRAPHICS_POLICY_REJECT);
@@ -100,7 +100,7 @@ int main(void){
    if(test<3||test==6)CHECK(count==after);
  }
  unsigned reconnect_cases=0;
- for(unsigned stage=0;stage<5;++stage)for(unsigned flags=0;flags<128;++flags){
+ for(unsigned stage=0;stage<5;++stage)for(unsigned flags=0;flags<512;++flags){
    GraphicsPolicy q={0};
    CHECK(graphics_policy_decide(&q,1,1,GRAPHICS_POLICY_VERSION|GRAPHICS_POLICY_BEGIN)==GRAPHICS_POLICY_ACCEPT);
    if(stage>=1)CHECK(take(&q,GRAPHICS_POLICY_PRIMARY,0)==GRAPHICS_POLICY_KEEP);
@@ -116,9 +116,37 @@ int main(void){
    }else CHECK(decision==GRAPHICS_POLICY_REJECT&&!memcmp(&q,&before,sizeof(q)));
    ++reconnect_cases;
  }
+ unsigned restart_cases=0;
+ for(unsigned stage=0;stage<7;++stage)for(unsigned flags=0;flags<512;++flags){
+   GraphicsPolicy q={0};
+   CHECK(graphics_policy_decide(&q,1,1,GRAPHICS_POLICY_VERSION|GRAPHICS_POLICY_BEGIN)==GRAPHICS_POLICY_ACCEPT);
+   if(stage>=1)CHECK(take(&q,GRAPHICS_POLICY_PRIMARY,0)==GRAPHICS_POLICY_KEEP);
+   if(stage>=2&&stage<=4)CHECK(take(&q,GRAPHICS_POLICY_REQUEST_RESCUE,0)==GRAPHICS_POLICY_RECOVER);
+   if(stage>=3&&stage<=4)CHECK(take(&q,GRAPHICS_POLICY_RESCUED,0)==GRAPHICS_POLICY_KEEP);
+   if(stage==4)CHECK(take(&q,GRAPHICS_POLICY_CLOSE,0)==GRAPHICS_POLICY_HEADLESS);
+   if(stage>=5)CHECK(take(&q,GRAPHICS_POLICY_RESTART_PRIMARY,GRAPHICS_POLICY_RESTART_FACTS)==GRAPHICS_POLICY_RESTART);
+   if(stage==6)CHECK(take(&q,GRAPHICS_POLICY_PRIMARY_RESTARTED,0)==GRAPHICS_POLICY_KEEP);
+   GraphicsPolicy before=q;u64 facts=(u64)flags<<8;u64 decision=take(&q,GRAPHICS_POLICY_RESTART_PRIMARY,facts);
+   if(stage==1&&facts==GRAPHICS_POLICY_RESTART_FACTS){
+     CHECK(decision==GRAPHICS_POLICY_RESTART&&q.driver_restarted);before=q;
+     CHECK(take(&q,GRAPHICS_POLICY_RESTART_PRIMARY,facts)==GRAPHICS_POLICY_REJECT&&!memcmp(&q,&before,sizeof(q)));
+     CHECK(take(&q,GRAPHICS_POLICY_OBSERVE,all)==GRAPHICS_POLICY_REJECT&&!memcmp(&q,&before,sizeof(q)));
+     CHECK(take(&q,GRAPHICS_POLICY_PRIMARY_RESTARTED,GRAPHICS_POLICY_OUTPUT_STABLE)==GRAPHICS_POLICY_REJECT&&!memcmp(&q,&before,sizeof(q)));
+     CHECK(take(&q,GRAPHICS_POLICY_PRIMARY_RESTARTED,0)==GRAPHICS_POLICY_KEEP);
+     before=q;CHECK(take(&q,GRAPHICS_POLICY_RESTART_PRIMARY,facts)==GRAPHICS_POLICY_REJECT&&!memcmp(&q,&before,sizeof(q)));
+     CHECK(take(&q,GRAPHICS_POLICY_OBSERVE,all)==GRAPHICS_POLICY_KEEP);
+     CHECK(take(&q,GRAPHICS_POLICY_REQUEST_RESCUE,0)==GRAPHICS_POLICY_RECOVER);
+     CHECK(take(&q,GRAPHICS_POLICY_RESCUED,0)==GRAPHICS_POLICY_KEEP);
+     CHECK(take(&q,GRAPHICS_POLICY_CLIENT_RECONNECT,GRAPHICS_POLICY_RECONNECT_FACTS)==GRAPHICS_POLICY_CONNECT);
+   }else CHECK(decision==GRAPHICS_POLICY_REJECT&&!memcmp(&q,&before,sizeof(q)));
+   ++restart_cases;
+ }
+ CHECK(restart_cases==3584);
+ puts("PASS:3584 restart stage/fact cases,one primary replacement,pending/duplicate refusal and preserved reserved-rescue/reconnect path.");
+ GraphicsPolicy old_v2={0};CHECK(graphics_policy_decide(&old_v2,1,1,(2ULL<<56)|GRAPHICS_POLICY_BEGIN)==GRAPHICS_POLICY_REJECT&&!old_v2.session);
  GraphicsPolicy legacy={0};CHECK(graphics_policy_decide(&legacy,1,1,(1ULL<<56)|GRAPHICS_POLICY_BEGIN)==GRAPHICS_POLICY_REJECT&&!legacy.session);
- CHECK(reconnect_cases==640);
- printf("PASS:640 reconnect stage/fact cases,one-shot reconnection,no replay/ledger change on refusal,legacy protocol refused.\n");
+ CHECK(reconnect_cases==2560);
+ printf("PASS:2560 reconnect stage/fact cases,one-shot reconnection,no replay/ledger change on refusal,legacy protocol refused.\n");
  printf("PASS: %u malformed envelope-bit refusals,64 stage/health observations,stale session/sequence and closed-state refusal;8 production-client identity/transport/corrupt/local-validation/no-replay cases;no hardware.\n",envelopes);
  CHECK(observations==64);
  return 0;

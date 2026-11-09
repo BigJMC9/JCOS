@@ -4,9 +4,9 @@ static u64 g_next_session;
 bool graphics_supervisor_request(GraphicsSupervisorSession *s,u32 event,u64 facts,u64 *action) {
     if (!action) return false;
     *action=GRAPHICS_POLICY_REJECT;
-    if (!s || s->failed || !s->session || event<GRAPHICS_POLICY_BEGIN || event>GRAPHICS_POLICY_CLIENT_RECONNECT ||
+    if (!s || s->failed || !s->session || event<GRAPHICS_POLICY_BEGIN || event>GRAPHICS_POLICY_PRIMARY_RESTARTED ||
         (facts&~GRAPHICS_POLICY_FACTS) || (event==GRAPHICS_POLICY_OBSERVE && (facts&~GRAPHICS_POLICY_OBSERVE_FACTS)) ||
-        (event!=GRAPHICS_POLICY_OBSERVE && event!=GRAPHICS_POLICY_CLIENT_RECONNECT && facts)) return false;
+        (event!=GRAPHICS_POLICY_OBSERVE && event!=GRAPHICS_POLICY_CLIENT_RECONNECT && event!=GRAPHICS_POLICY_RESTART_PRIMARY && facts)) return false;
     if (!supervisor_running() || supervisor_process_id()!=s->process_id ||
         supervisor_thread_id()!=s->thread_id || s->sequence==~0ULL) {s->failed=true;return false;}
     /* Consume the request before delivery. Ambiguous results are never replayed. */
@@ -14,7 +14,7 @@ bool graphics_supervisor_request(GraphicsSupervisorSession *s,u32 event,u64 fact
     bool ok=supervisor_graphics_exchange(s->session,++s->sequence,
         GRAPHICS_POLICY_VERSION|(u64)event|facts,&decision) &&
         supervisor_process_id()==s->process_id && supervisor_thread_id()==s->thread_id &&
-        decision<=GRAPHICS_POLICY_CONNECT;
+        decision<=GRAPHICS_POLICY_RESTART;
     if (!ok) {s->failed=true;return false;}
     *action=decision;return true;
 }

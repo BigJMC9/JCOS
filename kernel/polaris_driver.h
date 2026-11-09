@@ -11,10 +11,13 @@ typedef struct {
      * service's public PID accessor intentionally exposes running state only. */
     u64 process_id;
     bool program_attempted;
+    bool retained_only;
 } PolarisDriver;
 /* Zero-initialized retained storage. Preload independent ELF/font/IPC/pages,
  * with a RO borrowed framebuffer; no allocation is needed to enable drawing. */
 bool polaris_driver_reserve(PolarisDriver *driver,u32 role,const ProgramBorrowedMappingSpec *readonly_mapping);
+/* Consume before RPC;enforce the complete borrowed range RO before adoption. */
+bool polaris_driver_attach_retained(PolarisDriver *driver,u64 output_identity);
 bool polaris_driver_plan(PolarisDriver *driver,u64 observation_id,const PolarisPlaneWitness *witness,PolarisProgramPlan *out);
 /* One finite Ring3-driven transaction on the existing private endpoints.
  * Kernel validates every operation; completion must match its own gate.

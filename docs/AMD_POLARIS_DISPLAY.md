@@ -1540,3 +1540,270 @@ for the retained DisplayPort profile and tested software-owner failures. General
 GPU-owner restart, automatic boot takeover, state restoration, changed modes,
 HDMI, hardware GPU reset/arbitrary hangs and DMA/IRQ/IOMMU isolation remain open.
 Firmware-inherited bus mastering remains unisolated.
+
+
+## Retained primary driver restart
+
+`gui restart-driver` requests one explicit replacement of the primary Ring3
+process and starts a fresh GUI on the same validated native output. It applies
+after `gui native` has parked the primary framebuffer mapping RO and the
+original GUI has fully stopped. The kernel requires intact output, the KERNEL
+lease, drained GUI resources and writer pins, the exact current policy/rescue
+identities, and fresh primary/rescue heartbeats. An armed diagnostic, an active
+GUI, firmware output, rescue output or an exhausted attempt refuses admission.
+
+Ring3 policy version 3 admits one restart and enters a pending state. The kernel
+consumes its attempt before RPC. It stops and fully reaps the old primary before
+reusing its service storage, then loads a fresh primary with new PID, incarnation,
+endpoints and private pages. The framebuffer is borrowed RO; the scanout buffer,
+kernel device binding and independently reserved rescue remain retained.
+
+The fresh primary enters the private version-3 RETAINED operation. The kernel
+enforces RO permissions across the complete borrowed mapping before delivery and
+consumes programming authority. The user process also refuses CONFIG, STEP,
+EXECUTE, DRAW and duplicate adoption in this entry. Fresh heartbeat and exact
+policy completion are required before a new GUI starts. Scanout generation stays
+fixed while CPU driver and GUI identities change. No application state is replayed.
+No register load/store, GPU reset, new mode, IRQ/DMA operation or programming
+budget is added. The original primary/rescue transaction limits remain once per
+boot. A later primary failure can still use the original reserved rescue.
+
+Uncertain transport, failed teardown, failed replacement or failed completion
+cannot be retried through this command. The kernel revokes output and retains
+quarantine or incomplete CPU ledgers, with serial diagnostics. This qualifies
+neither hardware GPU restart nor DMA quiescence. Automatic restart of an already
+hung primary is outside this entry; its existing qualified path remains rescue.
+The fresh GUI also starts without the previous app/input/surface state.
+
+The software record is frozen in `build/rx570-restart-v28`; the subsequent
+physical retained-primary restart is recorded below. Earlier image passes remain
+separate evidence. Changed modes, HDMI and arbitrary hardware hangs are open.
+
+The bootloader banner now reads `JA OS UEFI loader`. The boot ABI and image layout
+are unchanged; the sample hello application keeps its existing program name.
+
+Software checks pass 165 controller scenarios, including 29 retained restart
+cases, plus 3584 restart and 2560 reconnect policy combinations. Actual Ring3 RAM
+adoption, whole-range RO permissions and programming/drawing refusal pass.
+Four clean QEMU boots pass: focused, multiple GPUs, normal 88/88 and deep 88/88
+across 611 iterations. Actual firmware restart refusal leaves the shell usable.
+The built loader contains the JA OS banner and no legacy Hello OS banner.
+Tested image SHA-256: 01787cd072a2cfb6e92829fa82a9c06120b5f8048419776ce652774685ca9ce1.
+
+
+## Observed retained primary CPU-driver restart
+
+On 2026-11-09, image
+01787cd072a2cfb6e92829fa82a9c06120b5f8048419776ce652774685ca9ce1 passed
+physical retained-primary replacement on Z390 Gaming X/F10, i7-9700K, RX 570
+1002:67DF rev EF/subsystem 1458:2310 and Philips Momentum 272M8 over DisplayPort.
+The 278-entry software record and image remain unchanged. Separate plans, raw
+logs and inspection are in `build/rx570-restart-v28/hardware`. Flashing is operator
+confirmed without USB byte readback.
+
+Normal `gui native` completed the original primary transaction and opened output
+1. The operator confirmed readable NATIVE28 input. After Escape and full GUI
+teardown, `gui restart-driver` stopped primary PID 27/incarnation
+23 and loaded PID 32/incarnation 27 through
+the RO retained entry. It started a fresh GUI on the same output generation 1,
+with visible RSTART28 input. Initial app PID 31/input 1/presenter PID 29 incarnation 25/compositor PID 30 incarnation 26
+became app PID 35/input 2/presenter PID 33 incarnation 28/compositor PID 34 incarnation 29.
+The restart phase contains no GPU preparation reads, executor reads or stores.
+Duplicate restart after Escape was refused without another GUI or transaction.
+The driver and policy use the new private version-3 retained protocol; software
+checks cover whole-range RO permissions and refused CONFIG/EXECUTE/DRAW requests.
+
+Three primary and three rescue presentation cycles passed, restoring six complete
+resource baselines, with two presenter and two compositor exception cases.
+Heartbeats progressed 74 to 78 and
+187 to 190. A GUI was active during
+the delayed hang of the replacement primary. Original GUI clients drained before
+rescue register access. The reserved rescue PID 28/incarnation
+24 restored the blue banner, visually confirmed. Its initial
+reservation identity is absent from the journal: retaining the original rescue
+is established by unchanged implementation and controller tests, rather than a
+directly observed initial/final rescue-identity comparison.
+
+Normal `gui reconnect` obtained one Ring3 CONNECT for output 1 to 2 and opened
+fresh clients without state replay or GPU operation. Lost
+app PID 47/input 6/presenter PID 45 incarnation 36/compositor PID 46 incarnation 37
+became app PID 50/input 7/presenter PID 48 incarnation 38/compositor PID 49 incarnation 39.
+The operator confirmed readable RECON28 input. Duplicate reconnect after Escape,
+terminal reconnect and terminal restart were refused.
+
+Eleven GUI sessions ran: six automated baseline cycles, three visual sessions and
+two active during backend injections. Exactly 114 register loads, four fixed
+store attempts and two polls occurred in one primary and one rescue transaction;
+frame deltas were 3 and 6. Restart, reconnect and exhausted
+requests added no hardware operation, replay or programming-budget rearm.
+
+An exception in the active rescue driver selected headless operation. The OS
+retained serial control. After original GUI teardown, exactly one automatic final
+CPU capability release occurred. The first power query, before status or explicit
+preparation, reported shutdown/reboot ready and storage safe; the completed worker
+was collected. Five exhausted device requests refused further GPU operation.
+Controlled reboot returned fresh firmware scanout/status 0/heartbeats 0/mask 0 and
+restart-attempt NO. The operator confirmed a readable prompt without boot-menu,
+reset or power intervention.
+
+All twelve active captures passed: 72171 RX/910 host TX bytes.
+Passive capture saved 1827 bytes: 133 leading bytes remain saved and excluded as
+unattributed; 1694 following bytes cover post-page-table boot through the shell.
+Image-scoped RX totals 73865; all saved raw RX totals 73998.
+Earlier boot/loader and inter-session gaps are excluded. UART observations report
+zero drops, zero timeouts and no stall. Exact two-stream partitions verify the
+441-byte primary and 370-byte rescue worker/GUI interleavings; raw bytes are
+unchanged. No active host assertion correction, production change or GPU replay
+was required. One offline read-only document query had a Windows quoting error;
+its harmless correction is recorded separately.
+
+The loader binary contains `JA OS UEFI loader` with the legacy banner absent.
+This hardware pass qualifies one planned healthy CPU-owner replacement on the
+retained DisplayPort profile, followed by the existing rescue and serial fallback
+paths. General GPU reset/restart, arbitrary hardware/interconnect hangs, changed
+modes, HDMI, automatic boot takeover, application-state restoration and physical
+DMA/IRQ/IOMMU containment remain open. Inherited bus mastering stays unisolated.
+
+
+## Firmware ROM connector inventory
+
+`displayrom` starts a separate read-only Ring3 parser for the selected RX 570's
+firmware-provided ROM RAM copy. This is preparation for native DP/HDMI modesetting;
+it does not establish a new display mode or an active connector.
+
+Before ExitBootServices, the loader copies at most 256 KiB from the exact selected
+1002:67DF controller's PCI I/O RomImage/RomSize RAM buffer. It performs no ROM BAR
+access, PCI write, Attributes call, decompression or firmware execution. Absence,
+oversize, allocation failure or source change leaves optional inventory unavailable
+and does not block boot. The boot handoff is version 11/1632 bytes with every old
+field offset and the stack-at-offset-zero contract preserved. Matched loader and
+kernel must be deployed together.
+
+The copy is a dedicated EfiLoaderData allocation, excluded from the conventional
+memory allocator and retained for the boot. Even a changed-source allocation
+remains reserved. Only a complete bounded copy inside the recorded LoaderData
+extent can be mapped to the parser. Overlapping non-loader descriptors refuse.
+The process receives that RAM read-only and non-executable plus two private IPC
+endpoints. It receives no device, framebuffer, IRQ, DMA or I/O-port authority.
+All borrowed pages are checked independently; failed CPU teardown retains its
+service ledger and prevents storage reuse. The original source allocation is
+never freed by the diagnostic process.
+
+The userspace decoder validates the first uncompressed legacy PCI image only:
+ROM/PCIR signatures, PCIR identity and length, image checksum, ATOM header and
+master-data revision 1.1, ObjectInfo revisions 1.1 through 1.3, complete table
+extents, at most 16 unique connector objects, reserved fields/bits and bounded
+link/record offsets. It reports raw object IDs and DP/HDMI-A inventory labels.
+It does not follow connector records, select GPIO/AUX/I2C resources, choose a
+link/encoder, interpret command tables, or program hardware. Unsupported images
+and revisions report a parser status with no partial table results. CRC32 names
+the copied bytes for diagnostics; it is not authenticity or firmware trust proof.
+
+Status values: 0 accepted, 1 size, 2 ROM signature, 3 PCIR header, 4 identity,
+5 legacy image length/type, 6 checksum, 7 ATOM header, 8 revision, 9 table extent,
+10 connector directory. Capture status 6 means copied RAM, independently of
+parser status 0. Missing/unsupported data is an expected refusal outcome.
+
+The layout/ID facts are pinned to Linux v6.12 commit
+adc218676eef25575469234709c2d87185ca223a in `POLARIS_ROM_REVIEW.json`.
+`tools/audit_polaris_rom.py --source-dir build/rx570-rom-v29/references`
+checks four source hashes and independent structure/ID facts. UEFI's
+[PCI I/O protocol](https://uefi.org/specs/UEFI/2.10/14_Protocols_PCI_Bus_Support.html#efi-pci-io-protocol)
+defines RomImage as an in-memory copy. The reviewed ATOM definitions are in
+[atombios.h](https://github.com/torvalds/linux/blob/adc218676eef25575469234709c2d87185ca223a/drivers/gpu/drm/amd/include/atombios.h)
+and the connector labels in
+[ObjectID.h](https://github.com/torvalds/linux/blob/adc218676eef25575469234709c2d87185ca223a/drivers/gpu/drm/radeon/ObjectID.h).
+These references provide format facts, not JA OS hardware qualification.
+
+Software checks pass 513 protected-page prefix cases, 26 malformed vectors,
+three revisions, duplicate/identity/checksum/size guards, 66 mocked loader cases,
+the pinned-source audit and existing native/MMIO/framebuffer regressions. Four
+clean final-image QEMU boots pass: focused, multiple GPUs, normal 88/88 and deep
+88/88 across 611 iterations. Actual Ring3 fixtures exercise the full 64-page RO/NX
+mapping, DP/HDMI objects, checksum refusal and complete CPU resource restoration.
+No GPU is used by those ROM tests. No registry slot was added. The archive has
+27 files/21 ELFs; all 26 previous files, including 20 ELFs, match v28 exactly.
+The new parser remains absent from the kernel ELF.
+
+Tested image SHA-256: d0a7e9cb4d07b05d834b4323f26a2b871b6c3e542dd2a1f629d455d3d30f97a8.
+Software evidence is frozen in `build/rx570-rom-v29/validation.json`.
+The subsequent physical firmware-copy and board-directory acceptance is below.
+The existing v28 hardware record stays separate; native timing/link programming,
+HDMI, hardware reset, DMA/IRQ/IOMMU isolation and full display reinitialization
+remain open. The working retained-scanout and rescue programming budgets do not
+change. The JA OS UEFI loader banner remains in the built image.
+
+
+## Observed firmware ROM connector inventory
+
+On 2026-11-09, image
+d0a7e9cb4d07b05d834b4323f26a2b871b6c3e542dd2a1f629d455d3d30f97a8 passed
+physical ROM inventory on Z390 Gaming X/F10, i7-9700K, RX 570
+1002:67DF rev EF/subsystem 1458:2310 and Philips Momentum 272M8 over DisplayPort.
+The 273-entry software record and 149 source fingerprints remain frozen. Separate
+plans, byte-exact serial logs and inspection are in `build/rx570-rom-v29/hardware`.
+Flashing is operator confirmed, without USB byte readback.
+
+Firmware supplied a complete 118784-byte RAM copy. The isolated parser
+accepted the first 59904-byte legacy PCI image and ObjectInfo
+1.3. Four inspections returned CRC32 0xE2CB542E and the same directory:
+two before native takeover around the RAM diagnostic, one after native takeover,
+and one after controlled reboot. ROM header offset is 0x226,
+master data 0x9800, ObjectInfo 0x9f2c,
+with ObjectInfo extent 0x11e. Offsets below are relative to
+ObjectInfo; link and record contents were not traversed.
+
+| Index | Object ID | Firmware label | Links offset | Records offset |
+| --- | --- | --- | --- | --- |
+| 0 | 0x3113 | DisplayPort | 0x62 | 0x68 |
+| 1 | 0x3213 | DisplayPort | 0x7d | 0x83 |
+| 2 | 0x3313 | DisplayPort | 0x98 | 0x9e |
+| 3 | 0x310c | HDMI-A | 0xb3 | 0xb9 |
+
+These are three DisplayPort objects and one HDMI-A object in firmware data.
+The connected physical DP port, active encoder, AUX/I2C/HPD routing and link setup
+remain unknown. No raw ROM file was exported for independent host replay. CRC32
+identifies the reported copy for diagnostics, not source authenticity. Successful
+physical reports returned through full RO/NX mapping checks and bounded service
+teardown. A fresh process per command follows the frozen launch/stop code; parser
+PID/incarnation is absent from the journal, so a direct four-identity comparison
+cannot be claimed. The source LoaderData allocation remains retained for the boot.
+
+The actual Ring3 RAM diagnostic passed its 64-page RO/NX, synthetic DP/HDMI,
+checksum-refusal and full CPU baseline cases. Native primary/rescue RAM tests also
+passed. The separate physical ROM reports are the board-table evidence; synthetic
+tables are not treated as captured hardware data.
+
+Normal `gui native` opened generation 1, with readable NATIVE29 input visually
+confirmed. Primary PID 23/incarnation 21 advanced
+3 frames. Initial GUI app PID 27/input 1, presenter
+PID 25/incarnation 23 and compositor PID
+26/incarnation 24 were recorded.
+Repeat native launch after Escape refused another GUI or device operation.
+Three further normal presentation cycles restored three complete baselines,
+including one presenter and one compositor exception case. Heartbeats progressed
+71 to 75. Four GUI sessions ran in total.
+
+Exactly 60 register loads, two fixed store attempts and one poll occurred in the
+original primary rebind. ROM inventory performed no GPU operation. The reserved
+rescue was stopped without programming; this pass does not repeat v28's rescue or
+primary-replacement acceptance. Finish reclaimed the validated native console,
+kept the original GOP retired, stopped CPU owners, and allowed power readiness.
+Controlled reboot restored fresh firmware output/status 0/heartbeats 0/mask 0/
+restart-attempt NO. The operator confirmed readable output with no intervention.
+The ROM report remained identical after reboot.
+
+All four active capture plans passed, saving 40256 RX/395 host TX bytes.
+Passive capture saved 1701 bytes: seven leading bytes remain saved/excluded as
+unattributed; 1694 following bytes cover post-page-table boot through the shell.
+Image-scoped RX totals 41950; all saved raw RX totals 41957.
+Earlier boot/loader output and inter-session gaps are excluded. UART observations
+reported zero drops, zero timeouts and no stall. No host assertion correction,
+production change or hardware replay was required during this physical pass.
+
+Next is bounded parsing of connector link/record data, including AUX/I2C/HPD
+routing, before a new native timing/link programming contract. This acceptance
+establishes the optional firmware-copy/connector-directory path and retained
+native GUI regression. New modes, HDMI operation, GPU reset/reinitialization,
+arbitrary hangs and DMA/IRQ/IOMMU isolation remain unqualified. Inherited bus
+mastering remains unisolated; full native modesetting is still unfinished.

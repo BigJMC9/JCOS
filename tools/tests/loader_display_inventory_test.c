@@ -5,6 +5,9 @@
 #include <string.h>
 
 #include "../../loader/display_inventory.h"
+#ifdef _WIN32
+#include <malloc.h>
+#endif
 #include "../../include/boot_display.h"
 
 #define CHECK(expression) do { \
@@ -561,10 +564,62 @@ static int bounded_query_matcher(void) {
     return 1;
 }
 
+static void *rom_allocation;
+static int rom_allocate_mode;
+static EFI_STATUS rom_allocate(u32 type,u32 memory_type,UINTN pages,EFI_PHYSICAL_ADDRESS *base){
+    if(type!=AllocateAnyPages || memory_type!=EfiLoaderData || !pages || pages>64U || rom_allocate_mode==1)return EFI_UNSUPPORTED;
+#ifdef _WIN32
+    rom_allocation=_aligned_malloc(pages*4096,4096);
+#else
+    rom_allocation=aligned_alloc(4096,pages*4096);
+#endif
+    if(!rom_allocation)return EFI_UNSUPPORTED;
+    memset(rom_allocation,0xA5,pages*4096);*base=(u64)rom_allocation;
+    if(rom_allocate_mode==2)g_rx.io.RomImage=(void *)1;
+    if(rom_allocate_mode==3)g_rx.io.RomSize++;
+    return EFI_SUCCESS;
+}
+static void rom_release(void){
+#ifdef _WIN32
+    _aligned_free(rom_allocation);
+#else
+    free(rom_allocation);
+#endif
+    rom_allocation=0;
+}
+static int firmware_rom_copy(void){
+    static u8 bytes[513];BootInfo boot;
+    for(u32 i=0;i<sizeof(bytes);++i)bytes[i]=(u8)i;
+    for(int mode=0;mode<4;++mode){
+        fixture();rom_allocate_mode=mode;g_services.AllocatePages=rom_allocate;g_rx.io.RomSize=sizeof(bytes);g_rx.io.RomImage=bytes;
+        CHECK(capture(&boot));
+        CHECK(boot.framebuffer_rom_reported_size==sizeof(bytes));
+        CHECK(boot.framebuffer_rom_status==(mode==0 ? BOOT_DISPLAY_ROM_COPIED : mode==1 ? BOOT_DISPLAY_ROM_ALLOCATION : BOOT_DISPLAY_ROM_CHANGED));
+        if(mode==0){
+            CHECK(boot.framebuffer_rom_base==(u64)rom_allocation && boot.framebuffer_rom_size==sizeof(bytes));
+            CHECK(!memcmp(rom_allocation,bytes,sizeof(bytes)));
+            for(u32 i=sizeof(bytes);i<4096;++i)CHECK(!((u8 *)rom_allocation)[i]);
+            bytes[0]^=1;CHECK(((u8 *)rom_allocation)[0]!=bytes[0]);bytes[0]^=1;
+        }else CHECK(!boot.framebuffer_rom_size);
+        rom_release();
+    }
+    fixture();g_rx.io.RomSize=BOOT_DISPLAY_ROM_LIMIT+1ULL;g_rx.io.RomImage=(void *)1;
+    CHECK(capture(&boot) && boot.framebuffer_rom_status==BOOT_DISPLAY_ROM_TOO_LARGE && !boot.framebuffer_rom_base);
+    fixture();g_rx.io.RomSize=8;g_rx.io.RomImage=(void *)(~0ULL-3);
+    CHECK(capture(&boot) && boot.framebuffer_rom_status==BOOT_DISPLAY_ROM_INVALID);
+    fixture();g_rx.io.RomSize=512;g_rx.io.RomImage=0;
+    CHECK(capture(&boot) && boot.framebuffer_rom_status==BOOT_DISPLAY_ROM_ABSENT);
+    fixture();g_rx.io.RomSize=512;g_rx.io.RomImage=(void *)1;g_count=3;g_handles[2]=g_handles[1];
+    CHECK(capture(&boot) && boot.framebuffer_rom_status==BOOT_DISPLAY_ROM_NONE);
+    fixture();g_rx.io.RomSize=512;g_rx.io.RomImage=bytes;
+    CHECK(capture(&boot) && boot.framebuffer_rom_status==BOOT_DISPLAY_ROM_ALLOCATION);
+    puts("Firmware ROM copy: selected-only/bounded/zero-tail/independent/absent/overflow/allocation/source-change PASS; no PCI writes");return 1;
+}
+
 int main(void) {
     if (!selected_and_child() || !association_failures() || !optional_failures() ||
         !bar_audit_and_lists() || !bounded_decoder() ||
-        !query_numbering_and_ambiguity() || !bounded_query_matcher()) return 1;
+        !query_numbering_and_ambiguity() || !bounded_query_matcher() || !firmware_rom_copy()) return 1;
     printf("LOADER DISPLAY INVENTORY: PASS (%u mocked firmware cases; no hardware access)\n", g_cases);
     return 0;
 }

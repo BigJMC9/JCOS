@@ -12,6 +12,8 @@ void polaris_native_policy_diagnostic(bool spin);
 void polaris_native_begin(const BootInfo *boot);
 /* First takeover and RO presenter handoff under the same serialized owner. */
 bool polaris_native_launch(const BootInfo *boot);
+/* One primary CPU-owner replacement on intact parked scanout;no GPU operation. */
+bool polaris_native_restart(void);
 void polaris_native_rescue(void);
 void polaris_native_finish(void);
 /* Keep backend/rescue live;downgrade its FB mapping before normal GUI admission. */

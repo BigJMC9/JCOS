@@ -559,3 +559,56 @@ image used 114 loads/four stores with no replay. Captures preserve 69324 RX/849 
 plus 1694 attributed post-page-table boot bytes; two leading NUL bytes are saved
 and excluded. See [the normal-shell launch hardware record](AMD_POLARIS_DISPLAY.md#observed-normal-shell-native-launch)
 for identities, byte scopes and remaining limits.
+
+
+The normal shell adds `gui restart-driver` for one explicit primary CPU process
+replacement on an intact RO native scanout after complete GUI drain. Ring3 policy
+admits and completes the transaction. The old process must be fully reaped before
+a fresh RO primary adopts the retained output; programming/drawing requests are
+refused in its new entry. CPU identities change while output generation stays
+fixed. No GPU operation or budget rearm occurs, and the reserved rescue remains
+available for a later primary fault. Failed or ambiguous replacement retains
+quarantine/CPU ledgers and serial access. Physical acceptance is recorded below.
+See [the retained restart contract](AMD_POLARIS_DISPLAY.md#retained-primary-driver-restart).
+
+
+Physical v28 acceptance confirms one normal-shell `gui restart-driver`: primary
+PID 27/incarnation 23 became PID 32/incarnation 27 on unchanged output 1,
+with fresh GUI identities and visibly readable RSTART28 input. The restart added
+no register operation; duplicate and terminal restart refused. The replacement
+primary's later GUI-active hang used reserved rescue, followed by one fresh
+`gui reconnect` with visible RECON28. Eleven GUI sessions/six complete baselines,
+rescue failure/automatic CPU cleanup, pre-prepare power readiness, serial control
+and readable unassisted reboot passed. Twelve active captures preserve 72171 RX/
+910 TX bytes, plus 1694 attributed passive boot bytes; 133 leading passive bytes
+are saved and excluded. Fixed 114 loads/four stores/two polls, without replay.
+Initial rescue identity was not journaled; original reservation retention follows
+implementation/controller evidence. See [the physical retained-primary restart record](AMD_POLARIS_DISPLAY.md#observed-retained-primary-cpu-driver-restart)
+for identities, byte scopes and the healthy CPU-replacement limit. Hardware GPU
+reset, arbitrary hangs, changed modes/HDMI and isolation remain open.
+
+
+`displayrom` inspects the selected RX 570's bounded firmware ROM RAM copy through
+an isolated Ring3 service. The v11 boot handoff preserves a dedicated LoaderData
+allocation for the boot; only complete copies in reserved RAM map RO/NX. Two
+private IPC endpoints are the only capabilities. The diagnostic neither executes
+ATOM tables nor accesses a device ROM BAR or GPU registers. Parser refusals leave
+the current display path untouched; incomplete CPU teardown retains ownership.
+Software host/audit and four QEMU boots pass, including actual 64-page RO/NX,
+checksum refusal and resource baselines. Physical board-ROM acceptance is recorded below.
+See [firmware ROM connector inventory](AMD_POLARIS_DISPLAY.md#firmware-rom-connector-inventory).
+
+
+Physical v29 acceptance records a complete 118784-byte firmware RAM copy, accepted
+59904-byte first legacy image/ObjectInfo1.3 and four stable CRC32 E2CB542E reports
+around native takeover and controlled reboot. The directory contains DP objects
+3113/3213/3313 and HDMI-A object310C; active port/encoder/link routing remains
+unknown. Native GUI input was visibly correct; four GUI sessions/three complete
+baselines, presenter/compositor exception cleanup, serial/power readiness and
+readable unassisted reboot passed. Only the original primary transaction used
+GPU access:60loads/two stores/one poll. ROM inventory added none. Four active
+captures saved40256RX/395TX plus1694 attributed passive boot bytes;seven leading
+bytes stay saved/excluded. No actual ROM blob export or new rescue/restart case.
+See [physical ROM inventory](AMD_POLARIS_DISPLAY.md#observed-firmware-rom-connector-inventory)
+for offsets, provenance, byte scopes and limitations. Native modes/link programming
+and hardware reset/isolation remain open.

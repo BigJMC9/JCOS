@@ -42,6 +42,12 @@ void graphics_policy_test_run(void) {
             !supervisor_graphics_exchange(current.session+1,current.sequence+1,GRAPHICS_POLICY_VERSION|GRAPHICS_POLICY_CLOSE,&action) &&
             !supervisor_graphics_exchange(current.session,current.sequence,GRAPHICS_POLICY_VERSION|GRAPHICS_POLICY_CLOSE,&action) &&
             !supervisor_graphics_exchange(current.session,current.sequence+1,GRAPHICS_POLICY_VERSION|GRAPHICS_POLICY_CLOSE|(1ULL<<48),&action))) goto fail;
+        if(n==0 && !check("ACTUAL RING3 ONE-SHOT PRIMARY RESTART / PENDING AND DUPLICATE REFUSED",
+            request(GRAPHICS_POLICY_RESTART_PRIMARY,GRAPHICS_POLICY_RESTART_FACTS,GRAPHICS_POLICY_RESTART) &&
+            !supervisor_graphics_exchange(current.session,current.sequence+1,GRAPHICS_POLICY_VERSION|GRAPHICS_POLICY_OBSERVE|all,&action) &&
+            request(GRAPHICS_POLICY_PRIMARY_RESTARTED,0,GRAPHICS_POLICY_KEEP) &&
+            !supervisor_graphics_exchange(current.session,current.sequence+1,GRAPHICS_POLICY_VERSION|GRAPHICS_POLICY_RESTART_PRIMARY|GRAPHICS_POLICY_RESTART_FACTS,&action) &&
+            request(GRAPHICS_POLICY_OBSERVE,all,GRAPHICS_POLICY_KEEP)))goto fail;
         if (n<2) {
             u64 facts=n ? alive|GRAPHICS_POLICY_PROBED|GRAPHICS_POLICY_RESCUE_PONG : GRAPHICS_POLICY_RESCUE_LIVE;
             if (!check("PRIMARY EXIT OR MISSING HEARTBEAT -> ONE RESERVED RESCUE",

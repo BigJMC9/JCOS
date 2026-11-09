@@ -214,6 +214,32 @@ void polaris_native_test_run(void) {
         partial_frame==phys_to_frame(storage) && partial_flags==VM_USER;
     report("PARTIAL BROKER FAILURE / NO COMPLETION OR REPLAY / RO ALIAS RETAINED",aborted);
     if(!aborted)goto fail;
+    if(!polaris_driver_stop(&primary) || !polaris_driver_stop(&rescue))goto fail;
+    u64 old_pid=primary.process_id,old_inc=primary.connection.incarnation;
+    k_memset(phys_to_virt(storage),0,0x300000);
+    if(!polaris_driver_reserve(&primary,1,&m) || !polaris_driver_reserve(&rescue,2,&m))goto fail;
+    u64 adopted=0x123456789ABCDEFULL;
+    bool retained=primary.process_id!=old_pid && primary.connection.incarnation!=old_inc &&
+        polaris_driver_attach_retained(&primary,adopted) && primary.retained_only && primary.program_attempted &&
+        polaris_driver_ping(&primary,adopted+1) && !polaris_driver_attach_retained(&primary,adopted) &&
+        !polaris_driver_attach_retained(&rescue,adopted) && !polaris_driver_plan(&primary,300,&w,&incomplete) &&
+        !polaris_driver_program(&primary,&incomplete,&partial_io,&refused_result) && !polaris_driver_draw(&primary);
+    for(u32 i=0;retained && i<768;++i){
+        frame_t f;vm_flags_t flags;
+        retained=address_space_query_page(process_address_space(&primary.service.program.process),m.virtual_base+(u64)i*VM_PAGE_SIZE,&f,&flags) &&
+            f==phys_to_frame(storage)+i && flags==VM_USER;
+    }
+    for(u32 i=0;retained && i<1024U*768U;++i)if(((u32*)phys_to_virt(storage))[i])retained=false;
+    report("ACTUAL FRESH PRIMARY RETAINED ENTRY / WHOLE RANGE RO / PROGRAM AND DRAW REFUSED",retained);if(!retained)goto fail;
+    IpcMessage invalid,answer;k_memset(&invalid,0,sizeof(invalid));invalid.word_count=4;
+    const u32 ops[]={POLARIS_NATIVE_RETAINED,POLARIS_NATIVE_CONFIG,POLARIS_NATIVE_EXECUTE,POLARIS_NATIVE_DRAW};
+    for(u32 i=0;i<ARRAY_COUNT(ops);++i){
+        invalid.words[0]=POLARIS_NATIVE_HEADER(ops[i]);invalid.words[1]=ops[i]==POLARIS_NATIVE_DRAW ? 1 : adopted;
+        if(!managed_service_call(&primary.service,&primary.connection,&invalid,&answer) ||
+           answer.word_count!=4 || answer.words[0]!=POLARIS_NATIVE_REPLY || answer.words[1]!=primary.connection.incarnation || answer.words[2] || answer.words[3])goto fail;
+    }
+    retained=polaris_driver_ping(&primary,adopted+2);
+    report("ACTUAL RETAINED DRIVER REJECTS DUPLICATE CONFIG EXECUTE DRAW / HEARTBEAT SURVIVES",retained);if(!retained)goto fail;
     if (!stop_all()) goto fail;
     bool baseline=pages==pmm_stats().free_pages && processes==process_object_count() && spaces==address_space_object_count() &&
         objects==device_resource_object_count() && endpoints==endpoint_object_count();

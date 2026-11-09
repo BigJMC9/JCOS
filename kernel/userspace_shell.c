@@ -102,12 +102,16 @@ static bool userspace_shell_run_session(bool boot_default,const BootInfo *boot) 
 
         if (action == JCOS_CONSOLE_SHELL_ACTION_RUN_GRAPHICS ||
             action == JCOS_CONSOLE_SHELL_ACTION_RECONNECT_GRAPHICS ||
-            action == JCOS_CONSOLE_SHELL_ACTION_NATIVE_GRAPHICS) {
+            action == JCOS_CONSOLE_SHELL_ACTION_NATIVE_GRAPHICS ||
+            action == JCOS_CONSOLE_SHELL_ACTION_RESTART_GRAPHICS) {
             userspace_shell_cursor_end();
             if (!(action == JCOS_CONSOLE_SHELL_ACTION_RUN_GRAPHICS ?
                     graphical_session_run() : action == JCOS_CONSOLE_SHELL_ACTION_NATIVE_GRAPHICS ?
-                    graphical_session_native(boot) : graphical_session_reconnect())) {
-                serial_write(action == JCOS_CONSOLE_SHELL_ACTION_NATIVE_GRAPHICS ?
+                    graphical_session_native(boot) : action == JCOS_CONSOLE_SHELL_ACTION_RESTART_GRAPHICS ?
+                    graphical_session_restart_driver() : graphical_session_reconnect())) {
+                serial_write(action == JCOS_CONSOLE_SHELL_ACTION_RESTART_GRAPHICS ?
+                    "GUI: driver restart unavailable; serial shell remains active.\n" :
+                    action == JCOS_CONSOLE_SHELL_ACTION_NATIVE_GRAPHICS ?
                     "GUI: native launch unavailable; serial shell remains active.\n" :
                     action == JCOS_CONSOLE_SHELL_ACTION_RECONNECT_GRAPHICS ?
                     "GUI: reconnection unavailable; serial shell remains active.\n" :

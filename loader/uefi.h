@@ -249,8 +249,8 @@ typedef struct EFI_GRAPHICS_OUTPUT_PROTOCOL {
     EFI_GRAPHICS_OUTPUT_PROTOCOL_MODE *Mode;
 } EFI_GRAPHICS_OUTPUT_PROTOCOL;
 
-/* Optional GOP provenance uses only Pci.Read and GetLocation. Layout follows
- * UEFI PCI I/O Protocol; no device memory or firmware ROM is accessed. */
+/* Optional GOP inventory uses config reads, BAR queries and RomImage RAM.
+ * No device ROM BAR is enabled/read and no firmware code is executed. */
 struct EFI_PCI_IO_PROTOCOL;
 typedef EFI_STATUS (EFIAPI *EFI_PCI_IO_CONFIG_ACCESS)(
     struct EFI_PCI_IO_PROTOCOL *, u32, u32, UINTN, void *);
@@ -290,6 +290,8 @@ typedef struct EFI_PCI_IO_PROTOCOL {
     void *RomImage;
 } EFI_PCI_IO_PROTOCOL;
 
+_Static_assert(__builtin_offsetof(EFI_PCI_IO_PROTOCOL, RomSize) == 144, "PCI ROM size offset");
+_Static_assert(__builtin_offsetof(EFI_PCI_IO_PROTOCOL, RomImage) == 152, "PCI ROM RAM pointer offset");
 _Static_assert(__builtin_offsetof(EFI_PCI_IO_PROTOCOL, GetBarAttributes) == 128, "PCI BAR attributes offset");
 _Static_assert(__builtin_offsetof(EFI_EDID_ACTIVE_PROTOCOL, Edid) == 8, "EDID pointer offset");
 _Static_assert(__builtin_offsetof(EFI_PCI_IO_PROTOCOL, Pci) == 48, "PCI I/O config offset");

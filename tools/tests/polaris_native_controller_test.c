@@ -30,7 +30,8 @@ static GraphicsPolicy policy;
 static u64 policy_pid=500,policy_tid=501;
 static bool policy_busy,policy_dead,policy_spinning;
 static unsigned policy_injections,reconnect_requests;
-static bool reconnect_faults_armed,launch_faults_armed;
+static bool reconnect_faults_armed,launch_faults_armed,restart_faults_armed;
+static unsigned reserve_count[3],adopts,restart_requests;
 bool supervisor_stop_identity(u64 pid,u64 tid){
  if(pid==policy_pid&&tid==policy_tid){policy_dead=true;policy_spinning=false;}
  return fault!=101;
@@ -45,11 +46,16 @@ u64 supervisor_thread_id(void){return policy_tid;}
 bool supervisor_graphics_exchange(u64 session,u64 sequence,u64 snapshot,u64 *out){
  if(policy_spinning)return false;
  u64 event=snapshot&0xFFULL;
+ if(event==GRAPHICS_POLICY_RESTART_PRIMARY){++restart_requests;if(restart_faults_armed&&fault==148)return false;}
+ if(event==GRAPHICS_POLICY_PRIMARY_RESTARTED&&restart_faults_armed&&fault==157)return false;
  if(event==GRAPHICS_POLICY_CLIENT_RECONNECT){++reconnect_requests;if(fault==114)return false;}
  if((fault==58&&event==GRAPHICS_POLICY_BEGIN)||(fault==59&&event==GRAPHICS_POLICY_PRIMARY)||
     (fault==60&&event==GRAPHICS_POLICY_OBSERVE)||(fault==65&&event==GRAPHICS_POLICY_CLOSE)||
     (fault==66&&event==GRAPHICS_POLICY_RESCUED))return false;
  *out=graphics_policy_decide(&policy,session,sequence,snapshot);
+ if(restart_faults_armed&&fault==149&&event==GRAPHICS_POLICY_RESTART_PRIMARY)*out=GRAPHICS_POLICY_KEEP;
+ if(restart_faults_armed&&fault==158&&event==GRAPHICS_POLICY_PRIMARY_RESTARTED)*out=GRAPHICS_POLICY_RESTART;
+ if(fault==162&&event==GRAPHICS_POLICY_OBSERVE)*out=GRAPHICS_POLICY_RESTART;
  if(fault==115&&event==GRAPHICS_POLICY_CLIENT_RECONNECT)*out=GRAPHICS_POLICY_KEEP;
  if(fault==71&&event==GRAPHICS_POLICY_BEGIN)*out=GRAPHICS_POLICY_KEEP;
  if(event==GRAPHICS_POLICY_OBSERVE){
@@ -152,9 +158,20 @@ bool polaris_mmio_rebind_write(PolarisMmioHold *h,u64 id,PolarisDisplayRegister 
  return (unsigned)fault!=(armed ? 26+writes[1] : 13+writes[0]);
 }
 bool polaris_driver_reserve(PolarisDriver *d,u32 role,const ProgramBorrowedMappingSpec *m){
- CHECK(!retired&&m->flags==VM_UNCACHED);if((fault==135&&role==1)||fault==(role==1 ? 3 : 4))return false;
- memset(d,0,sizeof(*d));d->role=role;d->process_id=100+role;d->service.program.process.id=d->process_id;d->connection.incarnation=200+role;
+ CHECK((!retired||(fault>=136&&role==1&&!drawing[1]&&!drawing[2]&&lease==DISPLAY_LEASE_KERNEL))&&m->flags==VM_UNCACHED);if((fault==135&&role==1)||fault==(role==1 ? 3 : 4))return false;
+ ++reserve_count[role];
+ if(restart_faults_armed&&fault==151&&role==1&&reserve_count[1]==2)return false;
+ memset(d,0,sizeof(*d));d->role=role;d->process_id=100+role+(reserve_count[role]-1)*10;d->service.program.process.id=d->process_id;d->connection.incarnation=200+role+(reserve_count[role]-1)*10;
+ if(restart_faults_armed&&reserve_count[1]==2){
+  if(fault==152)d->process_id=d->service.program.process.id=101;
+  if(fault==153)d->connection.incarnation=201;
+  if(fault==161)++policy_pid;
+ }
  d->program_attempted=false;d->service.state=MANAGED_SERVICE_RUNNING;drivers[role]=d;reserved[role]=true;return true;
+}
+bool polaris_driver_attach_retained(PolarisDriver *d,u64 identity){
+ CHECK(d->role==1&&reserved[1]&&!drawing[1]&&lease==DISPLAY_LEASE_KERNEL&&identity==output);
+ ++adopts;d->retained_only=d->program_attempted=true;return fault!=154;
 }
 bool polaris_driver_plan(PolarisDriver *d,u64 id,const PolarisPlaneWitness *w,PolarisProgramPlan *p){
  if(fault==(d->role==1 ? 11 : 26))return false;
@@ -170,18 +187,23 @@ bool polaris_driver_program(PolarisDriver *d,PolarisProgramPlan *p,const Polaris
 bool program_borrowed_set_writable(ProgramInstance *p,u64 id,bool rw){
  CHECK(p->process.id==id&&retired);
  if(!rw){
-  CHECK(lease==DISPLAY_LEASE_USER&&writer==id&&drawing[id-100]);++downgrades;
-  if((fault==131&&launch_faults_armed)||fault==82||(fault==118&&reconnect_faults_armed))return false;drawing[id-100]=false;return true;
+  u32 role=id==drivers[1]->process_id ? 1U : 2U;CHECK(lease==DISPLAY_LEASE_USER&&writer==id&&drawing[role]);++downgrades;
+  if((fault==131&&launch_faults_armed)||fault==82||(fault==118&&reconnect_faults_armed))return false;drawing[role]=false;return true;
  }
  CHECK(lease==DISPLAY_LEASE_HANDOFF);
- u32 role=(u32)(id-100);if(fault==(role==1 ? 19 : 30))return false;drawing[role]=true;return true;
+ u32 role=id==drivers[1]->process_id ? 1U : 2U;if(fault==(role==1 ? 19 : 30))return false;drawing[role]=true;return true;
 }
 bool polaris_driver_draw(PolarisDriver *d){CHECK(drawing[d->role]&&lease==DISPLAY_LEASE_USER);if(fault==130&&d->role==1)++policy_pid;if(fault==134&&d->role==1)return false;return fault!=(d->role==1 ? 20 : 31);}
 bool polaris_driver_stop(PolarisDriver *d){
+ if(restart_faults_armed&&d->role==1){
+  if(fault==150)return false;
+  if(fault==159)output_valid=false;
+  if(fault==160)clock_changed=true;
+ }
  if(d->role && fault==(d->role==1 ? 22 : 32))return false;
  if(d->role){reserved[d->role]=false;drawing[d->role]=false;d->service.state=MANAGED_SERVICE_STOPPED;d->service.program.process.id=0;busy[d->role]=false;}return true;
 }
-bool managed_service_idle(ManagedService *s){return s->state==MANAGED_SERVICE_RUNNING;}
+bool managed_service_idle(ManagedService *s){return s->state==MANAGED_SERVICE_RUNNING && !(drivers[1]&&s==&drivers[1]->service&&busy[1]) && !(drivers[2]&&s==&drivers[2]->service&&busy[2]);}
 ManagedServiceState managed_service_state(ManagedService *s){return s->state;}
 /* Match the real API: failed/stopped services no longer publish a live PID. */
 u64 managed_service_process_id(ManagedService *s){return s->state==MANAGED_SERVICE_RUNNING ? s->program.process.id : 0;}
@@ -190,6 +212,10 @@ bool managed_service_call(ManagedService *s,const ManagedServiceConnection *c,co
 }
 bool polaris_driver_ping(PolarisDriver *d,u64 nonce) {
  CHECK(nonce&&d->role&&reserved[d->role]);++pings[d->role];
+ if(restart_faults_armed){
+  if((fault==147&&d->role==1)||(fault==146&&d->role==2))return false;
+  if(adopts&&((fault==155&&d->role==1)||(fault==156&&d->role==2)))return false;
+ }
  if((fault==129&&launch_faults_armed)||(fault==117&&reconnect_faults_armed)||fault==69 || (fault==42&&d->role==1)||(fault==43&&d->role==2)||(fault==44&&d->role==2))return false;
  return !busy[d->role]&&d->service.state==MANAGED_SERVICE_RUNNING;
 }
@@ -355,10 +381,52 @@ static void launch_case(const BootInfo *boot) {
  CHECK(!polaris_native_launch(boot)&&before==loads+writes[0]+writes[1]&&!reserved[1]&&!reserved[2]);
  puts("PASS: production explicit native launch,first-takeover/GUI/writer/profile gates,fresh primary heartbeat,RO handoff,policy identity and partial-handoff failure quarantine,no restart/replay;reserved rescue preserved;no hardware.");
 }
+static void restart_case(const BootInfo *boot){
+ if(fault==137)CHECK(!polaris_native_restart()&&!writes[0]&&!loads&&!creates);
+ polaris_native_begin(boot);CHECK(output_valid&&drawing[1]&&writes[0]==2);
+ if(fault==138){unsigned before=loads+writes[0];CHECK(!polaris_native_restart()&&before==loads+writes[0]);}
+ polaris_native_present();CHECK(!drawing[1]&&downgrades==1&&lease==DISPLAY_LEASE_KERNEL);
+ if(fault==163)polaris_native_rescue();
+ if(fault==164)polaris_native_finish();
+ if(fault==139)gui_retained=true;
+ if(fault==140)kernel_writer_pin=true;
+ if(fault==141)lease=DISPLAY_LEASE_HANDOFF;
+ if(fault==142)output_valid=false;
+ if(fault==143)++policy_pid;
+ if(fault==144)drivers[2]->service.state=MANAGED_SERVICE_FAILED;
+ if(fault==145)busy[1]=true;
+ u64 old_pid=drivers[1]->process_id,old_inc=drivers[1]->connection.incarnation,old_output=output;
+ unsigned before=loads+writes[0]+writes[1],old_claims=creates;
+ if(fault==162){ticks+=1000;polaris_native_poll();CHECK(!output_valid&&!reserved[1]&&!reserved[2]&&before==loads+writes[0]+writes[1]);CHECK(!polaris_native_restart()&&!restart_requests&&!adopts);}
+ else if((fault>=139&&fault<=145)||fault>=163){
+  CHECK(!polaris_native_restart()&&!restart_requests&&!adopts&&before==loads+writes[0]+writes[1]&&creates==old_claims);
+ }else{
+  restart_faults_armed=true;bool restarted=polaris_native_restart();
+  CHECK(before==loads+writes[0]+writes[1]&&creates==old_claims);
+  if(fault>=146){CHECK(!restarted);if(fault==150)CHECK(reserved[1]&&!polaris_native_power_prepare());}
+  else{
+   CHECK(restarted&&restart_requests==1&&adopts==1&&output==old_output&&output_valid&&downgrades==1);
+   CHECK(drivers[1]->process_id!=old_pid&&drivers[1]->connection.incarnation!=old_inc&&drivers[1]->retained_only&&drivers[1]->program_attempted);
+   CHECK(reserved[1]&&reserved[2]&&!drawing[1]&&!drawing[2]&&lease==DISPLAY_LEASE_KERNEL);
+   unsigned first=pings[1],standby=pings[2];ticks+=1000;polaris_native_poll();CHECK(pings[1]>first&&pings[2]>standby);
+   CHECK(!polaris_native_restart()&&restart_requests==1&&adopts==1&&before==loads+writes[0]+writes[1]);
+   gui_retained=true;lease=DISPLAY_LEASE_USER;writer=900;polaris_native_background_diagnostic(1,true);ticks+=1000;polaris_native_poll();
+   CHECK(!output_valid&&!writes[1]&&gui_retained);gui_release();polaris_native_poll();
+   CHECK(output==old_output+1&&output_valid&&drawing[2]&&writes[1]==2&&!reserved[1]&&reserved[2]);
+  }
+ }
+ restart_faults_armed=false;gui_retained=kernel_writer_pin=clock_changed=busy[1]=false;
+ if(lease==DISPLAY_LEASE_HANDOFF)lease=DISPLAY_LEASE_KERNEL;
+ if(fault==143)--policy_pid;if(fault==144)drivers[2]->service.state=MANAGED_SERVICE_RUNNING;
+ before=loads+writes[0]+writes[1];CHECK(polaris_native_power_prepare()&&before==loads+writes[0]+writes[1]);
+ CHECK(!polaris_native_restart()&&before==loads+writes[0]+writes[1]);
+ puts("PASS: retained primary restart,RO/drain/liveness/policy/fresh-identity/transport/partial-cleanup gates,no GPU operation/rearm,independent rescue after replacement;no hardware.");
+}
 int main(int argc,char **argv){
  fault=argc>1 ? atoi(argv[1]) : 0;supervisor.id=1;supervisor.kernel=true;supervisor.initialized=true;
  memset(&info,0,sizeof(info));info.physical_base=0x50000000;info.size=0x300000;info.direct_map_safe=true;info.width=info.pixels_per_scanline=1024;info.height=768;info.pixel_format=1;
  BootInfo boot;memset(&boot,0,sizeof(boot));boot.framebuffer_base=info.physical_base;boot.framebuffer_size=info.size;boot.framebuffer_width=boot.framebuffer_pixels_per_scanline=1024;boot.framebuffer_height=768;boot.framebuffer_pixel_format=1;
+ if(fault>=136){restart_case(&boot);return 0;}
  if(fault>=122){launch_case(&boot);return 0;}
  polaris_native_begin(&boot);
  if(fault>=104){reconnect_case();return 0;}

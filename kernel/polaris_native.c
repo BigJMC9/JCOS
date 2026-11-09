@@ -36,7 +36,7 @@ static struct {
     bool attempted,mutated,original_render,recovery_authorized,policy_closed;
     bool presenter_parked,recovery_pending,terminal_cleanup_pending;
     u64 recovery_started,recovery_output_id;
-    bool reconnect_attempted;
+    bool reconnect_attempted,restart_attempted;
     PolarisDriver *writer;
 } g;
 static void recover_native(bool induce);
@@ -323,6 +323,39 @@ bool polaris_native_launch(const BootInfo *boot) {
         !polaris_driver_ping(&g.primary,++g.challenge)) {failed();return false;}
     return park_presenter();
 }
+bool polaris_native_restart(void) {
+    if (g.stage!=1 || g.restart_attempted || !g.presenter_parked || g.writer ||
+        !presenter_released() || !framebuffer_output_matches(g.output_id) ||
+        !recovery_context_valid() || !polaris_mmio_binding_valid(&g.binding) ||
+        managed_service_process_id(&g.primary.service)!=g.primary.process_id ||
+        !managed_service_idle(&g.primary.service)) return false;
+    g.restart_attempted=true; /* Consume before heartbeat/policy transport. */
+    u64 old_pid=g.primary.process_id,old_inc=g.primary.connection.incarnation,output=g.output_id,action;
+    if (g.challenge>~0ULL-2 || !polaris_driver_ping(&g.primary,++g.challenge) ||
+        !polaris_driver_ping(&g.rescue,++g.challenge) ||
+        !graphics_supervisor_request(&g.policy,GRAPHICS_POLICY_RESTART_PRIMARY,
+            GRAPHICS_POLICY_RESTART_FACTS,&action) || action!=GRAPHICS_POLICY_RESTART) goto fail;
+    /* Stop proves all old CPU mappings/endpoints/pages drained before storage reuse.
+     * The kernel-owned device binding,scanout allocation and rescue stay retained. */
+    if (!polaris_driver_stop(&g.primary) || !presenter_released() ||
+        !framebuffer_output_matches(output) || !recovery_context_valid()) goto fail;
+    ProgramBorrowedMappingSpec m;
+    m.physical_base=g.info.physical_base;m.size=g.info.size;m.virtual_base=POLARIS_NATIVE_FB_VA;m.flags=VM_UNCACHED;
+    if (!polaris_driver_reserve(&g.primary,1,&m) || g.primary.process_id==old_pid ||
+        g.primary.connection.incarnation==old_inc || !polaris_driver_attach_retained(&g.primary,output) ||
+        g.challenge>~0ULL-2 || !polaris_driver_ping(&g.primary,++g.challenge) ||
+        !polaris_driver_ping(&g.rescue,++g.challenge) || !presenter_released() ||
+        !framebuffer_output_matches(output) || !recovery_context_valid() ||
+        !graphics_supervisor_request(&g.policy,GRAPHICS_POLICY_PRIMARY_RESTARTED,0,&action) ||
+        action!=GRAPHICS_POLICY_KEEP) goto fail;
+    g.last_heartbeat=timer_ticks();
+    terminal_write("PRIMARY CPU DRIVER RESTART OLD PID=");terminal_write_u64(old_pid);
+    terminal_write(" INC=");terminal_write_u64(old_inc);terminal_write(" NEW PID=");terminal_write_u64(g.primary.process_id);
+    terminal_write(" INC=");terminal_write_u64(g.primary.connection.incarnation);terminal_write(" OUTPUT=");terminal_write_u64(output);
+    terminal_writeln("; RETAINED SCANOUT; NO GPU OPERATION.");return true;
+fail:
+    terminal_writeln("PRIMARY CPU DRIVER RESTART FAILED; NO RETRY OR GPU REARM.");failed();return false;
+}
 bool polaris_native_reconnect(u64 old_output) {
     /* Caller supplies a consumed ticket from the old GUI control thread,not a
      * userspace address. Check the exact recovery epoch before any RPC. */
@@ -475,6 +508,7 @@ void polaris_native_status(void) {
     terminal_write(" HEARTBEATS=");terminal_write_u64(g.heartbeats);
     terminal_write(" DIAGNOSTIC MASK=");terminal_write_hex(g.diagnostic_mask);terminal_putchar('\n');
     terminal_writeln("ONCE-PER-BOOT GPU BUDGET; STATUS PERFORMS NO GPU IO.");
+    terminal_write("PRIMARY CPU RESTART ATTEMPTED=");terminal_writeln(g.restart_attempted ? "YES" : "NO");
     terminal_write("SUPERVISED GUI: BACKEND RO=");terminal_write(g.presenter_parked ? "YES" : "NO");
     terminal_write(" RESCUE WAIT=");terminal_writeln(g.recovery_pending ? "YES" : "NO");
     terminal_write("TERMINAL CPU DRAIN WAIT=");terminal_writeln(g.terminal_cleanup_pending ? "YES" : "NO");
@@ -504,6 +538,7 @@ bool polaris_native_power_prepare(void) {
     return true;
 }
 #else
+bool polaris_native_restart(void){return false;}
 bool polaris_native_launch(const BootInfo *boot){(void)boot;return false;}
 bool polaris_native_reconnect(u64 old_output){(void)old_output;return false;}
 void polaris_native_present(void){terminal_writeln("POLARIS NATIVE WRITES DISABLED IN THIS BUILD.");}

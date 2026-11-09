@@ -661,6 +661,16 @@ bool graphical_session_run(void) {
     return normal_exit && stopped;
 }
 /* Explicit first takeover;qualified native output is required before GUI start. */
+bool graphical_session_restart_driver(void) {
+    if (!graphical_session_drained() || !polaris_watch_restart()) {
+        serial_write("GUI DRIVER RESTART REFUSED: INTACT PRIMARY AND DRAINED GUI REQUIRED.\n");return false;
+    }
+    FramebufferOutputStatus output;framebuffer_output_status(&output);
+    if(!output.valid || output.kind!=FRAMEBUFFER_OUTPUT_NATIVE || !output.identity ||
+       !framebuffer_output_matches(output.identity))return false;
+    serial_write("GUI DRIVER RESTART: FRESH READONLY PRIMARY; STARTING NEW GUI.\n");
+    return graphical_session_run();
+}
 bool graphical_session_native(const BootInfo *boot) {
     if (!boot || !graphical_session_drained() || !polaris_watch_launch(boot)) {
         serial_write("GUI NATIVE REFUSED: QUALIFIED FIRST TAKEOVER AND DRAINED GUI REQUIRED.\n");return false;

@@ -18,7 +18,7 @@ static EFI_GUID GOP_GUID          = {0x9042A9DE,0x23DC,0x4A38,{0x96,0xFB,0x7A,0x
 static EFI_GUID ACPI_20_GUID      = {0x8868E871,0xE4F1,0x11D3,{0xBC,0x22,0x00,0x80,0xC7,0x3C,0x88,0x81}};
 static EFI_GUID ACPI_10_GUID      = {0xEB9D2D30,0x2D88,0x11D3,{0x9A,0x16,0x00,0x90,0x27,0x3F,0xC1,0x4D}};
 
-static CHAR16 MSG_START[] = {'H','e','l','l','o',' ','O','S',' ','v','5',' ','U','E','F','I',' ','l','o','a','d','e','r','\r','\n',0};
+static CHAR16 MSG_START[] = {'J','A',' ','O','S',' ','U','E','F','I',' ','l','o','a','d','e','r','\r','\n',0};
 static CHAR16 MSG_LOAD[]  = {'L','o','a','d','i','n','g',' ','K','E','R','N','E','L','.','E','L','F','.','.','.','\r','\n',0};
 static CHAR16 MSG_EXIT[]  = {'E','x','i','t','i','n','g',' ','U','E','F','I',' ','b','o','o','t',' ','s','e','r','v','i','c','e','s','.','.','.','\r','\n',0};
 static CHAR16 MSG_NO_ACPI[] = {'W','a','r','n','i','n','g',':',' ','A','C','P','I',' ','R','S','D','P',' ','n','o','t',' ','f','o','u','n','d','.','\r','\n',0};

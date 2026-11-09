@@ -18,16 +18,26 @@ bool polaris_driver_reserve(PolarisDriver *d,u32 role,const ProgramBorrowedMappi
     ManagedServiceLaunchExtras e; k_memset(&e,0,sizeof(e));
     e.borrowed_mapping=*m; e.startup_argument_count=2;e.startup_arguments[0]=POLARIS_NATIVE_FB_VA;
     e.startup_arguments[1]=0xF400000000ULL;e.shutdown_request_word_count=4;e.shutdown_request_words[0]=s.shutdown_message;
-    d->role=role;d->process_id=0;d->program_attempted=false;
+    d->role=role;d->process_id=0;d->program_attempted=false;d->retained_only=false;
     if (!managed_service_start_ex(&d->service,&s,&e)) return false;
     d->process_id=managed_service_process_id(&d->service);
     return d->process_id && managed_service_connect_kernel(&d->service,&d->connection) &&
         polaris_driver_ping(d,0);
 }
+bool polaris_driver_attach_retained(PolarisDriver *d,u64 output) {
+    if (!d || !output || d->role!=POLARIS_NATIVE_ROLE_PRIMARY || d->program_attempted ||
+        !d->process_id || managed_service_process_id(&d->service)!=d->process_id ||
+        !managed_service_idle(&d->service)) return false;
+    d->program_attempted=true;d->retained_only=true;
+    IpcMessage r;
+    return program_borrowed_set_writable(&d->service.program,d->process_id,false) &&
+        call(d,POLARIS_NATIVE_RETAINED,output,0,0,&r) &&
+        r.words[2]==POLARIS_NATIVE_RETAINED && r.words[3]==output;
+}
 bool polaris_driver_plan(PolarisDriver *d,u64 id,const PolarisPlaneWitness *w,PolarisProgramPlan *p) {
     if (!p) return false;
     k_memset(p,0,sizeof(*p));
-    if (!d || !id || !w || polaris_plane_blockers(w) || w->values[0][0] || w->values[1][0]) return false;
+    if (!d || d->retained_only || !id || !w || polaris_plane_blockers(w) || w->values[0][0] || w->values[1][0]) return false;
     IpcMessage r;
     if (!call(d,POLARIS_NATIVE_CONFIG,id,(u64)w->values[0][2]|((u64)w->values[1][2]<<32),w->values[0][1],&r) ||
         r.words[2]!=id || r.words[3]) return false;
@@ -44,7 +54,7 @@ bool polaris_driver_plan(PolarisDriver *d,u64 id,const PolarisPlaneWitness *w,Po
 }
 bool polaris_driver_draw(PolarisDriver *d) {
     IpcMessage r;
-    return d && call(d,POLARIS_NATIVE_DRAW,d->role,0,0,&r) && r.words[2]==d->role && !r.words[3];
+    return d && !d->retained_only && call(d,POLARIS_NATIVE_DRAW,d->role,0,0,&r) && r.words[2]==d->role && !r.words[3];
 }
 bool polaris_driver_stop(PolarisDriver *d) {
     if (!d) return false;

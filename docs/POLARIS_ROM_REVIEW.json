@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "upstream_commit": "adc218676eef25575469234709c2d87185ca223a",
+  "sources": [
+    {
+      "url": "https://raw.githubusercontent.com/torvalds/linux/adc218676eef25575469234709c2d87185ca223a/drivers/gpu/drm/amd/include/atombios.h",
+      "path": "drivers/gpu/drm/amd/include/atombios.h",
+      "file": "atombios.h",
+      "sha256": "f7ca3f6cde2db6dcadd2606fa5af53c8be7308f0442fc3a76dfc815985ee0dd0"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/torvalds/linux/adc218676eef25575469234709c2d87185ca223a/drivers/gpu/drm/amd/amdgpu/atom.h",
+      "path": "drivers/gpu/drm/amd/amdgpu/atom.h",
+      "file": "atom.h",
+      "sha256": "1b1682ac01d0d2a8f16ef66107903d37184c8a284da4f833a249b9cadfa33f77"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/torvalds/linux/adc218676eef25575469234709c2d87185ca223a/drivers/gpu/drm/amd/amdgpu/amdgpu_atombios.c",
+      "path": "drivers/gpu/drm/amd/amdgpu/amdgpu_atombios.c",
+      "file": "amdgpu_atombios.c",
+      "sha256": "ae8a41ffd9baafeeedd213b589389eca8be6cf68fe8c33f837b7d5ec63d64113"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/torvalds/linux/adc218676eef25575469234709c2d87185ca223a/drivers/gpu/drm/radeon/ObjectID.h",
+      "path": "drivers/gpu/drm/radeon/ObjectID.h",
+      "file": "ObjectID.h",
+      "sha256": "55fcf83e7ba734261f60cc1d3190d085d390f1f4744ba6bf473b13cd69252002"
+    }
+  ],
+  "uefi_source": "https://uefi.org/specs/UEFI/2.10/14_Protocols_PCI_Bus_Support.html#efi-pci-io-protocol",
+  "scope": "Firmware RAM copy only,first uncompressed legacy PCI image;ATOM header/master1.1,ObjectInfo1.1 through1.3;connector object directory only. No command interpreter,record traversal,GPIO/AUX/I2C/link selection or GPU access.",
+  "facts": {
+    "atom_rom_pointer": 72,
+    "atom_master_data_offset": 32,
+    "master_object_entry": 22,
+    "object_connector_offset": 6,
+    "object_header_bytes": 16,
+    "object_header_v3_bytes": 18,
+    "object_bytes": 8,
+    "connector_type": 3,
+    "displayport_id": 19,
+    "hdmi_a_id": 12
+  },
+  "limits": {
+    "copy_bytes": 262144,
+    "connectors": 16,
+    "read_only": true,
+    "nx": true,
+    "capabilities": "Private receive and send endpoints only",
+    "boot_abi": "v11,size1632,previous offsets preserved;loader and kernel packaged together",
+    "lifetime": "EfiLoaderData allocation retained for boot,including optional changed-source allocation. PMM only owns EfiConventionalMemory. Diagnostic mappings end with managed-service teardown;source never freed."
+  }
+}
