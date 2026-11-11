@@ -16,7 +16,7 @@ bool polaris_mmio_plan_test(void) {
     BootInfo boot; PciDevice device; DisplayProbeInfo info; u8 config[PCI_CONFIG_SPACE_SIZE];
     if (!polaris_mmio_fixture(&boot, &device, &info, config)) return false;
     PolarisMmioPlan plan;
-    if (!polaris_mmio_plan(&boot, &device, &info, 0U, &plan) || plan.page_count != 4U ||
+    if (!polaris_mmio_plan(&boot, &device, &info, 0U, &plan) || plan.profile!=polaris_profile_qualified() || plan.page_count != 4U ||
         plan.page_offsets[0] != 0x6000U || plan.page_offsets[1] != 0x7000U ||
         plan.page_offsets[2] != 0x10000U || plan.page_offsets[3] != 0x11000U ||
         plan.bar.base != 0x63400000ULL || plan.bar.size != 0x40000ULL) return false;

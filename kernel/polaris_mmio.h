@@ -1,6 +1,7 @@
 #ifndef JA_OS_POLARIS_MMIO_H
 #define JA_OS_POLARIS_MMIO_H
 #include "display_probe.h"
+#include "polaris_profile.h"
 #include "pci_assignment.h"
 #include "vmm.h"
 #include "amd_polaris_registers.h"
@@ -17,6 +18,7 @@
 #define POLARIS_MMIO_WINDOW_STRIDE 0x10000ULL
 
 typedef struct {
+    const PolarisHardwareProfile *profile;
     BootDisplayBar bar;
     u32 page_offsets[POLARIS_MMIO_PAGE_COUNT];
     u32 page_count;
@@ -99,6 +101,7 @@ bool polaris_mmio_read_link_held(PolarisMmioHold *hold,u64 identity,Process *own
 bool polaris_mmio_read_timing_held(PolarisMmioHold *hold,u64 identity,Process *owner,u32 field,u32 *out);
 
 /* Three fixed CRTC0 vertical-total fields, existing RO page only. */
+bool polaris_mmio_read_stream_held(PolarisMmioHold *hold,u64 identity,Process *owner,u32 field,u32 *out);
 bool polaris_mmio_read_vertical_held(PolarisMmioHold *hold,u64 identity,Process *owner,u32 field,u32 *out);
 
 /* Permanent admission closure; safe without active kernel CR3. Cleanup also

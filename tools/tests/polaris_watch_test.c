@@ -12,6 +12,7 @@ static unsigned phase,begins,polls,immediate,background,bg_policy,presents,gui_w
 static u64 ticks;
 static unsigned launches,starts,restarts,vtotal_begins,last_prefix;
 static bool restart_accept;
+static u32 rescue_fault_begins;
 static bool launch_accept=true,reserve_refused,transport_refused;
 static bool shell,spin_seen,power_refused,gui,terminal_pending;
 void terminal_writeln(const char *s){if(!strcmp(s,"OFF-MONITOR GUI ACTIVE=YES."))++gui_witness;}
@@ -34,6 +35,7 @@ bool serial_worker_call(SerialWorker *w,u32 op,u64 arg,bool *ok){
 }
 void polaris_native_begin(const BootInfo *b){(void)b;++begins;phase=1;}
 void polaris_native_begin_vtotal(const BootInfo *b,u32 prefix){CHECK(b&&prefix<=3);++vtotal_begins;last_prefix=prefix;phase=1;}
+void polaris_native_begin_rescue_fault(const BootInfo *b,u32 prefix){CHECK(b&&prefix>=1&&prefix<=3);++rescue_fault_begins;last_prefix=prefix;phase=1;}
 bool polaris_native_launch(const BootInfo *b){CHECK(b);++launches;phase=launch_accept?1:0;return launch_accept;}
 bool polaris_native_restart(void){++restarts;return restart_accept;}
 void polaris_native_rescue(void){phase=2;}
@@ -91,6 +93,16 @@ int main(void){
  CHECK(polaris_watch_power_prepare()&&!live->active);
  for(u32 prefix=0;prefix<=3;++prefix){phase=0;polaris_watch_begin_vtotal(&boot,prefix);CHECK(live->active&&vtotal_begins==prefix+1&&last_prefix==prefix);polaris_watch_begin_vtotal(&boot,0);CHECK(vtotal_begins==prefix+1);CHECK(polaris_watch_power_prepare()&&!live->active);}
  prior_starts=starts;polaris_watch_begin_vtotal(0,0);polaris_watch_begin_vtotal(&boot,4);CHECK(starts==prior_starts&&vtotal_begins==4);
+ for(u32 prefix=1;prefix<=3;++prefix){
+  phase=0;polaris_watch_begin_rescue_fault(&boot,prefix);CHECK(live->active&&rescue_fault_begins==prefix&&last_prefix==prefix);
+  prior_starts=starts;polaris_watch_begin_rescue_fault(&boot,1);polaris_watch_begin_vtotal(&boot,0);
+  CHECK(starts==prior_starts&&rescue_fault_begins==prefix);CHECK(polaris_watch_power_prepare()&&!live->active);
+ }
+ prior_starts=starts;polaris_watch_begin_rescue_fault(0,1);polaris_watch_begin_rescue_fault(&boot,0);polaris_watch_begin_rescue_fault(&boot,4);CHECK(starts==prior_starts);
+ reserve_refused=true;polaris_watch_begin_rescue_fault(&boot,1);CHECK(!live->active&&rescue_fault_begins==3);reserve_refused=false;
+ transport_refused=true;polaris_watch_begin_rescue_fault(&boot,1);CHECK(live->active&&rescue_fault_begins==3);transport_refused=false;
+ CHECK(polaris_watch_power_prepare()&&!live->active);
+ puts("PASS: rescue-prefix worker all3dispatches/null/zero/invalid/active/reservation/ambiguous-transport guards;one shared worker;CPU-only stop.");
  puts("PASS: vertical-mode worker normal/three fault prefixes,active/null/invalid guards and CPU-only stop;serialized callbacks.");
  puts("PASS: retained restart worker,inactive/refused/accepted/armed guards,no replay or GPU operation;core doubles.");
  puts("PASS: normal native launch adapter,null/active/reservation/refusal/success/ambiguous-transport paths;one serialized callback,no replay,retained transport failure;no hardware.");

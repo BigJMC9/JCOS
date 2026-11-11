@@ -28,7 +28,7 @@ def main():
             "-ffunction-sections", "-fdata-sections", "-fno-asynchronous-unwind-tables",
             "-Ikernel", "-Ikernel/tests", "-Iinclude",
             *(["-DJCOS_POLARIS_LIVE_CAPTURE=1"] if name == "polaris-live-controller" else []),
-            *[str(root / path) for path in sources], str(root / "kernel/lib.c"),
+            *[str(root / path) for path in sources], str(root / "kernel/polaris_profile.c"), str(root / "kernel/lib.c"),
             "-Wl,--gc-sections", "-o", str(exe)], cwd=root, check=True)
         subprocess.run([str(exe)], check=True)
         if name == "polaris-mmio":

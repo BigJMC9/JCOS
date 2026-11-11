@@ -1,0 +1,232 @@
+{
+  "schema_version": 1,
+  "upstream_commit": "adc218676eef25575469234709c2d87185ca223a",
+  "sources": [
+    {
+      "path": "drivers/gpu/drm/amd/display/dc/dce/dce_link_encoder.c",
+      "file": "dce_link_encoder.c",
+      "url": "https://raw.githubusercontent.com/torvalds/linux/adc218676eef25575469234709c2d87185ca223a/drivers/gpu/drm/amd/display/dc/dce/dce_link_encoder.c",
+      "sha256": "00850980541655910f3c97d68af789e5fa4a1b7d2cf301bcdbdcd7c8c801e360",
+      "bytes": 51785
+    },
+    {
+      "path": "drivers/gpu/drm/amd/display/dc/dce/dce_link_encoder.h",
+      "file": "dce_link_encoder.h",
+      "url": "https://raw.githubusercontent.com/torvalds/linux/adc218676eef25575469234709c2d87185ca223a/drivers/gpu/drm/amd/display/dc/dce/dce_link_encoder.h",
+      "sha256": "8f242dd953109146e5d86ca5b980182a92c99590381c25629326ed4731080f22",
+      "bytes": 10001
+    },
+    {
+      "path": "drivers/gpu/drm/amd/display/dc/dce/dce_stream_encoder.c",
+      "file": "dce_stream_encoder.c",
+      "url": "https://raw.githubusercontent.com/torvalds/linux/adc218676eef25575469234709c2d87185ca223a/drivers/gpu/drm/amd/display/dc/dce/dce_stream_encoder.c",
+      "sha256": "111399cf9ece04d7d4d349d27014eefba520566a8d41df3d4b1d5637b11c1b40",
+      "bytes": 46262
+    },
+    {
+      "path": "drivers/gpu/drm/amd/display/dc/resource/dce112/dce112_resource.c",
+      "file": "dce112_resource.c",
+      "url": "https://raw.githubusercontent.com/torvalds/linux/adc218676eef25575469234709c2d87185ca223a/drivers/gpu/drm/amd/display/dc/resource/dce112/dce112_resource.c",
+      "sha256": "38d0357ba68540159df93ca29dee2b26b201d8bf6940dfed3854f8270146a413",
+      "bytes": 38572
+    },
+    {
+      "path": "drivers/gpu/drm/amd/include/asic_reg/dce/dce_11_2_d.h",
+      "file": "dce_11_2_d.h",
+      "url": "https://raw.githubusercontent.com/torvalds/linux/adc218676eef25575469234709c2d87185ca223a/drivers/gpu/drm/amd/include/asic_reg/dce/dce_11_2_d.h",
+      "sha256": "7f865912129ac67966827035d5a34b4362f8a3156a56e298cb995386ce77a644",
+      "bytes": 874647
+    },
+    {
+      "path": "drivers/gpu/drm/amd/include/asic_reg/dce/dce_11_2_sh_mask.h",
+      "file": "dce_11_2_sh_mask.h",
+      "url": "https://raw.githubusercontent.com/torvalds/linux/adc218676eef25575469234709c2d87185ca223a/drivers/gpu/drm/amd/include/asic_reg/dce/dce_11_2_sh_mask.h",
+      "sha256": "cd5dde10fcdf14c5355f54dc34c84b7fef30d8864045ae4f5172d7e66beab737",
+      "bytes": 1285290
+    },
+    {
+      "path": "drivers/gpu/drm/amd/amdgpu/amdgpu_atombios.c",
+      "file": "amdgpu_atombios.c",
+      "url": "https://raw.githubusercontent.com/torvalds/linux/adc218676eef25575469234709c2d87185ca223a/drivers/gpu/drm/amd/amdgpu/amdgpu_atombios.c",
+      "sha256": "ae8a41ffd9baafeeedd213b589389eca8be6cf68fe8c33f837b7d5ec63d64113",
+      "bytes": 58764
+    },
+    {
+      "file": "dce110_timing_generator.c",
+      "path": "drivers/gpu/drm/amd/display/dc/dce110/dce110_timing_generator.c",
+      "url": "https://raw.githubusercontent.com/torvalds/linux/adc218676eef25575469234709c2d87185ca223a/drivers/gpu/drm/amd/display/dc/dce110/dce110_timing_generator.c",
+      "sha256": "aa7451a5d9b7d57a3005312ccf680e17204644a9cb5a88f17b9045ace5d1ca84"
+    }
+  ],
+  "fields": [
+    {
+      "selector": 0,
+      "register": "mmDP2_DP_VID_STREAM_CNTL",
+      "byte_offset": 78480,
+      "width": 4,
+      "access": "read-only",
+      "page": 77824
+    },
+    {
+      "selector": 1,
+      "register": "mmDP2_DP_STEER_FIFO",
+      "byte_offset": 78484,
+      "width": 4,
+      "access": "read-only",
+      "page": 77824
+    },
+    {
+      "selector": 2,
+      "register": "mmDIG2_DIG_FE_CNTL",
+      "byte_offset": 77824,
+      "width": 4,
+      "access": "read-only",
+      "page": 77824
+    },
+    {
+      "selector": 3,
+      "register": "mmCRTC0_CRTC_MASTER_UPDATE_LOCK",
+      "byte_offset": 28404,
+      "width": 4,
+      "access": "read-only",
+      "page": 24576
+    },
+    {
+      "selector": 4,
+      "register": "mmCRTC0_CRTC_MASTER_UPDATE_MODE",
+      "byte_offset": 28408,
+      "width": 4,
+      "access": "read-only",
+      "page": 24576
+    }
+  ],
+  "field_facts": [
+    {
+      "compiled": "POLARIS_STREAM_ENABLE_MASK",
+      "upstream": "DP_VID_STREAM_CNTL__DP_VID_STREAM_ENABLE_MASK"
+    },
+    {
+      "compiled": "POLARIS_STREAM_DEFER_MASK",
+      "upstream": "DP_VID_STREAM_CNTL__DP_VID_STREAM_DIS_DEFER_MASK"
+    },
+    {
+      "compiled": "POLARIS_STREAM_STATUS_MASK",
+      "upstream": "DP_VID_STREAM_CNTL__DP_VID_STREAM_STATUS_MASK"
+    },
+    {
+      "compiled": "POLARIS_STREAM_FIFO_RESET_MASK",
+      "upstream": "DP_STEER_FIFO__DP_STEER_FIFO_RESET_MASK"
+    },
+    {
+      "compiled": "POLARIS_STREAM_DIG_START_MASK",
+      "upstream": "DIG_FE_CNTL__DIG_START_MASK"
+    },
+    {
+      "compiled": "POLARIS_STREAM_UPDATE_LOCK_MASK",
+      "upstream": "CRTC_MASTER_UPDATE_LOCK__MASTER_UPDATE_LOCK_MASK"
+    },
+    {
+      "compiled": "POLARIS_STREAM_UPDATE_MODE_MASK",
+      "upstream": "CRTC_MASTER_UPDATE_MODE__MASTER_UPDATE_MODE_MASK"
+    }
+  ],
+  "profile": "Exact selected1002:67DF EF/1458:2310 GOP/D0/CPUserial/inheritedCRTC0-FE2-BE2/DP and zero vertical override; existing86value admission before ten extended loads",
+  "capture": {
+    "values": 96,
+    "existing_values": 86,
+    "extended_fields": 5,
+    "extended_samples": 2,
+    "new_read_registers": 3,
+    "new_pages": 0,
+    "max_polls": 0,
+    "max_waits": 0,
+    "retries": 0,
+    "software_admission_seconds": 2,
+    "bus_transaction_timeout": false
+  },
+  "kernel_access": "Same registered hold and RO/NX/UC leaves; field IDs0..4 only; frame/PTE/bounds/identity/context checks; refuses rebind-enabled mapping; no IRQ-off GPU load",
+  "decoder": "Fresh Ring3 copied-only role19/20/21;96ordereduint32 DATA and14ordered report queries;no MMIO/device/framebuffer capability;tailstable,baselinezero,stream/FE correlated;rawFIFO/update values+flags remain observations",
+  "report": "word0status/version1;1..9timingV2;10rawstream/FIFO;11rawFE/lock;12rawmode;13diagnosticflags;on refusal only status survives",
+  "read_review": "Pinned stream/FIFO/FE and master-lock consumers use reads/RMW. MASTER_UPDATE_MODE is a masked control initialized by enable_crtc. No read-to-clear use found in these paths; ACK/reset writes remain excluded. This scoped review is not a hardware bus-stall guarantee.",
+  "write_review": "No new writes permitted. Future blank must wait for stream-status0 before FIFO reset; future unblank DIG_START,clear FIFO,100us priming then enable. Pinned sequence is dependency evidence only; exact fixed values,posted ordering,delays and fresh rescue each require their own gate before execution.",
+  "physical_status": "PASS physical v41 single96load RO capture,stable five-field tail,copied14word report,firmware output preservation,repeat refusal and unassisted controlled reboot;no blank/unblank write qualification.",
+  "limits": [
+    "Copied report/zero diagnostic flags do not authorize blanking,unblanking,timing writes or successful recovery",
+    "No new VRAM allocation,clock/link-speed programming,AUX/DPCD,DP training,HDMI,DMA/IRQ/IOMMU/reset authority",
+    "Operational DCE/inherited DP/no hotplug-power-reset;software admission cannot cancel a stalled load"
+  ],
+  "physical_evidence": {
+    "image_sha256": "24df103e3abb491476a78c4ab65e1aebf0770d7f91672af7db2342d468c39c22",
+    "platform": "Z390 Gaming X/F10/i7-9700K/RX5701002:67DF EF/1458:2310/Philips272M8DP",
+    "captures": 1,
+    "loads": 96,
+    "stores": 0,
+    "polls": 0,
+    "retries": 0,
+    "extended_samples": [
+      [
+        66049,
+        0,
+        16777216,
+        0,
+        2
+      ],
+      [
+        66049,
+        0,
+        16777216,
+        0,
+        2
+      ]
+    ],
+    "diagnostic_flags": 0,
+    "automatic_m_samples": [
+      30091,
+      30092
+    ],
+    "report_words": [
+      "0x0000000000010000",
+      "0x0002020000020000",
+      "0x00C0084007800898",
+      "0x0029046104380465",
+      "0x00050000002C0000",
+      "0x0000000000000000",
+      "0x0000010002000000",
+      "0x0000758B00008000",
+      "0x0000005000010201",
+      "0x0000758C0000758B",
+      "0x0000000000010201",
+      "0x0000000001000000",
+      "0x0000000000000002",
+      "0x0000000000000000"
+    ],
+    "firmware_output_preserved": true,
+    "unassisted_reboots": 1,
+    "serial": {
+      "port": "COM7",
+      "active_sessions": 5,
+      "commands": 21,
+      "active_received_bytes": 35742,
+      "active_sent_bytes": 245,
+      "unassigned_received_within_sessions": 0,
+      "passive": [
+        {
+          "file": "boot-reconnect-01.log",
+          "bytes": 0,
+          "kernel_boundary_offset": -1,
+          "attributed_kernel_boot_bytes": 0,
+          "unattributed_prefix_bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ],
+      "passive_bytes": 0,
+      "attributed_initial_kernel_bytes": 0,
+      "unattributed_prefix_bytes": 0,
+      "scoped_received_bytes": 35742,
+      "all_raw_received_bytes": 35742,
+      "scope": "Five active command sessions; initial boot not captured because adapter was unplugged; controlled reboot is captured within its active session; inter-session gaps excluded; no USB byte readback"
+    },
+    "evidence": "build/rx570-stream-v41/hardware/validation.json",
+    "limits": "Read-only observation only; mode2 observed and no authority to change or clear controls;no blank/unblank,timing,clock,training,HDMI,hardware reset or isolation qualification"
+  }
+}

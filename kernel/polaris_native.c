@@ -22,16 +22,20 @@
 #include "serial.h"
 #include "arch.h"
 #include "lib.h"
-static struct {
+typedef struct {
+    bool vertical_ready;
+    u32 snapshot[POLARIS_VERTICAL_VALUES];
+    u64 report[POLARIS_VERTICAL_WORDS];
+} PolarisRetainedRescueState;
+typedef struct {
     PciAssignment assignment;
     PolarisMmioBinding binding;
     PolarisMmioHold hold;
     PolarisDriver primary,rescue;
     GraphicsSupervisorSession policy;
     CapabilityHandle cap;
-    FramebufferInfo info;
+    PolarisDisplayRuntime runtime;
     const BootInfo *boot;
-    BootDisplayBar aperture;
     u64 hold_id,output_id,start,last_heartbeat,challenge,heartbeats;
     u32 frequency,stage,diagnostic_mask;
     bool attempted,mutated,original_render,recovery_authorized,policy_closed;
@@ -39,12 +43,12 @@ static struct {
     u64 recovery_started,recovery_output_id;
     bool reconnect_attempted,restart_attempted;
     PolarisDriver *writer;
-    bool vtotal,vtotal_ready;
-    u32 vtotal_fault_prefix;
+    bool vtotal;
+    u32 vtotal_fault_prefix,rescue_fault_prefix;
     /* Kernel-retained originals: never mapped into either driver. */
-    u32 vtotal_snapshot[POLARIS_VERTICAL_VALUES];
-    u64 vtotal_report[POLARIS_VERTICAL_WORDS];
-} g;
+    PolarisRetainedRescueState rescue_state;
+} PolarisNativeSession;
+static PolarisNativeSession g;
 static void recover_native(bool induce);
 static void resume_recovery(void);
 static bool presenter_released(void);
@@ -172,7 +176,9 @@ static bool vtotal_write(void *unused,u32 field,u32 value){
 static bool execute_vtotal(PolarisDriver *driver,u32 fault){
  PolarisVtotalIo io;io.context=0;io.admitted=admitted;io.read=vtotal_read;io.write=vtotal_write;io.wait=wait_tick;PolarisVtotalResult r;
  g.start=timer_ticks();g.frequency=timer_frequency();
- bool ok=polaris_driver_vtotal(driver,&io,fault,&r);
+ bool ok=driver->role==2 && g.rescue_fault_prefix ?
+     polaris_driver_rescue_vtotal_fault(driver,&io,g.rescue_fault_prefix,&r) :
+     polaris_driver_vtotal(driver,&io,fault,&r);
  terminal_write("VTOTAL OWNER PID=");terminal_write_u64(driver->process_id);terminal_write(" INC=");terminal_write_u64(driver->connection.incarnation);
  terminal_write(" ROLE=");terminal_write_u64(driver->role);terminal_putchar('\n');
  terminal_write("VTOTAL RESULT: WRITES ATTEMPTED=");terminal_write_u64(r.write_attempts);
@@ -182,7 +188,7 @@ static bool execute_vtotal(PolarisDriver *driver,u32 fault){
  return ok;
 }
 static bool observe_vtotal(void){
- u32 *v=g.vtotal_snapshot;g.frequency=timer_frequency();g.start=timer_ticks();
+ u32 *v=g.rescue_state.snapshot;g.frequency=timer_frequency();g.start=timer_ticks();
  for(u32 i=0;i<86;++i){
   if(!admitted(0))return false;
   if(i==6){u32 n=0;for(u32 p=0;p<6;++p){u32 e=v[p]&0x10001U;if(e && (e!=0x10001U || (v[p]&0x1000000U)))return false;if(e)++n;}if(n!=1)return false;}
@@ -198,11 +204,12 @@ static bool observe_vtotal(void){
   terminal_write(" VALUE=");terminal_write_hex(v[i]);terminal_putchar('\n');
   if((i==26 || i==60) && !(v[i]&1U))return false;
  }
- if(!admitted(0) || !jcos_polaris_vtotal_snapshot_admitted(v,86) || !polaris_vertical_decode_copy(v,g.vtotal_report))return false;
- const u64 *r=g.vtotal_report;
- if(r[0]!=0x10000ULL || r[10] || r[11]!=0x46C00000000ULL || r[12]!=0x46C00000000ULL ||
-  r[13]!=0x46C00000001ULL || r[14]!=0x1100000002ULL || r[15]!=2 || r[16] || r[17]!=1)return false;
- g.vtotal_ready=true;
+ if(!admitted(0) || !jcos_polaris_vtotal_snapshot_admitted(v,86) || !polaris_vertical_decode_copy(v,g.rescue_state.report))return false;
+ const u64 *r=g.rescue_state.report;
+ const PolarisPipelineProfile *p=&g.runtime.profile->pipeline;
+ if(r[0]!=p->vertical_report_head)return false;
+ for(u32 i=0;i<8;++i)if(r[10+i]!=p->vertical_report_tail[i])return false;
+ g.rescue_state.vertical_ready=true;
  terminal_writeln("VTOTAL ZERO BASELINE AND RING3 PLAN RETAINED IN KERNEL BEFORE ANY GPU WRITE.");
  terminal_writeln("RO HOLD RETAINED FOR NATIVE OPERATION; DRIVER HAS NO MMIO MAPPING.");return true;
 }
@@ -212,7 +219,7 @@ static bool initial_read(u32 pipe,u32 selector,u32 *v) {
     terminal_write(" SELECTOR=");terminal_write_u64(selector);terminal_putchar('\n');
     if (!admitted(0)) return false;
     bool ok=false;
-    if (g.mutated) ok=pipe==0 && polaris_mmio_rebind_read(&g.hold,g.hold_id,selector,v);
+    if (g.mutated) ok=pipe==g.runtime.surface.pipe && polaris_mmio_rebind_read(&g.hold,g.hold_id,selector,v);
     else if (selector<15) ok=polaris_mmio_read_held(&g.hold,g.hold_id,process_kernel(),pipe,(PolarisDisplayRegister)selector,v);
     else if (selector<18) ok=polaris_mmio_read_witness_held(&g.hold,g.hold_id,process_kernel(),pipe,(PolarisPlaneWitnessRegister)(selector-15),v);
     else if (selector<20) ok=polaris_mmio_read_location_held(&g.hold,g.hold_id,process_kernel(),(PolarisLocationRegister)(selector-18),v);
@@ -220,6 +227,7 @@ static bool initial_read(u32 pipe,u32 selector,u32 *v) {
     return ok;
 }
 static bool observe(PolarisPlaneWitness *w) {
+    g.runtime.surface_observed=false;
     u32 values[15],again[15],locations[2][2];
     g.frequency=timer_frequency();g.start=timer_ticks();
     if (!g.mutated) {
@@ -227,46 +235,47 @@ static bool observe(PolarisPlaneWitness *w) {
         for (u32 i=0;i<6;++i) {u32 p,f,v;
             if (!polaris_observation_next(&b,&p,&f) || !initial_read(p,f,&v) || !polaris_observation_accept(&b,v)) return false;
         }
-        if (b.pipe!=0) return false;
+        if (b.pipe!=g.runtime.surface.pipe) return false;
     }
     for (u32 sample=0;sample<2;++sample) {
-        for (u32 f=0;f<2;++f) if (!initial_read(0,18+f,&locations[sample][f])) return false;
-        for (u32 f=0;f<3;++f) if (!initial_read(0,15+f,&w->values[sample][f])) return false;
+        for (u32 f=0;f<2;++f) if (!initial_read(g.runtime.surface.pipe,18+f,&locations[sample][f])) return false;
+        for (u32 f=0;f<3;++f) if (!initial_read(g.runtime.surface.pipe,15+f,&w->values[sample][f])) return false;
         u32 *row=sample ? again : values;
-        for (u32 f=0;f<15;++f) if (!initial_read(0,f,&row[f])) return false;
+        for (u32 f=0;f<15;++f) if (!initial_read(g.runtime.surface.pipe,f,&row[f])) return false;
         if (!sample && !wait_tick(0)) return false;
     }
     for (u32 f=0;f<15;++f) if (values[f]!=again[f]) return false;
     PolarisVramObservation v;
-    return !polaris_plane_blockers(w) && !w->values[0][0] && !w->values[1][0] &&
-        polaris_vram_observe(g.boot,&g.aperture,values,locations[0],locations[1],&v) &&
-        v.surface_gpu_address==0xF400000000ULL && v.surface_cpu_address==g.info.physical_base;
+    bool ok=!polaris_plane_blockers(w) && !w->values[0][0] && !w->values[1][0] &&
+        polaris_vram_observe(g.boot,&g.runtime.aperture,values,locations[0],locations[1],&v) &&
+        v.surface_gpu_address==g.runtime.surface.gpu_address && v.surface_cpu_address==g.runtime.framebuffer.physical_base;
+    if(ok){g.runtime.observation=v;g.runtime.surface_observed=true;}return ok;
 }
 static bool show(PolarisDriver *d,bool rescue) {
     ProgramBorrowedMappingSpec mapping;FramebufferInfo info;u64 fb;
     if (!d->process_id || managed_service_process_id(&d->service)!=d->process_id ||
-        !framebuffer_native_install(&g.info,rescue,&g.output_id)) return false;
+        !framebuffer_native_install(&g.runtime.framebuffer,rescue,&g.output_id)) return false;
     g.writer=d;g.presenter_parked=false;
     if (!display_direct_prepare_native(g.output_id,POLARIS_NATIVE_FB_VA,&mapping,&info,&fb) ||
-        mapping.physical_base!=g.info.physical_base || mapping.size!=0x300000 ||
+        mapping.physical_base!=g.runtime.framebuffer.physical_base || mapping.size!=g.runtime.surface.bytes ||
         !program_borrowed_set_writable(&d->service.program,managed_service_process_id(&d->service),true) ||
         !display_direct_commit(&d->service.program.process) || !polaris_driver_draw(d)) return false;
     g.last_heartbeat=timer_ticks();
     return true;
 }
-static void begin_native(const BootInfo *boot,bool vertical,u32 fault_prefix) {
+static void begin_native(const BootInfo *boot,bool vertical,u32 fault_prefix,u32 rescue_prefix) {
     terminal_writeln("POLARIS NATIVE REBIND V1 / EXPLICIT SUPERVISED EXPERIMENT");
     if (g.attempted) {terminal_writeln("REFUSED: ONE NATIVE ATTEMPT PER BOOT; NO ASSIGNMENT REUSE.");return;}
-    if(fault_prefix>3 || (!vertical && fault_prefix))return;
-    PolarisReadReport report;
+    if(fault_prefix>3 || rescue_prefix>3 || (!vertical && (fault_prefix || rescue_prefix)) || (fault_prefix && rescue_prefix))return;
+    PolarisReadReport report;FramebufferInfo info;
+    const PolarisHardwareProfile *profile=polaris_profile_qualified();
     const u32 local=POLARIS_READ_BLOCK_TARGET|POLARIS_READ_BLOCK_BAR_PLAN|POLARIS_READ_BLOCK_POWER|
         POLARIS_READ_BLOCK_CPU|POLARIS_READ_BLOCK_UART|POLARIS_READ_BLOCK_SCANOUT;
     if (!boot || !polaris_read_profile_inspect(boot,&report) || (report.blockers&local) ||
         !serial_available() || !timer_initialized() || !scheduler_preemption_enabled() ||
         !device_mmio_interrupts_enabled() || display_direct_state()!=DISPLAY_LEASE_KERNEL ||
-        !framebuffer_firmware_valid() || !framebuffer_writers_idle() || !framebuffer_info(&g.info) ||
-        g.info.physical_base!=0x50000000 || g.info.size!=0x300000 || !g.info.direct_map_safe ||
-        g.info.width!=1024 || g.info.height!=768 || g.info.pixels_per_scanline!=1024 || g.info.pixel_format!=1) {
+        !framebuffer_firmware_valid() || !framebuffer_writers_idle() || !framebuffer_info(&info) ||
+        !polaris_display_runtime_init(profile,&info,&g.runtime)) {
         terminal_writeln("REFUSED: EXACT BOARD/GOP/D0/CPU/SERIAL/KERNEL-LEASE PROFILE REQUIRED.");return;
     }
     const PciDevice *selected=0;
@@ -275,15 +284,16 @@ static void begin_native(const BootInfo *boot,bool vertical,u32 fault_prefix) {
         selected=pci_device(i);
     }
     if (!selected) return;
-    g.attempted=true;g.boot=boot;g.original_render=terminal_render_enabled();g.vtotal=vertical;g.vtotal_fault_prefix=fault_prefix;
+    g.attempted=true;g.boot=boot;g.original_render=terminal_render_enabled();g.vtotal=vertical;g.vtotal_fault_prefix=fault_prefix;g.rescue_fault_prefix=rescue_prefix;
     if(g.vtotal){terminal_write("POLARIS VERTICAL TIMING V1; PRIMARY FAULT PREFIX=");terminal_write_u64(fault_prefix);terminal_writeln("; FIXED ZERO RESTORATION BASELINE.");}
+    if(g.rescue_fault_prefix){terminal_write("RESCUE VERTICAL FAULT ARMED AFTER STORE ACK=");terminal_write_u64(g.rescue_fault_prefix);terminal_writeln("; FAILED RESCUE MUST REMAIN HEADLESS; NO REPLAY.");}
     terminal_writeln("PROFILE: OPERATIONAL GPU / UNCHANGED INHERITED DP TIMING; NO HOTPLUG/POWER/RESET.");
     terminal_writeln("RECOVERY SCOPE: SOFTWARE OWNER FAILURE; NO NEW IRQ/DMA; NO GPU-HANG GUARANTEE.");
     DisplayProbeInfo inventory;
-    if (!display_probe_read(selected,&inventory) || !display_probe_firmware_bar(boot,selected,&inventory,0,&g.aperture)) goto fail;
+    if (!display_probe_read(selected,&inventory) || polaris_profile_detect(selected,&inventory)!=g.runtime.profile || !display_probe_firmware_bar(boot,selected,&inventory,0,&g.runtime.aperture)) goto fail;
     ProgramBorrowedMappingSpec mapping;
-    mapping.physical_base=g.info.physical_base;mapping.size=g.info.size;mapping.virtual_base=POLARIS_NATIVE_FB_VA;mapping.flags=VM_UNCACHED;
-    if (!polaris_driver_reserve(&g.primary,1,&mapping) || !polaris_driver_reserve(&g.rescue,2,&mapping)) goto fail;
+    mapping.physical_base=g.runtime.framebuffer.physical_base;mapping.size=g.runtime.framebuffer.size;mapping.virtual_base=POLARIS_NATIVE_FB_VA;mapping.flags=VM_UNCACHED;
+    if (!polaris_driver_reserve_profile(&g.primary,1,g.runtime.profile,&mapping) || !polaris_driver_reserve_profile(&g.rescue,2,g.runtime.profile,&mapping)) goto fail;
     terminal_writeln("PRIMARY AND SEPARATE RESCUE ELF/FONT/IPC/RO FRAMEBUFFER RESOURCES RESERVED.");
     if (!graphics_supervisor_begin(&g.policy)) goto fail;
     terminal_writeln("RING3 GRAPHICS POLICY SESSION ADMITTED; DEVICE AUTHORITY REMAINS KERNEL ENFORCED.");
@@ -304,13 +314,13 @@ static void begin_native(const BootInfo *boot,bool vertical,u32 fault_prefix) {
     g.mutated=true;terminal_writeln(g.vtotal ?
         "GOP PERMANENTLY RETIRED BEFORE RW MMIO; TWO ADDRESS AND THREE VERTICAL WRITES MAXIMUM." :
         "GOP PERMANENTLY RETIRED BEFORE RW MMIO; TWO FIXED ADDRESS WRITES ONLY.");
-    if (!polaris_mmio_enable_rebind(&g.hold,g.hold_id) || !execute(&g.primary,&plan)) goto fail;
+    if (!g.runtime.surface_observed || !polaris_mmio_enable_rebind(&g.hold,g.hold_id) || !execute(&g.primary,&plan)) goto fail;
     g.stage=1;
     u64 action;
     if (!graphics_supervisor_request(&g.policy,GRAPHICS_POLICY_PRIMARY,0,&action) ||
         action!=GRAPHICS_POLICY_KEEP) goto fail;
     if(g.vtotal){
-        if(!g.vtotal_ready || !polaris_mmio_enable_vtotal(&g.hold,g.hold_id,g.vtotal_snapshot))goto fail;
+        if(!g.rescue_state.vertical_ready || !polaris_mmio_enable_vtotal(&g.hold,g.hold_id,g.rescue_state.snapshot))goto fail;
         if(!execute_vtotal(&g.primary,g.vtotal_fault_prefix)){
             terminal_writeln("PRIMARY VERTICAL OPERATION INCOMPLETE; REQUESTING FRESH RESCUE FROM RETAINED ZERO BASELINE.");request_rescue(false);return;
         }
@@ -322,8 +332,12 @@ static void begin_native(const BootInfo *boot,bool vertical,u32 fault_prefix) {
 fail:
     failed();
 }
-void polaris_native_begin(const BootInfo *boot){begin_native(boot,false,0);}
-void polaris_native_begin_vtotal(const BootInfo *boot,u32 prefix){begin_native(boot,true,prefix);}
+void polaris_native_begin(const BootInfo *boot){begin_native(boot,false,0,0);}
+void polaris_native_begin_vtotal(const BootInfo *boot,u32 prefix){begin_native(boot,true,prefix,0);}
+void polaris_native_begin_rescue_fault(const BootInfo *boot,u32 prefix){
+    if(!prefix || prefix>3)return;
+    begin_native(boot,true,0,prefix);
+}
 static bool presenter_released(void) {
     return graphical_session_drained() && display_direct_state()==DISPLAY_LEASE_KERNEL &&
         framebuffer_writers_idle();
@@ -343,7 +357,7 @@ static void resume_recovery(void) {
     if (!polaris_mmio_arm_recovery(&g.hold,g.hold_id)) {failed();return;}
     terminal_writeln("OLD PRIMARY STOPPED/REAPED; MMIO PARENT STILL QUARANTINED; RESERVED RESCUE ENTERING.");
     if(g.vtotal){
-        if(!g.vtotal_ready || !execute_vtotal(&g.rescue,0)){failed();return;}
+        if(!g.rescue_state.vertical_ready || !execute_vtotal(&g.rescue,0)){failed();return;}
         terminal_writeln("FRESH RING3 RESCUE RESTORED ZERO VERTICAL OVERRIDE; ORIGINAL BASE TOTAL RETAINED.");
     }
     PolarisPlaneWitness witness;PolarisProgramPlan plan;
@@ -417,8 +431,8 @@ bool polaris_native_restart(void) {
     if (!polaris_driver_stop(&g.primary) || !presenter_released() ||
         !framebuffer_output_matches(output) || !recovery_context_valid()) goto fail;
     ProgramBorrowedMappingSpec m;
-    m.physical_base=g.info.physical_base;m.size=g.info.size;m.virtual_base=POLARIS_NATIVE_FB_VA;m.flags=VM_UNCACHED;
-    if (!polaris_driver_reserve(&g.primary,1,&m) || g.primary.process_id==old_pid ||
+    m.physical_base=g.runtime.framebuffer.physical_base;m.size=g.runtime.framebuffer.size;m.virtual_base=POLARIS_NATIVE_FB_VA;m.flags=VM_UNCACHED;
+    if (!polaris_driver_reserve_profile(&g.primary,1,g.runtime.profile,&m) || g.primary.process_id==old_pid ||
         g.primary.connection.incarnation==old_inc || !polaris_driver_attach_retained(&g.primary,output) ||
         g.challenge>~0ULL-2 || !polaris_driver_ping(&g.primary,++g.challenge) ||
         !polaris_driver_ping(&g.rescue,++g.challenge) || !presenter_released() ||
@@ -585,7 +599,8 @@ void polaris_native_status(void) {
     terminal_write(" HEARTBEATS=");terminal_write_u64(g.heartbeats);
     terminal_write(" DIAGNOSTIC MASK=");terminal_write_hex(g.diagnostic_mask);terminal_putchar('\n');
     terminal_writeln("ONCE-PER-BOOT GPU BUDGET; STATUS PERFORMS NO GPU IO.");
-    terminal_write("VERTICAL MODE=");terminal_write(g.vtotal?"YES":"NO");terminal_write(" RETAINED ZERO BASELINE=");terminal_writeln(g.vtotal_ready?"YES":"NO");
+    terminal_write("VERTICAL MODE=");terminal_write(g.vtotal?"YES":"NO");terminal_write(" RETAINED ZERO BASELINE=");terminal_writeln(g.rescue_state.vertical_ready?"YES":"NO");
+    terminal_write("RESCUE VERTICAL FAULT PREFIX=");terminal_write_u64(g.rescue_fault_prefix);terminal_putchar('\n');
     terminal_write("PRIMARY CPU RESTART ATTEMPTED=");terminal_writeln(g.restart_attempted ? "YES" : "NO");
     terminal_write("SUPERVISED GUI: BACKEND RO=");terminal_write(g.presenter_parked ? "YES" : "NO");
     terminal_write(" RESCUE WAIT=");terminal_writeln(g.recovery_pending ? "YES" : "NO");
@@ -631,6 +646,7 @@ void polaris_native_poll(void) {}
 void polaris_native_diagnostic(u32 role,bool spin) {(void)role;(void)spin;terminal_writeln("POLARIS NATIVE WRITES DISABLED IN THIS BUILD.");}
 void polaris_native_status(void) {terminal_writeln("POLARIS NATIVE WRITES DISABLED IN THIS BUILD.");}
 void polaris_native_begin_vtotal(const BootInfo *boot,u32 prefix){(void)boot;(void)prefix;terminal_writeln("POLARIS NATIVE WRITES DISABLED IN THIS BUILD.");}
+void polaris_native_begin_rescue_fault(const BootInfo *boot,u32 prefix){(void)boot;(void)prefix;terminal_writeln("POLARIS NATIVE WRITES DISABLED IN THIS BUILD.");}
 void polaris_native_begin(const BootInfo *boot) {(void)boot;terminal_writeln("POLARIS NATIVE WRITES DISABLED IN THIS BUILD.");}
 void polaris_native_rescue(void) {terminal_writeln("POLARIS NATIVE WRITES DISABLED IN THIS BUILD.");}
 void polaris_native_finish(void) {terminal_writeln("POLARIS NATIVE WRITES DISABLED IN THIS BUILD.");}

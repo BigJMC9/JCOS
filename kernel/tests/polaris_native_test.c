@@ -1,4 +1,5 @@
 #include "polaris_native_test.h"
+#include "polaris_profile_test.h"
 #include "polaris_vtotal_runtime_test.h"
 #include "polaris_driver.h"
 #include "pmm.h"
@@ -100,6 +101,9 @@ static bool program_ram(PolarisDriver *d,PolarisProgramPlan *plan) {
 static void report(const char *s,bool pass){terminal_write("  ");terminal_write(s);terminal_writeln(pass ? ": PASS" : ": FAILED");}
 void polaris_native_test_cleanup_run(void){report("RESERVED PRIMARY/RESCUE/PAGES CLEANUP",stop_all());}
 void polaris_native_test_run(void) {
+    bool profile=polaris_profile_test();
+    report("EXACT COMPILED PROFILE / FORGED PROFILE AND RUNTIME REFUSALS",profile);
+    if(!profile){terminal_writeln("POLARIS NATIVE / RESERVED RESCUE TEST: FAILED");return;}
     terminal_writeln("POLARIS NATIVE / RESERVED RESCUE TEST (RAM ONLY):");
     if (!stop_all()) goto fail;
     u64 pages=pmm_stats().free_pages;

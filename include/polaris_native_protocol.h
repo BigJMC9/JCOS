@@ -1,7 +1,7 @@
 #ifndef JCOS_POLARIS_NATIVE_PROTOCOL_H
 #define JCOS_POLARIS_NATIVE_PROTOCOL_H
 #include "polaris_plane_protocol.h"
-#define POLARIS_NATIVE_VERSION 4ULL
+#define POLARIS_NATIVE_VERSION 5ULL
 #define POLARIS_NATIVE_HEADER(op) ((POLARIS_NATIVE_VERSION<<32)|(op))
 #define POLARIS_NATIVE_PING 1ULL
 #define POLARIS_NATIVE_CONFIG 2ULL
@@ -19,6 +19,10 @@
  * Rescue permits prefix0 only and runs before its plane CONFIG/EXECUTE.
  * Primary requires completed plane execution. No mutable restore snapshot. */
 #define POLARIS_NATIVE_VTOTAL 12ULL
+/* Diagnostic-only rescue entry: role2,prefix1..3,reserved0.
+ * Shares the one vertical attempt and fixed restoration sequence. Never publishes
+ * completion; kernel refuses all further IO after the selected store ACK. */
+#define POLARIS_NATIVE_RESCUE_VTOTAL_FAULT 13ULL
 #define POLARIS_NATIVE_REPLY 0x504E4154ULL
 #define POLARIS_NATIVE_ROLE_PRIMARY 1U
 #define POLARIS_NATIVE_ROLE_RESCUE 2U

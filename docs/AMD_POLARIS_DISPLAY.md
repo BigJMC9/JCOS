@@ -1,8 +1,9 @@
 # AMD Polaris display backend
 
-Current physical DisplayPort qualification includes fixed vertical-register writes
-and fresh rescue restoration on the exact tested RX 570 profile. See [the latest
-physical record](#physical-fixed-vertical-writes-and-fresh-rescue-qualification)
+Physical DisplayPort qualification includes fixed vertical-register writes,
+fresh rescue restoration, and serial containment when the rescue driver itself
+fails on the exact tested RX 570 profile. See [the recovery record](#physical-rescue-driver-failure-and-serial-containment-qualification)
+and [the stream capture](#physical-dp-stream-and-update-control-qualification)
 for scope and remaining limits.
 
 The display service links a userspace register reader and decoder in
@@ -2925,3 +2926,319 @@ inherited surface/clock/DP link; a stalled MMIO bus transaction is uncancellable
 Quarantine establishes neither DMA/IRQ/IOMMU isolation nor ordinary assignment
 reuse. Resolution switching, DP training, HDMI, full GPU reinitialization,
 acceleration and the Intel backend require separate implementation/qualification.
+
+
+## Interrupted rescue restoration and serial-only containment
+
+V40 adds explicit `polaris-vtotal rescue-fault1`, `rescue-fault2` and
+`rescue-fault3` diagnostics for a rescue process that fails during restoration.
+Each starts the existing fixed primary transaction and arms one rescue fault
+prefix before mutation. A later primary fault/hang selects the same pre-reserved
+fresh rescue. It executes UD2 immediately after the selected restoration store
+acknowledgement. The primary sequence and ordinary rescue entry retain their
+existing behavior. No new register, payload, BAR mapping, DMA, IRQ or reset
+authority is added.
+
+The private native protocol advances to version 5. Operation 12 still requires
+prefix zero for ordinary rescue. Diagnostic operation 13 requires rescue role,
+prefix 1..3, reserved zero, no prior configuration or program, and the same
+unused vertical attempt. Both entries consume the shared attempt before IPC.
+The kernel broker independently stops further reads, stores, waits or completion
+messages after the selected prefix, even if the process ignores the deliberate
+fault or forges a reply. At most six initial reads, N stores, N+6 ACKs and N+7
+incoming messages are allowed, with no polls/waits and two-second software
+admission. A stalled bus transaction remains uncancellable.
+
+A failed diagnostic rescue cannot publish success, rebind its plane or draw.
+The existing failure path stops/reaps both owners, revokes output, closes and
+unmaps MMIO, drops CPU capability references when cleanup is complete and retains
+the quarantined GPU parent. Original GOP eligibility stays retired. Partial
+cleanup retains its precise ledger for bounded CPU cleanup; it never retries
+the GPU transaction. No kernel restart is needed to retain independent serial
+control. Controlled reboot is available only when the existing CPU/storage
+readiness checks succeed.
+
+The screen may retain the old primary image after failure. That is stale
+scanout, not a new rescue display or proof of current display validity. Even
+failure after all three stores is incomplete restoration: no readback/frame
+verification or publication followed. The supported outcome here is headless
+containment, Ring3/serial progress and controlled reboot, rather than a claim
+of restored graphics.
+
+Host coverage includes all 189 prior controller cases plus 13 new manual,
+watchdog, GUI-drain, retained-cleanup and invalid-entry cases. Production
+transport tests cover all three prefixes against missing replies, continued
+valid IO, forged completion and wait requests; 18 malformed first requests and
+nine admission guards also refuse. The worker tests cover all prefix dispatches,
+null/zero/invalid/active-owner refusal, reservation and ambiguous transport.
+The extended pinned audit verifies protocol 5/op13 and the broker's prefix cap
+alongside the unchanged eight reference hashes/three offsets/five field facts.
+
+Actual Ring3 RAM tests capture vector-6 process exceptions after each rescue
+store ACK, require six reads/N writes/no completion, inspect all 768 RO
+framebuffer pages and preserve the primary pixels. Wrong role, zero/oversized
+prefix and reserved-word requests leave the process responsive. Normal/recovery
+attempts cannot replay the failed diagnostic. The old protocol-4 request closes
+the process and the full CPU-resource baseline is restored. Initial controller
+coverage exposed a test-double mismatch between a raw render flag and effective
+output validity; the double was corrected to match the existing terminal guard.
+No product change was needed for that mismatch. An edit-helper signature check
+also stopped before its dependent edits; the continuation used the actual header.
+
+All four final-image QEMU boots pass, including actual Ring3 diagnostics:
+focused, two displays, normal 88/88 and deep 88/88/611. Unqualified QEMU commands
+refuse before assignment or MMIO. Only the two primary/rescue ELFs change among
+27 archive files/21 ELFs; the other 25 files/19 ELFs match v39. Kernel/service
+payloads remain relocation-free, loader object code is unchanged, and disabled
+native/worker objects import terminal output only. No hardware operation ran
+during preparation. The accepted v39 physical evidence stays sealed separately.
+
+Candidate: `build/rx570-rescue-fault-v40/JA-os.img`, SHA-256 `01273146025237172210a3f0b9b75bb932b2ac27eed5d091272a2e411b83fa1d`.
+The physical gate requires three separate fresh boots: valid primary output,
+primary failure, exact partial rescue trace and user exception, no further GPU
+IO or false publication, independent Ring3 shell/serial control, accurate
+quarantine/CPU cleanup, power readiness and controlled firmware reboot. This
+new diagnostic/headless qualification is pending. Broader native modesetting,
+effective rate measurement, HDMI and GPU reset/isolation remain separate work.
+
+
+## Physical rescue-driver failure and serial containment qualification
+
+Physical v40 passed all three deliberately interrupted rescue-restoration
+cases on the same Z390 Gaming X/F10/i7-9700K, RX 570 1002:67DF rev EF /
+1458:2310, Philips Momentum 272M8 DisplayPort profile. Tested image:
+`build/rx570-rescue-fault-v40/JA-os.img`, SHA-256 `01273146025237172210a3f0b9b75bb932b2ac27eed5d091272a2e411b83fa1d`.
+The software record remains sealed separately from this physical acceptance:
+`build/rx570-rescue-fault-v40/hardware/validation.json`.
+
+Each fresh boot armed one rescue prefix, then completed the normal primary
+plane rebind and MIN1132/MAX1132/CONTROL17 transaction. All 86 preflight values
+matched the saved baseline except the two permitted automatic M measurements.
+Primary readback and frame progress passed, and the operator confirmed both
+correctly oriented green primary lines, including the target-1133 message.
+Primary vertical frame deltas were 3, 4 and 3, with one vertical poll each.
+This does not measure effective vertical total or refresh rate.
+
+An acknowledged primary spin let the independent Ring3 console advance its
+write counter in every case (1338 to 1339; 1334 to 1335; 1334 to 1335). The
+autonomous worker and Ring3 policy action 2 selected the reserved fresh rescue
+after stopping/reaping the old primary and quarantining the assignment.
+Primary/rescue PID/incarnation pairs were 85/83 versus 86/84 in the first boot,
+and 6/4 versus 7/5 in each later boot. Identities are compared within each boot.
+
+| Rescue fault after store ACK | Restoration store prefix | Rescue reads / stores / polls | Result |
+| --- | --- | --- | --- |
+| 1 | CONTROL0 | 6 / 1 / 0 | User exception vector 6; headless containment |
+| 2 | CONTROL0, MIN0 | 6 / 2 / 0 | User exception vector 6; headless containment |
+| 3 | CONTROL0, MIN0, MAX0 | 6 / 3 / 0 | User exception vector 6; headless containment |
+
+Every rescue read the same initial MIN1132/MAX1132/CONTROL17 and inherited
+CRTC/base-total controls, then executed UD2 after its selected store ACK.
+There was no subsequent GPU read, plane rebind, draw, completion or restored
+output publication. Even all three stores are incomplete restoration without
+readback/frame validation. Any old primary pixels are stale output. No visible
+rescue success is claimed for these failure runs; the separate v39 successful
+restoration evidence remains unchanged.
+
+Each failure stopped/reaped the CPU owners, closed/unmapped MMIO and drained
+CPU resources while retaining GPU quarantine. Status reported stage 3 with no
+pending terminal CPU drain. `displayprobe` reported no qualified scanout,
+retired boot output and zero kernel writers; saved GOP metadata remained
+available but framebuffer access was refused. Extra rescue, finish without
+validated output and a new native attempt all refused before GPU IO.
+
+COM7 remained usable: each case entered the normal Ring3 shell, executed
+`help` and returned to the kernel monitor. Serial reported zero dropped bytes,
+zero timeouts and no stall. CPU/storage readiness permitted controlled reboot;
+all three returned JA OS boot output and operator-confirmed readable firmware
+prompts without boot-menu, reset or power intervention. The final target is
+fresh v40 firmware output, stage 0, power ready, with COM7 closed and available.
+
+Each boot used 160 primary reads/five stores/two polls plus six rescue reads
+and its selected one, two or three stores. Total: 498 completed MMIO reads,
+21 store attempts and six polls; no replay or explicit poll wait. Post-failure
+status, shell, cleanup and reboot added no GPU IO. These are one sample per
+named software failure, not a hardware-hang or reliability qualification.
+
+The initial actual Ring3 RAM and display-probe suites passed, including all
+six vertical runtime markers and complete CPU baselines. Later shorter
+preflights did not repeat those suites. Six firmware reports matched all 64
+golden fields each and CRC32 E2CB542E. Sixteen active COM7 sessions/78 commands
+retained RX116611/TX1007 bytes. Passive capture retained 1694 attributable kernel
+boot bytes, giving scoped/all-raw RX118305; there were no unattributed bytes
+inside these sessions. Inter-session gaps remain excluded. The first passive
+connection disconnected before receiving data; its zero-byte journal is kept.
+No active serial session failed and no GPU command was retried.
+
+All 498 sealed software files and 200 source hashes matched before these six
+qualification-document updates. Original requirements, the tested artifacts,
+42 older images and 48 prior manifest roots remain preserved. No new GPU
+register, value, mapping, PCI, DMA, IRQ or reset authority was introduced.
+Operational inherited DCE/DP and no hotplug/power/reset remain assumptions;
+software deadlines cannot cancel a stalled bus transaction. Quarantine is not
+DMA/IRQ/IOMMU isolation or safe assignment reuse. Native resolution changes,
+VRAM/clock/link programming, DP training, HDMI, full GPU reinitialization,
+acceleration and Intel HD620 still require separate work.
+
+
+## DP stream and update-control observation
+
+The next prerequisite for native mode changes is a bounded observation of the
+DP stream steering FIFO and CRTC update controls. `polaris-stream` captures the
+existing 86-value timing/zero-override context, then two ordered samples of five
+fixed fields: DP2 stream control, DP2 steering FIFO, DIG2 frontend control, and
+CRTC0 master update lock/mode. Three of these are new read targets; all use the
+existing RO/NX/UC pages 0x6000 and 0x13000. It adds no writable mapping or GPU
+store. The command shares the one-attempt link/timing/vertical capture budget.
+
+The exact selected RX570/GOP/BAR5/D0/CPU/COM1/kernel-lease admission remains in
+force. Before the ten extended reads, the original 86 values must match the
+qualified zero-override profile. There are at most 96 dword loads, no poll,
+wait, retry or assignment reuse, and a two-second software admission check
+immediately before each load. A stalled bus load is still uncancellable.
+After access closes/unmaps and CPU holds/capabilities are removed, a fresh
+Ring3 probe decodes only copied data. The existing inherited assignment stays
+quarantined; firmware scanout is retained under the declared operational-DCE,
+unchanged-link and no hotplug/power/reset assumptions.
+
+The fresh BEGIN/DATA/QUERY role accepts version1, exactly 96 ordered uint32
+values and 14 ordered report queries. Changed tail values, changed route or
+baseline, all-ones data and malformed protocol close/refuse with no partial
+report. The report preserves raw stream/FIFO/frontend/update words and flags
+reset, held/unknown update controls or other FIFO bits. Unknown bits are never
+silently cleared. A successful observation or zero flags grants no authority
+to blank, unblank, commit timings or publish restored output.
+
+The pinned consumer waits for inactive stream status before FIFO reset;
+unblank sets DIG_START, clears FIFO reset, primes for100us, then enables the
+stream. These are dependencies for a future fixed transaction and fresh rescue,
+not implemented writes in this pass. The source audit checks eight hashes,
+five compiled offsets and seven field masks; the review names the exact
+read subranges, assumptions and remaining write prerequisites in
+[POLARIS_STREAM_REVIEW.json](POLARIS_STREAM_REVIEW.json).
+
+Host tests cover five offset boundaries,96 all-ones inputs,10 changed samples,
+84 baseline refusals/two allowed automatic-M values,two route mismatches,
+96 individual raw FIFO/update bits and97+87 protected buffer prefixes. The
+production MMIO helper passes identity/context/frame/PTE/IRQ/quarantine and
+field refusals without loads, plus both existing page domains. The first
+PTE fault test targeted a different mock leaf; it was corrected to find the
+intended virtual address. The first build caught a missing shell-registration
+argument list. Both failed logs are retained; no hardware command ran.
+
+Actual Ring3 tests pass the independent 14-word golden report, refusal clearing,
+raw state flags,nine malformed-order/version/role cases and complete CPU
+resource baselines. Four final-image QEMU runs pass: focused,two displays,
+normal88/88 and deep88/88/611. Unsupported QEMU hardware refuses before MMIO.
+Only registerprobe.elf changed among27 archive files/21 ELFs;26 files/20 ELFs,
+including the primary and rescue drivers, match v40. Kernel/probe are free of
+runtime relocations, vendor decoders stay in userspace, loader code is unchanged,
+and the default-off capture object imports terminal output only.
+
+Candidate: `build/rx570-stream-v41/JA-os.img`, SHA-256 `24df103e3abb491476a78c4ab65e1aebf0770d7f91672af7db2342d468c39c22`.
+Physical qualification of these new read targets is pending. The next hardware
+pass captures raw values and the Ring3 report over COM7, confirms firmware
+output survives, checks cleanup/refusal and returns through controlled reboot.
+Existing v40 rescue-failure and v39 successful-restoration evidence remains
+sealed separately. Full mode changes, VRAM/clock/link authority, effective-rate
+measurement, DP training, HDMI and hardware reset/isolation remain open.
+
+
+## Physical DP stream and update-control qualification
+
+Physical v41 passed its single read-only capture on the Z390 Gaming X/F10,
+i7-9700K, RX 570 1002:67DF rev EF / 1458:2310 and Philips Momentum 272M8 over
+DisplayPort. The image remains `24df103e3abb491476a78c4ab65e1aebf0770d7f91672af7db2342d468c39c22`. Evidence is recorded in
+`build/rx570-stream-v41/hardware/validation.json`; the 493-file software record
+and tested artifacts remain unchanged.
+
+The capture completed exactly 96 ordered dword loads. The first 86 matched
+the saved physical baseline apart from the two permitted automatic-M samples,
+which were 0x758B and 0x758C and remain separately recorded. Both extended
+five-field samples were identical:
+
+| Register | Raw value |
+| --- | --- |
+| DP2_DP_VID_STREAM_CNTL | 0x00010201 |
+| DP2_DP_STEER_FIFO | 0x00000000 |
+| DIG2_DIG_FE_CNTL | 0x01000000 |
+| CRTC0_CRTC_MASTER_UPDATE_LOCK | 0x00000000 |
+| CRTC0_CRTC_MASTER_UPDATE_MODE | 0x00000002 |
+
+The stream was enabled with status 1 and disable-defer 2. FIFO reset and
+master update lock were clear. Update mode was 2; a future timing transaction
+must preserve or explicitly qualify changing that observed value. The copied
+Ring3 report matched all 14 independently calculated words, with diagnostic
+flags zero. Neither report success nor zero flags grants write permission.
+
+There were no stores, polls, waits or retries. Access closed/unmapped and CPU
+holds/capabilities were removed before copied decoding; the inherited GPU
+parent remained quarantined. A second capture refused before GPU IO.
+`displayprobe` retained firmware scanout, and the operator confirmed readable
+JA OS output and the prompt. Serial reported no drops, timeouts or stall;
+power readiness passed before reboot preparation. Controlled reboot returned
+JA OS boot output and an operator-confirmed readable prompt without boot-menu,
+reset or power intervention. The final target is a fresh firmware monitor,
+stage 0 and power ready, with COM7 closed and available.
+
+Initial actual Ring3 stream/refusal/resource tests, display-probe and native
+RAM recovery tests passed. Two firmware reports matched all 64 golden fields
+each and CRC32 E2CB542E. Five active COM7 sessions/21 commands retained
+RX35742/TX245 bytes, with no unassigned bytes inside sessions. Initial boot was
+not captured: the adapter was unplugged for flashing and reconnected after
+boot confirmation. The passive zero-byte journal is retained; the controlled
+reboot is captured in its active session. Inter-session gaps remain excluded,
+and no USB byte readback was performed. No active session failed or physical
+GPU attempt was retried.
+
+All 210 source hashes matched before these six qualification-document changes;
+204 sources remain identical to software freeze. The original requirements,
+43 older images and 50 prior manifest roots remain preserved. This qualifies
+only the named read-only observation under operational inherited DCE/DP and
+no hotplug/power/reset assumptions. Software admission cannot cancel a stalled
+bus load; inherited bus mastering is unisolated and quarantine is not safe
+assignment reuse. No blank/unblank or changed-mode write was executed.
+
+Next is a finite DP stream blank/unblank transaction with independently retained
+state and a fresh rescue path. Exact write values, status polling, FIFO ordering,
+priming delay and failure after each mutation need their own execution gate.
+Native resolution changes, VRAM/clock/link programming, DP training, HDMI,
+effective-rate measurement and hardware reset/isolation remain open.
+
+
+## Validated profile and runtime extraction
+
+The native controller, driver reservations and MMIO admission now share the
+sole compiled RX 570 profile, with separate checked runtime observations and
+kernel-retained rescue state. Physical support and operation budgets remain
+unchanged. Host checks, pinned stream/vertical audits and all four QEMU boots
+pass (normal 88/88, deep 88/88 with 611 iterations); all 27 rootfs files,
+including 21 ELFs, match the accepted
+build. Matched-image hardware regression passed on the original physical target; see below.
+See [the profile architecture](AMD_DISPLAY_ARCHITECTURE.md) for trust boundaries,
+extension contracts and the distinction between configuration extraction and
+implemented mode, memory or lifecycle support.
+
+
+## Physical profile/runtime regression qualification
+
+The matched profile refactor passed on the original Z390 / RX 570
+1002:67DF EF / 1458:2310 / Philips Momentum272M8 DisplayPort target.
+All 47 active serial sessions passed. The 96-load read-only capture,
+normal GUI launch and healthy CPU driver replacement, active-GUI hang recovery,
+visible fresh rescue/reconnection and terminal serial-only cleanup matched the
+existing contracts. Fixed vertical override/restoration and all three primary
+and all three rescue interruption prefixes also passed. The operator confirmed
+readable output and nine unassisted controlled reboots.
+
+Independent trace checks counted 1596 GPU loads,
+62 stores and 21 bounded polls, with no replay or
+retry. All 27 rootfs files / 21 ELFs remain identical to the accepted parent;
+software and physical evidence are sealed separately. Raw serial journals,
+command offsets and operator observations are retained; inter-session gaps
+and USB byte readback are excluded.
+
+This confirms behavior preservation on the sole original inherited DP profile.
+Dynamic memory/layout/mode/pipeline support, independent output initialization,
+DP blank/unblank/training, HDMI, GPU reset/isolation and safe device reuse remain
+unimplemented. Other AMD generations remain outside the supported scope.

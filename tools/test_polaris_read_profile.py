@@ -19,7 +19,7 @@ def main():
         "polaris-read-probe": ["tools/tests/polaris_read_probe_test.c"],
     }
     shared = ["kernel/polaris_capture.c", "kernel/polaris_read_profile.c",
-        "kernel/polaris_mmio.c", "kernel/display_probe.c", "kernel/lib.c"]
+        "kernel/polaris_mmio.c", "kernel/polaris_profile.c", "kernel/display_probe.c", "kernel/lib.c"]
     for name, extra in suites.items():
         exe = out / (name + (".exe" if os.name == "nt" else ""))
         subprocess.run([args.cc, "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",

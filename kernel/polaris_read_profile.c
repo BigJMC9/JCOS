@@ -11,10 +11,8 @@ bool polaris_read_profile_evaluate(const BootInfo *boot, const PciDevice *device
     out->version = POLARIS_READ_REPORT_VERSION;
     out->blockers = POLARIS_READ_UNQUALIFIED;
     bool target = device && info && display_probe_matches_gop(boot, device) &&
-        device->vendor_id == 0x1002U && device->device_id == 0x67DFU &&
-        device->revision == 0xEFU && info->vendor_id == device->vendor_id &&
-        info->device_id == device->device_id && info->revision == device->revision &&
-        info->subsystem_vendor_id == 0x1458U && info->subsystem_device_id == 0x2310U;
+        polaris_profile_detect(device,info) && info->vendor_id == device->vendor_id &&
+        info->device_id == device->device_id && info->revision == device->revision;
     if (!target) out->blockers |= POLARIS_READ_BLOCK_TARGET;
     if (device) out->address = device->address;
     out->pmc = pmc; out->pmcsr = pmcsr;

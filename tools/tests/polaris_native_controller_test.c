@@ -18,11 +18,12 @@
 #include "../../kernel/tests/polaris_vtotal_actual_fixture.h"
 #define CHECK(x) do{if(!(x)){fprintf(stderr,"native controller case%d line%d %s\n",fault,__LINE__,#x);exit(1);}}while(0)
 static int fault;
-static bool vt_observing,vt_enabled;
+static bool vt_observing,vt_enabled,rescue_cleanup_refused;
+static unsigned rescue_diag_calls;
 static u32 vt_values[86],vt_regs[3],vt_timing_reads,vt_control_reads,vt_writes[3];
 static unsigned vt_case(void){return fault>=165?(unsigned)(fault-165):~0U;}
 
-static PciDevice device;
+static PciDevice device={.vendor_id=0x1002,.device_id=0x67DF,.revision=0xEF};
 static Process supervisor;
 static FramebufferInfo info;
 static DisplayLeaseState lease=DISPLAY_LEASE_KERNEL;
@@ -90,7 +91,7 @@ void terminal_write_u64(u64 n){(void)n;}
 void terminal_write_hex(u64 n){(void)n;}
 void terminal_putchar(char c){(void)c;}
 void terminal_set_render_enabled(bool b){render=b;}
-bool terminal_render_enabled(void){return render;}
+bool terminal_render_enabled(void){return render&&(!retired||output_valid);}
 bool framebuffer_firmware_valid(void){return !retired;}
 bool framebuffer_writers_idle(void){return !kernel_writer_pin;}
 bool graphical_session_drained(void){return !gui_retained;}
@@ -117,7 +118,7 @@ u32 pci_device_count(void){return 1;}
 const PciDevice *pci_device(u32 n){return n ? 0 : &device;}
 bool display_probe_matches_gop(const BootInfo *b,const PciDevice *d){(void)b;return d==&device;}
 bool polaris_read_profile_inspect(const BootInfo *b,PolarisReadReport *r){(void)b;memset(r,0,sizeof(*r));return fault!=1&&fault!=133;}
-bool display_probe_read(const PciDevice *d,DisplayProbeInfo *i){(void)d;memset(i,0,sizeof(*i));return true;}
+bool display_probe_read(const PciDevice *d,DisplayProbeInfo *i){(void)d;memset(i,0,sizeof(*i));i->subsystem_vendor_id=0x1458;i->subsystem_device_id=0x2310;return true;}
 bool display_probe_firmware_bar(const BootInfo *b,const PciDevice *d,const DisplayProbeInfo *i,u32 index,BootDisplayBar *bar){
  (void)b;(void)d;(void)i;if(index)return false;memset(bar,0,sizeof(*bar));bar->base=0x50000000;bar->size=0x10000000;bar->flags=15;return true;
 }
@@ -139,7 +140,7 @@ u64 polaris_mmio_binding_identity(const PolarisMmioBinding *b){(void)b;return 19
 bool polaris_mmio_hold_acquire(PolarisMmioHold *h,PolarisMmioBinding *b,u64 id,Process *o,u64 *out){(void)h;(void)b;CHECK(id==19&&o==&supervisor);if(fault==9)return false;held=true;*out=23;return true;}
 bool polaris_mmio_binding_valid(const PolarisMmioBinding *b){(void)b;return binding;}
 bool polaris_mmio_close(PolarisMmioBinding *b){(void)b;return fault!=33&&fault!=99;}
-bool polaris_mmio_hold_release(PolarisMmioHold *h,u64 id){(void)h;CHECK(held&&id==23);if(fault==34)return false;held=false;return true;}
+bool polaris_mmio_hold_release(PolarisMmioHold *h,u64 id){(void)h;CHECK(held&&id==23);if(fault==34||rescue_cleanup_refused)return false;held=false;return true;}
 bool polaris_mmio_cleanup(PolarisMmioBinding *b){(void)b;if(held||fault==35)return false;binding=false;return true;}
 static bool scalar(u32 pipe,u32 selector,u32 *v){
  ++loads;if((fault==10&&!enabled)||(fault==25&&armed))return false;*v=0;
@@ -205,6 +206,14 @@ bool polaris_driver_vtotal(PolarisDriver *d,const PolarisVtotalIo *io,u32 prefix
  PolarisUserVtotalIo user={&c,vt_exchange};u32 delta;bool ok=polaris_user_vtotal(&user,d->role==2,&delta)!=0;*out=c.gate.result;
  if(!ok)d->service.state=MANAGED_SERVICE_FAILED;return ok;
 }
+bool polaris_driver_rescue_vtotal_fault(PolarisDriver *d,const PolarisVtotalIo *io,u32 prefix,PolarisVtotalResult *out){
+ CHECK(fault>=189&&fault<=200&&d->role==2&&prefix>=1&&prefix<=3&&!drawing[1]&&!drawing[2]);
+ ++rescue_diag_calls;
+ bool ok=polaris_driver_vtotal(d,io,prefix,out);
+ CHECK(!ok&&out->write_attempts==prefix&&out->reads==6&&!out->complete&&!out->polls);
+ if(fault>=198)rescue_cleanup_refused=true;
+ return false;
+}
 bool polaris_mmio_rebind_write(PolarisMmioHold *h,u64 id,PolarisDisplayRegister f,u32 v){
  (void)h;CHECK(retired&&enabled&&held&&id==23&&lease==DISPLAY_LEASE_KERNEL&&writes[armed]<2);
  CHECK(f==(writes[armed] ? POLARIS_REG_PRIMARY_LOW : POLARIS_REG_PRIMARY_HIGH));
@@ -223,6 +232,9 @@ bool polaris_driver_reserve(PolarisDriver *d,u32 role,const ProgramBorrowedMappi
   if(fault==161)++policy_pid;
  }
  d->program_attempted=false;d->service.state=MANAGED_SERVICE_RUNNING;drivers[role]=d;reserved[role]=true;return true;
+}
+bool polaris_driver_reserve_profile(PolarisDriver *d,u32 role,const PolarisHardwareProfile *profile,const ProgramBorrowedMappingSpec *m){
+ CHECK(polaris_profile_valid(profile));return polaris_driver_reserve(d,role,m);
 }
 bool polaris_driver_attach_retained(PolarisDriver *d,u64 identity){
  CHECK(d->role==1&&reserved[1]&&!drawing[1]&&lease==DISPLAY_LEASE_KERNEL&&identity==output);
@@ -510,10 +522,46 @@ static void vtotal_case(const BootInfo *boot){
  CHECK(!held&&!binding&&!reserved[1]&&!reserved[2]&&vt_writes[1]<=3&&vt_writes[2]<=3);
  puts("PASS: production vertical controller admission,immutable zero baseline,fault prefixes,rescue order,GUI drain,partial stores/readbacks/polls,headless policy/rescue failures and CPU-only power cleanup;RAM only.");
 }
+static void rescue_fault_case(const BootInfo *boot){
+ unsigned n=(unsigned)fault-189,prefix=n%3+1;
+ if(n==12){
+  polaris_native_begin_rescue_fault(boot,0);polaris_native_begin_rescue_fault(boot,4);
+  polaris_native_begin_rescue_fault(0,1);CHECK(!creates&&!loads&&!vt_writes[1]&&!vt_writes[2]);return;
+ }
+ polaris_native_begin_rescue_fault(boot,prefix);
+ CHECK(drawing[1]&&vt_writes[1]==3&&!vt_writes[2]&&writes[0]==2&&!writes[1]&&retired);
+ unsigned old=loads+vt_writes[1]+vt_writes[2]+writes[0]+writes[1];
+ polaris_native_begin_rescue_fault(boot,prefix%3+1);CHECK(old==loads+vt_writes[1]+vt_writes[2]+writes[0]+writes[1]);
+ if(n>=6&&n<9){
+  polaris_native_present();gui_retained=true;lease=DISPLAY_LEASE_USER;writer=900;
+  polaris_native_background_diagnostic(1,true);ticks+=1000;polaris_native_poll();
+  CHECK(!vt_writes[2]&&!rescue_diag_calls&&gui_retained&&!output_valid&&!polaris_native_terminal());
+  old=loads;polaris_native_poll();CHECK(old==loads&&!vt_writes[2]);
+  gui_release();polaris_native_poll();
+ }else if(n>=3&&n<6){
+  polaris_native_background_diagnostic(1,true);ticks+=1000;polaris_native_poll();
+ }else polaris_native_rescue();
+ CHECK(rescue_diag_calls==1&&vt_writes[2]==prefix&&!writes[1]&&!drawing[1]&&!drawing[2]&&
+  !output_valid&&!terminal_render_enabled()&&retired&&quarantined&&!reserved[1]&&!reserved[2]);
+ CHECK(vt_regs[2]==0&&vt_regs[0]==(prefix>=2?0:1132)&&vt_regs[1]==(prefix>=3?0:1132));
+ old=loads+vt_writes[1]+vt_writes[2]+writes[0]+writes[1];
+ polaris_native_poll();polaris_native_rescue();polaris_native_finish();
+ polaris_native_begin_vtotal(boot,0);polaris_native_begin_rescue_fault(boot,1);
+ CHECK(old==loads+vt_writes[1]+vt_writes[2]+writes[0]+writes[1]&&rescue_diag_calls==1);
+ if(n>=9){
+  CHECK(held&&binding&&!cap_revokes&&!polaris_native_power_prepare());
+  rescue_cleanup_refused=false;
+ }
+ CHECK(polaris_native_power_prepare()&&!held&&!binding&&!terminal_render_enabled()&&!output_valid&&cap_revokes==1&&
+  !reserved[1]&&!reserved[2]&&polaris_native_terminal());
+ CHECK(old==loads+vt_writes[1]+vt_writes[2]+writes[0]+writes[1]);
+ puts("PASS: rescue prefix diagnostic,manual/watchdog/GUI-drain/retained-cleanup failure;headless zero publication,quarantine,one attempt,no GPU replay/plane/power IO;RAM only.");
+}
 int main(int argc,char **argv){
  fault=argc>1 ? atoi(argv[1]) : 0;supervisor.id=1;supervisor.kernel=true;supervisor.initialized=true;
  memset(&info,0,sizeof(info));info.physical_base=0x50000000;info.size=0x300000;info.direct_map_safe=true;info.width=info.pixels_per_scanline=1024;info.height=768;info.pixel_format=1;
  BootInfo boot;memset(&boot,0,sizeof(boot));boot.framebuffer_base=info.physical_base;boot.framebuffer_size=info.size;boot.framebuffer_width=boot.framebuffer_pixels_per_scanline=1024;boot.framebuffer_height=768;boot.framebuffer_pixel_format=1;
+ if(fault>=189){rescue_fault_case(&boot);return 0;}
  if(fault>=165){vtotal_case(&boot);return 0;}
  if(fault>=136){restart_case(&boot);return 0;}
  if(fault>=122){launch_case(&boot);return 0;}

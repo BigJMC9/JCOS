@@ -1,5 +1,6 @@
 #include "polaris_link_test.h"
 #include "polaris_vertical_test.h"
+#include "polaris_stream_test.h"
 #include "polaris_link_fixture.h"
 #include "polaris_timing_fixture.h"
 #include "polaris_timing_actual_fixture.h"
@@ -95,7 +96,7 @@ bool polaris_link_test(void){
  k_memset(&q,0,sizeof(q));q.word_count=4;q.words[0]=REGISTER_PROBE_TIMING_BEGIN;q.words[1]=1;
  if(managed_service_call(&malformed,&c,&q,&r) || !stop_bad())goto fail;
  terminal_writeln("  ACTUAL TIMING V1 BEGIN REFUSED / FRESH V2 ROLE: PASS");
- if(!polaris_vertical_test())return false;
+ if(!polaris_vertical_test() || !polaris_stream_test())return false;
  if(pages!=pmm_stats().free_pages || processes!=process_object_count() || spaces!=address_space_object_count() || endpoints!=endpoint_object_count() || threads!=thread_object_count() || queues!=process_exit_queue_object_count() || caps!=capability_table_count(process_capabilities(process_kernel())))return false;
  terminal_writeln("  ACTUAL LINK PROBE / FULL CPU RESOURCE BASELINE / NO GPU IO: PASS");
  terminal_writeln("  ACTUAL TIMING PROBE / FULL CPU RESOURCE BASELINE / NO GPU IO: PASS");return true;

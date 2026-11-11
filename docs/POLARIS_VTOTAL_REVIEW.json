@@ -157,17 +157,17 @@
     "time": "Each GPU phase has its own existing2second software admission; fresh copied decode4seconds plus separate service startup/RPC/stop bounds. No global bus or wall-clock completion guarantee."
   },
   "private_protocol": {
-    "native_version": 4,
+    "native_version": 5,
     "operation": 12,
     "request": "header,role1or2,primaryfaultprefix0..3,reserved0; no snapshot transfer",
     "broker": "Distinct VTOTAL request/response magic; exact incarnation/sequence/field/value; final completion must match independent kernel gate and idle driver",
-    "old_version": "NativeV3 request closes process; deploy matched full image",
+    "old_version": "NativeV4 and earlier requests close process; deploy matched full image",
     "boot_abi": "11/1632 unchanged",
-    "fault_injection": "Primary executes UD2 after each of the first1/2/3 store ACKs; rescue accepts no deliberate prefix fault parameter"
+    "fault_injection": "Primary UD2 after each first1/2/3store ACK remains operation12. Explicit rescue-only diagnostic operation13 accepts prefix1..3 before CONFIG, shares one vertical attempt, never publishes success; broker refuses IO after prefix."
   },
   "rescue": "Pre-reserved fresh Ring3 process/ELF/font/IPC/RO framebuffer; failed primary stopped/reaped and output revoked; assignment stays quarantined. Existing Ring3 supervisor policy and independent serialized worker choose recovery/headless. No extra rescue rearm or IO during GUI drain.",
   "source_vs_design": "Pinned set_drr confirms three named registers, minus-one values and min/max selector masks. Target1133, exact zero baseline, disable-first restoration, finite gate and fault-prefix workflow are JA OS design choices requiring physical qualification.",
-  "physical_status": "PASS fixed writes/readback/frame progress, primary hang and all3 interrupted store prefixes with fresh visible rescue; effective vertical total/rate remains unmeasured.",
+  "physical_status": "Physical v39 fixed writes/fresh visible restoration passed; physical v40 all three rescue-store-prefix exceptions, headless serial/Ring3 containment and unassisted reboot passed. Effective total/rate remains unmeasured.",
   "limits": [
     "Operational DCE/no hotplug-power-reset/unchanged surface and clock/link assumptions remain; MMIO bus stall cannot be cancelled by software deadline",
     "Register readback and frame progress do not prove effective vertical total, refresh rate, monitor output or native resolution switching",
@@ -216,5 +216,130 @@
     "serial": "18sessions/96commands,RX139545/TX1222;independentRing3consoleprogress",
     "cleanup": "4nativeconsole_reclamations+4unassistedreboots,noGPU IOduringcleanup",
     "limits": "One run per named case;not effective total/rate,GUI,physicalrescuepartialfailure,HDMI,fullreset orDMAisolation"
+  },
+  "rescue_fault_diagnostic": {
+    "state": "PASS_PHYSICAL_ALL_THREE_PREFIXES_SERIAL_CONTAINMENT_AND_UNASSISTED_REBOOT",
+    "operation": 13,
+    "request": "header,role2,prefix1..3,reserved0;exactly one shared vertical attempt;ordinary rescue operation12 still requires prefix0",
+    "commands": [
+      "polaris-vtotal rescue-fault1",
+      "polaris-vtotal rescue-fault2",
+      "polaris-vtotal rescue-fault3"
+    ],
+    "execution": "Start normal fixed primary;later primary failure selects reserved rescue,which executes UD2 after selected restoration store ACK. Kernel independently caps IO before any next request.",
+    "bounds": {
+      "max_reads": 6,
+      "max_stores": 3,
+      "max_incoming_messages": 10,
+      "max_acks": 9,
+      "max_polls": 0,
+      "max_waits": 0,
+      "software_admission_seconds": 2,
+      "bus_timeout": false
+    },
+    "whole_profile": "Normal primary max916reads/5stores/128polls,then diagnostic rescue max6reads/Nstores/0polls;minimum first-poll success166totalreads/5+Nstores/2polls per boot",
+    "outcome": "No rescue plane rebind,draw or successful restoration publication;old firmware output stays retired;failed CPU owners and aliases stopped/reaped,MMIO closed/unmapped,retained quarantine and serial control;controlled reboot only after CPU readiness",
+    "limits": [
+      "No new register/value/mapping/DMA/IRQ/reset authority",
+      "A partial or all-three restore store prefix is not verified successful restoration",
+      "Physical v40 qualifies these three software rescue-process failures under inherited operational DP; existing v39 visible-restoration acceptance remains separate."
+    ],
+    "physical_evidence": {
+      "image_sha256": "01273146025237172210a3f0b9b75bb932b2ac27eed5d091272a2e411b83fa1d",
+      "platform": "Z390 Gaming X/F10/i7-9700K/RX5701002:67DF EF/1458:2310/Philips272M8DP",
+      "boots": 3,
+      "primary_vertical_frame_deltas": [
+        3,
+        4,
+        3
+      ],
+      "rescue_reads": [
+        6,
+        6,
+        6
+      ],
+      "rescue_store_prefixes": [
+        [
+          [
+            2,
+            0
+          ]
+        ],
+        [
+          [
+            2,
+            0
+          ],
+          [
+            0,
+            0
+          ]
+        ],
+        [
+          [
+            2,
+            0
+          ],
+          [
+            0,
+            0
+          ],
+          [
+            1,
+            0
+          ]
+        ]
+      ],
+      "rescue_polls": 0,
+      "rescue_completions": 0,
+      "rescue_plane_rebinds": 0,
+      "rescue_output_publications": 0,
+      "user_exception_vectors": [
+        6,
+        6,
+        6
+      ],
+      "total_reads": 498,
+      "total_stores": 21,
+      "total_polls": 6,
+      "replays": 0,
+      "post_failure_ring3_shell_controls": 3,
+      "cpu_drains": 3,
+      "unassisted_reboots": 3,
+      "serial": {
+        "port": "COM7",
+        "active_sessions": 16,
+        "commands": 78,
+        "active_received_bytes": 116611,
+        "active_sent_bytes": 1007,
+        "unassigned_received_within_sessions": 0,
+        "passive": [
+          {
+            "file": "boot-reconnect-01.log",
+            "bytes": 0,
+            "kernel_boundary_offset": -1,
+            "attributed_kernel_boot_bytes": 0,
+            "unattributed_prefix_bytes": 0,
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          {
+            "file": "boot-reconnect-02.log",
+            "bytes": 1694,
+            "kernel_boundary_offset": 0,
+            "attributed_kernel_boot_bytes": 1694,
+            "unattributed_prefix_bytes": 0,
+            "sha256": "22be34eb596b534014198b56a4f16c3008256d65a2520b587fc171f9eb9973d5"
+          }
+        ],
+        "passive_bytes": 1694,
+        "attributed_initial_kernel_bytes": 1694,
+        "unattributed_prefix_bytes": 0,
+        "scoped_received_bytes": 118305,
+        "all_raw_received_bytes": 118305,
+        "scope": "16 active sessions and separately attributed initial kernel boot; inter-session gaps excluded; status polling/heartbeat outside commands performs no GPU IO"
+      },
+      "evidence": "build/rx570-rescue-fault-v40/hardware/validation.json",
+      "limits": "One sample per named software failure; no restored output claim for partial rescue, no effective-rate/HDMI/hardware-hang/reset/isolation qualification"
+    }
   }
 }

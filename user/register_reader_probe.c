@@ -5,6 +5,7 @@
 #include "drivers/amd_polaris_link.h"
 #include "drivers/amd_polaris_timing.h"
 #include "drivers/amd_polaris_vertical.h"
+#include "drivers/amd_polaris_stream.h"
 #include "../include/program_startup.h"
 #include "../include/register_probe_protocol.h"
 
@@ -56,6 +57,9 @@ void jcos_main(const JcosProgramStartup *startup) {
     static JcosU32 vertical_values[POLARIS_VERTICAL_VALUES];
     static JcosU64 vertical_report[POLARIS_VERTICAL_WORDS];
     JcosU32 vertical_next=0,vertical_query=0;int vertical_started=0,vertical_sealed=0;
+    static JcosU32 stream_values[POLARIS_STREAM_VALUES];
+    static JcosU64 stream_report[POLARIS_STREAM_WORDS];
+    JcosU32 stream_next=0,stream_query=0;int stream_started=0,stream_sealed=0;
     PolarisDisplayObservation retained_observation;
     JcosU64 retained_identity = 0;
     PolarisPlaneWitness retained_witness;
@@ -76,7 +80,19 @@ void jcos_main(const JcosProgramStartup *startup) {
             request.words[0]!=REGISTER_PROBE_TIMING_QUERY && request.words[0]!=REGISTER_PROBE_SHUTDOWN)jcos_thread_exit();
         if(vertical_started && request.words[0]!=REGISTER_PROBE_VERTICAL_BEGIN && request.words[0]!=REGISTER_PROBE_VERTICAL_DATA &&
             request.words[0]!=REGISTER_PROBE_VERTICAL_QUERY && request.words[0]!=REGISTER_PROBE_SHUTDOWN)jcos_thread_exit();
-        if(request.words[0]==REGISTER_PROBE_VERTICAL_BEGIN){
+        if(stream_started && request.words[0]!=REGISTER_PROBE_STREAM_BEGIN && request.words[0]!=REGISTER_PROBE_STREAM_DATA &&
+            request.words[0]!=REGISTER_PROBE_STREAM_QUERY && request.words[0]!=REGISTER_PROBE_SHUTDOWN)jcos_thread_exit();
+        if(request.words[0]==REGISTER_PROBE_STREAM_BEGIN){
+            if(request.word_count!=4 || request.words[1]!=POLARIS_STREAM_VERSION || request.words[2] || request.words[3] || stream_started || vertical_started || timing_started || link_started)jcos_thread_exit();
+            stream_started=1;reply.words[2]=1;reply.words[3]=POLARIS_STREAM_VALUES;
+        }else if(request.words[0]==REGISTER_PROBE_STREAM_DATA){
+            if(request.word_count!=4 || !stream_started || stream_sealed || request.words[1]!=stream_next || stream_next>=POLARIS_STREAM_VALUES || request.words[2]>0xFFFFFFFFULL || request.words[3])jcos_thread_exit();
+            stream_values[stream_next++]=(JcosU32)request.words[2];reply.words[2]=stream_next;reply.words[3]=request.words[2];
+            if(stream_next==POLARIS_STREAM_VALUES){(void)polaris_stream_observe(stream_values,POLARIS_STREAM_VALUES,stream_report);stream_sealed=1;}
+        }else if(request.words[0]==REGISTER_PROBE_STREAM_QUERY){
+            if(request.word_count!=4 || !stream_sealed || request.words[1]!=stream_query || stream_query>=POLARIS_STREAM_WORDS || request.words[2]!=POLARIS_STREAM_VERSION || request.words[3])jcos_thread_exit();
+            reply.words[2]=request.words[1]+1;reply.words[3]=stream_report[stream_query++];
+        }else if(request.words[0]==REGISTER_PROBE_VERTICAL_BEGIN){
             if(request.word_count!=4 || request.words[1]!=POLARIS_VERTICAL_VERSION || request.words[2] || request.words[3] || vertical_started || timing_started || link_started)jcos_thread_exit();
             vertical_started=1;reply.words[2]=1;reply.words[3]=POLARIS_VERTICAL_VALUES;
         }else if(request.words[0]==REGISTER_PROBE_VERTICAL_DATA){

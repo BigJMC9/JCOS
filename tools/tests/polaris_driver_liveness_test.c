@@ -61,6 +61,22 @@ bool system_console_putchar(char c){
  CHECK(c=='.');++console_calls;if(bad!=25)++work;if(bad==26)++console_pid;if(bad==27)++console_inc;return bad!=24;
 }
 int main(void){
+ PolarisDriver fresh={0};ProgramBorrowedMappingSpec mapping={0};
+ mapping.physical_base=0x50000000;mapping.size=0x300000;mapping.virtual_base=POLARIS_NATIVE_FB_VA;mapping.flags=VM_UNCACHED;
+ PolarisHardwareProfile forged=*polaris_profile_qualified();
+ const PolarisHardwareProfile *bad_profile[3]={0,(const PolarisHardwareProfile*)1,&forged};
+ for(unsigned n=0;n<3;++n)CHECK(!polaris_driver_reserve_profile(&fresh,1,bad_profile[n],&mapping));
+ mapping.physical_base=0xFFFFFFFFFFFFF000ULL;
+ CHECK(!polaris_driver_reserve_profile(&fresh,1,polaris_profile_qualified(),&mapping));
+ PolarisPlaneWitness witness={0};PolarisProgramPlan plan;
+ for(unsigned n=0;n<7;++n){
+  CHECK(polaris_surface_runtime_init(polaris_profile_qualified(),0x50000000,0x300000,&fresh.runtime));
+  if(n==0)fresh.runtime.profile=(const PolarisHardwareProfile*)1;if(n==1)++fresh.runtime.cpu_base;
+  if(n==2)++fresh.runtime.bytes;if(n==3)++fresh.runtime.gpu_address;if(n==4)++fresh.runtime.pipe;
+  if(n==5)++fresh.runtime.crtc_control;if(n==6)fresh.runtime.cpu_base=0xFFFFFFFFFFFFF000ULL;
+  unsigned before=calls;CHECK(!polaris_driver_plan(&fresh,1,&witness,&plan)&&calls==before);
+ }
+ puts("PASS: actual driver rejects forged profile/overflow before service launch; corrupt runtime refused before RPC.");
  memset(&d,0,sizeof(d));d.process_id=d.service.program.process.id=21;d.service.state=MANAGED_SERVICE_RUNNING;
  d.connection.incarnation=51;d.connection.receive_handle=61;
  for(d.role=1;d.role<=2;++d.role){

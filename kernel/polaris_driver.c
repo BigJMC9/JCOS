@@ -9,20 +9,24 @@ static bool call(PolarisDriver *d,u32 op,u64 a,u64 b,u64 c,IpcMessage *r) {
     return managed_service_call(&d->service,&d->connection,&q,r) && r->word_count==4 &&
         r->words[0]==POLARIS_NATIVE_REPLY && r->words[1]==d->connection.incarnation;
 }
-bool polaris_driver_reserve(PolarisDriver *d,u32 role,const ProgramBorrowedMappingSpec *m) {
-    if (!d || !m || (role!=1 && role!=2) || (m->flags && m->flags!=(vm_flags_t)VM_UNCACHED) ||
-        m->virtual_base!=POLARIS_NATIVE_FB_VA || m->size!=0x300000 ||
+bool polaris_driver_reserve_profile(PolarisDriver *d,u32 role,const PolarisHardwareProfile *profile,const ProgramBorrowedMappingSpec *m) {
+    if (!d || !m || !polaris_profile_valid(profile) || (role!=1 && role!=2) || (m->flags && m->flags!=(vm_flags_t)VM_UNCACHED) ||
+        m->virtual_base!=POLARIS_NATIVE_FB_VA || m->size!=profile->surface.bytes ||
         (m->physical_base&0xFFF) || managed_service_state(&d->service)!=MANAGED_SERVICE_STOPPED) return false;
+    if(!polaris_surface_runtime_init(profile,m->physical_base,m->size,&d->runtime))return false;
     ManagedServiceSpec s; s.path=role==1 ? "/bin/polarisnative.elf" : "/bin/polarisrescue.elf";
     s.shutdown_message=POLARIS_NATIVE_HEADER(POLARIS_NATIVE_STOP);s.shutdown_reply=POLARIS_NATIVE_REPLY;
     ManagedServiceLaunchExtras e; k_memset(&e,0,sizeof(e));
     e.borrowed_mapping=*m; e.startup_argument_count=2;e.startup_arguments[0]=POLARIS_NATIVE_FB_VA;
-    e.startup_arguments[1]=0xF400000000ULL;e.shutdown_request_word_count=4;e.shutdown_request_words[0]=s.shutdown_message;
+    e.startup_arguments[1]=d->runtime.gpu_address;e.shutdown_request_word_count=4;e.shutdown_request_words[0]=s.shutdown_message;
     d->role=role;d->process_id=0;d->program_attempted=false;d->retained_only=false;d->vtotal_attempted=false;
     if (!managed_service_start_ex(&d->service,&s,&e)) return false;
     d->process_id=managed_service_process_id(&d->service);
     return d->process_id && managed_service_connect_kernel(&d->service,&d->connection) &&
         polaris_driver_ping(d,0);
+}
+bool polaris_driver_reserve(PolarisDriver *d,u32 role,const ProgramBorrowedMappingSpec *m){
+    return polaris_driver_reserve_profile(d,role,polaris_profile_qualified(),m);
 }
 bool polaris_driver_attach_retained(PolarisDriver *d,u64 output) {
     if (!d || !output || d->role!=POLARIS_NATIVE_ROLE_PRIMARY || d->program_attempted ||
@@ -37,14 +41,14 @@ bool polaris_driver_attach_retained(PolarisDriver *d,u64 output) {
 bool polaris_driver_plan(PolarisDriver *d,u64 id,const PolarisPlaneWitness *w,PolarisProgramPlan *p) {
     if (!p) return false;
     k_memset(p,0,sizeof(*p));
-    if (!d || d->retained_only || !id || !w || polaris_plane_blockers(w) || w->values[0][0] || w->values[1][0]) return false;
+    if (!d || !polaris_surface_runtime_valid(&d->runtime) || d->retained_only || !id || !w || polaris_plane_blockers(w) || w->values[0][0] || w->values[1][0]) return false;
     IpcMessage r;
     if (!call(d,POLARIS_NATIVE_CONFIG,id,(u64)w->values[0][2]|((u64)w->values[1][2]<<32),w->values[0][1],&r) ||
         r.words[2]!=id || r.words[3]) return false;
-    p->incarnation=d->connection.incarnation;p->observation_id=id;p->gpu_address=0xF400000000ULL;
-    p->pipe=0;p->crtc=0x80410311;p->witness=*w;
+    p->incarnation=d->connection.incarnation;p->observation_id=id;p->gpu_address=d->runtime.gpu_address;
+    p->pipe=d->runtime.pipe;p->crtc=d->runtime.crtc_control;p->witness=*w;
     PolarisPlanePreview preview;
-    if (!polaris_plane_preview_init(&preview,p->incarnation,id,p->gpu_address,0,w)) return false;
+    if (!polaris_plane_preview_init(&preview,p->incarnation,id,p->gpu_address,p->pipe,w)) return false;
     for (u32 i=0;i<5;++i) {
         if (!call(d,POLARIS_NATIVE_STEP,id,i,0,&r) ||
             !polaris_plane_preview_accept(&preview,r.words[1],id,r.words[2],r.words[3])) return false;

@@ -217,12 +217,15 @@ $(BUILD)/user_amd_polaris_timing.o: user/drivers/amd_polaris_timing.c user/drive
 $(BUILD)/user_amd_polaris_vertical.o: user/drivers/amd_polaris_vertical.c user/drivers/amd_polaris_vertical.h user/drivers/amd_polaris_timing.h include/polaris_vertical_protocol.h include/polaris_timing_protocol.h | $(BUILD)
 	$(CLANG) $(USER_CFLAGS) -c $< -o $@
 
-$(BUILD)/user_register_probe.o: user/register_reader_probe.c user/drivers/amd_polaris_vertical.h include/polaris_vertical_protocol.h user/drivers/amd_polaris_timing.h include/polaris_timing_protocol.h user/drivers/amd_polaris_link.h include/polaris_link_protocol.h user/drivers/amd_polaris_plane.h include/polaris_plane_protocol.h user/lib/syscall.h user/drivers/amd_polaris_display.h include/amd_polaris_registers.h include/device_register_abi.h include/register_probe_protocol.h include/program_startup.h include/user_abi.h | $(BUILD)
+$(BUILD)/user_amd_polaris_stream.o: user/drivers/amd_polaris_stream.c user/drivers/amd_polaris_stream.h include/polaris_stream_protocol.h include/polaris_vtotal_protocol.h include/polaris_timing_protocol.h | $(BUILD)
 	$(CLANG) $(USER_CFLAGS) -c $< -o $@
 
-$(USER_REGISTER_PROBE): $(BUILD)/user_crt0_startup.o $(BUILD)/user_syscall.o $(BUILD)/user_register_probe.o $(BUILD)/user_amd_polaris_reader.o $(BUILD)/user_amd_polaris_display.o $(BUILD)/user_amd_polaris_plane.o $(BUILD)/user_amd_polaris_link.o $(BUILD)/user_amd_polaris_timing.o $(BUILD)/user_amd_polaris_vertical.o user/display_service.ld Makefile.msys2
+$(BUILD)/user_register_probe.o: user/register_reader_probe.c user/drivers/amd_polaris_vertical.h include/polaris_vertical_protocol.h user/drivers/amd_polaris_timing.h include/polaris_timing_protocol.h user/drivers/amd_polaris_link.h include/polaris_link_protocol.h user/drivers/amd_polaris_plane.h include/polaris_plane_protocol.h user/lib/syscall.h user/drivers/amd_polaris_display.h include/amd_polaris_registers.h include/device_register_abi.h include/register_probe_protocol.h include/program_startup.h include/user_abi.h user/drivers/amd_polaris_stream.h include/polaris_stream_protocol.h | $(BUILD)
+	$(CLANG) $(USER_CFLAGS) -c $< -o $@
+
+$(USER_REGISTER_PROBE): $(BUILD)/user_crt0_startup.o $(BUILD)/user_syscall.o $(BUILD)/user_register_probe.o $(BUILD)/user_amd_polaris_reader.o $(BUILD)/user_amd_polaris_display.o $(BUILD)/user_amd_polaris_plane.o $(BUILD)/user_amd_polaris_link.o $(BUILD)/user_amd_polaris_timing.o $(BUILD)/user_amd_polaris_vertical.o $(BUILD)/user_amd_polaris_stream.o user/display_service.ld Makefile.msys2
 	mkdir -p $(dir $@)
-	$(LD) -m elf_x86_64 -nostdlib -static -T user/display_service.ld -o $@ $(BUILD)/user_crt0_startup.o $(BUILD)/user_syscall.o $(BUILD)/user_register_probe.o $(BUILD)/user_amd_polaris_reader.o $(BUILD)/user_amd_polaris_display.o $(BUILD)/user_amd_polaris_plane.o $(BUILD)/user_amd_polaris_link.o $(BUILD)/user_amd_polaris_timing.o $(BUILD)/user_amd_polaris_vertical.o
+	$(LD) -m elf_x86_64 -nostdlib -static -T user/display_service.ld -o $@ $(BUILD)/user_crt0_startup.o $(BUILD)/user_syscall.o $(BUILD)/user_register_probe.o $(BUILD)/user_amd_polaris_reader.o $(BUILD)/user_amd_polaris_display.o $(BUILD)/user_amd_polaris_plane.o $(BUILD)/user_amd_polaris_link.o $(BUILD)/user_amd_polaris_timing.o $(BUILD)/user_amd_polaris_vertical.o $(BUILD)/user_amd_polaris_stream.o
 	$(CHECK_ELF_RELOCATIONS)
 
 $(BUILD)/user_amd_polaris_rom.o: user/drivers/amd_polaris_rom.c user/drivers/amd_polaris_rom.h include/polaris_rom_protocol.h | $(BUILD)
@@ -766,3 +769,11 @@ test-polaris-vertical:
 .PHONY: test-polaris-vtotal
 test-polaris-vtotal:
 	$(PYTHON) tools/test_polaris_vtotal.py --cc $(CLANG) --build-dir $(BUILD)/host-tests
+
+$(BUILD)/kernel/polaris_mmio.o $(BUILD)/kernel/polaris_link_capture.o $(BUILD)/kernel/polaris_link_probe.o: include/polaris_stream_protocol.h
+
+.PHONY: test-polaris-stream
+test-polaris-stream:
+	$(PYTHON) tools/test_polaris_stream.py --cc $(CLANG) --build-dir $(BUILD)/host-tests
+
+$(BUILD)/kernel/tests/polaris_stream_test.o: kernel/tests/polaris_stream_fixture.h include/polaris_stream_protocol.h include/register_probe_protocol.h

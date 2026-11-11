@@ -100,14 +100,17 @@ void jcos_main(const JcosProgramStartup *s) {
             programmed=polaris_user_program(&io,witness.values[0][POLARIS_WITNESS_FLIP_CONTROL],&delta);
             if(!programmed)jcos_thread_exit();
             r.words[2]=POLARIS_NATIVE_EXECUTE;r.words[3]=delta;
-        } else if(op==POLARIS_NATIVE_VTOTAL && !vertical_attempted && !drawn &&
-                  q.words[1]==POLARIS_NATIVE_ROLE && q.words[2]<=3 && !q.words[3] &&
-                  (POLARIS_NATIVE_ROLE==1 ? identity && programmed : !identity && !attempted && !q.words[2])){
+        } else if((op==POLARIS_NATIVE_VTOTAL || op==POLARIS_NATIVE_RESCUE_VTOTAL_FAULT) &&
+                  !vertical_attempted && !drawn && q.words[1]==POLARIS_NATIVE_ROLE &&
+                  q.words[2]<=3 && !q.words[3] &&
+                  (op==POLARIS_NATIVE_RESCUE_VTOTAL_FAULT ?
+                    POLARIS_NATIVE_ROLE==POLARIS_NATIVE_ROLE_RESCUE && q.words[2] && !identity && !attempted :
+                    (POLARIS_NATIVE_ROLE==1 ? identity && programmed : !identity && !attempted && !q.words[2]))){
             vertical_attempted=1;
             VtotalClient client={{s->capabilities[0],s->capabilities[1],s->arguments[0],0},(JcosU32)q.words[2],0};
             PolarisUserVtotalIo io={&client,vtotal_exchange};JcosU32 delta=0;
             vertical_done=polaris_user_vtotal(&io,POLARIS_NATIVE_ROLE==2,&delta);
-            if(!vertical_done)jcos_thread_exit();r.words[2]=POLARIS_NATIVE_VTOTAL;r.words[3]=delta;
+            if(!vertical_done || op==POLARIS_NATIVE_RESCUE_VTOTAL_FAULT)jcos_thread_exit();r.words[2]=POLARIS_NATIVE_VTOTAL;r.words[3]=delta;
         } else if (op==POLARIS_NATIVE_DRAW && identity && programmed && !drawn && q.words[1]==POLARIS_NATIVE_ROLE && !q.words[2] && !q.words[3]) {
             draw((volatile JcosU32 *)s->arguments[1],vertical_done); drawn=1; r.words[2]=POLARIS_NATIVE_ROLE;
         } else if ((op==POLARIS_NATIVE_TEST_FAULT || op==POLARIS_NATIVE_TEST_SPIN) &&

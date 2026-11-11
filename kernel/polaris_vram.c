@@ -1,30 +1,32 @@
 #include "polaris_vram.h"
+#include "polaris_profile.h"
 #include "lib.h"
 bool polaris_vram_observe(const BootInfo *boot, const BootDisplayBar *aperture,
     const u32 *v, const u32 before[2], const u32 after[2], PolarisVramObservation *out) {
     if (!out) return false;
     k_memset(out, 0, sizeof(*out));
     if (!boot || !aperture || !v || !before || !after) return false;
+    const PolarisSurfaceProfile *surface=&polaris_profile_qualified()->surface;
     for (u32 i=0; i<2U; ++i)
         if (before[i]==~0U || before[i]!=after[i]) return false;
     for (u32 i=0; i<POLARIS_DISPLAY_REGISTER_COUNT; ++i) if (v[i]==~0U) return false;
     /* First correlation profile deliberately matches the measured inherited
      * firmware layout. Broader decoder support is not address authority. */
-    if (boot->framebuffer_width!=1024U || boot->framebuffer_height!=768U ||
-        boot->framebuffer_pixels_per_scanline!=1024U || boot->framebuffer_pixel_format!=1U ||
-        v[POLARIS_REG_GRPH_CONTROL]!=0x0A10800AU ||
+    if (boot->framebuffer_width!=surface->width || boot->framebuffer_height!=surface->height ||
+        boot->framebuffer_pixels_per_scanline!=surface->stride || boot->framebuffer_pixel_format!=surface->format ||
+        v[POLARIS_REG_GRPH_CONTROL]!=surface->grph_control ||
         v[POLARIS_REG_GRPH_ENABLE]!=1U || v[POLARIS_REG_GRPH_SWAP] ||
         v[POLARIS_REG_CRTC_BLANK] || (v[POLARIS_REG_CRTC_INTERLACE]&1U) ||
         (v[POLARIS_REG_CRTC_CONTROL] & (POLARIS_CRTC_MASTER_EN_MASK |
             POLARIS_CRTC_CURRENT_MASTER_EN_STATE_MASK |
             POLARIS_CRTC_DISP_READ_REQUEST_DISABLE_MASK))!=0x10001U ||
-        v[POLARIS_REG_PITCH]!=1024U || v[POLARIS_REG_X_END]!=1024U ||
-        v[POLARIS_REG_Y_END]!=768U || v[POLARIS_REG_OFFSET_X] || v[POLARIS_REG_OFFSET_Y] ||
+        v[POLARIS_REG_PITCH]!=surface->stride || v[POLARIS_REG_X_END]!=surface->width ||
+        v[POLARIS_REG_Y_END]!=surface->height || v[POLARIS_REG_OFFSET_X] || v[POLARIS_REG_OFFSET_Y] ||
         v[POLARIS_REG_X_START] || v[POLARIS_REG_Y_START] ||
         (v[POLARIS_REG_PRIMARY_LOW]&~POLARIS_GRPH_PRIMARY_SURFACE_ADDRESS_MASK) ||
         (v[POLARIS_REG_PRIMARY_HIGH]&~POLARIS_GRPH_PRIMARY_SURFACE_ADDRESS_HIGH_MASK))
         return false;
-    const u64 limit=1ULL<<40, bytes=0x300000ULL;
+    const u64 limit=1ULL<<40, bytes=surface->bytes;
     if (aperture->flags!=(BOOT_DISPLAY_BAR_VALID|BOOT_DISPLAY_BAR_MEMORY|
             BOOT_DISPLAY_BAR_64BIT|BOOT_DISPLAY_BAR_PREFETCH) || aperture->reserved ||
         !aperture->base || (aperture->base&0xFFFULL) || !aperture->size ||

@@ -57,7 +57,7 @@ bool polaris_vtotal_runtime_test(void){
  if(!stop())return false;
  u32 scenario=~0U;
  u64 pages=pmm_stats().free_pages;u32 processes=process_object_count(),spaces=address_space_object_count(),endpoints=endpoint_object_count(),threads=thread_object_count(),queues=process_exit_queue_object_count(),objects=device_resource_object_count(),caps=capability_table_count(process_capabilities(process_kernel()));
- for(u32 n=0;n<7;++n){
+ for(u32 n=0;n<10;++n){
   scenario=n;
   storage=pmm_alloc_pages(768);if(!storage)goto fail;k_memset(phys_to_virt(storage),0,0x300000);
   ProgramBorrowedMappingSpec map;map.physical_base=storage;map.size=0x300000;map.virtual_base=POLARIS_NATIVE_FB_VA;map.flags=0;
@@ -75,10 +75,30 @@ bool polaris_vtotal_runtime_test(void){
   }
   u32 before=r.writes;PolarisVtotalResult again;if(polaris_driver_vtotal(&primary,&io,0,&again)||r.writes!=before||!primary.vtotal_attempted)goto fail;
   if(!polaris_driver_stop(&primary)||managed_service_process_id(&primary.service)||primary.process_id!=failed_pid||!managed_service_idle(&rescue.service))goto fail;
-  r.restore=true;r.writes=0;r.fail_after=n>=4?n-3:0;
-  ok=polaris_driver_vtotal(&rescue,&io,0,&result);
-  if(ok!=(n<4)||r.writes!=(n<4?3:n-3)||result.write_attempts!=r.writes)goto fail;
-  before=r.writes;if(polaris_driver_vtotal(&rescue,&io,0,&again)||r.writes!=before)goto fail;
+  r.restore=true;r.writes=0;r.fail_after=n>=4&&n<=6?n-3:0;
+  if(n>=7){
+   /* Diagnostic requests cannot be used on the primary or normal rescue entry. */
+   if(polaris_driver_rescue_vtotal_fault(&rescue,&io,0,&result)||rescue.vtotal_attempted||
+      polaris_driver_rescue_vtotal_fault(&rescue,&io,4,&result)||rescue.vtotal_attempted)goto fail;
+   IpcMessage q,reply;k_memset(&q,0,sizeof(q));q.word_count=4;
+   q.words[0]=POLARIS_NATIVE_HEADER(POLARIS_NATIVE_RESCUE_VTOTAL_FAULT);q.words[1]=2;
+   for(u32 bad=0;bad<4;++bad){
+    q.words[2]=bad==0?0:bad==1?4:1;q.words[3]=bad==2?1:0;q.words[1]=bad==3?1:2;
+    if(!managed_service_call(&rescue.service,&rescue.connection,&q,&reply)||reply.words[2]||reply.words[3])goto fail;
+   }
+   if(!polaris_driver_ping(&rescue,900+n))goto fail;
+  }
+  ok=n>=7?polaris_driver_rescue_vtotal_fault(&rescue,&io,n-6,&result):polaris_driver_vtotal(&rescue,&io,0,&result);
+  if(ok!=(n<4)||r.writes!=(n<4?3:n>=7?n-6:n-3)||result.write_attempts!=r.writes)goto fail;
+  if(n>=7){
+   ProcessExitInfo exit;
+   if(!process_exit_info(&rescue.service.program.process,&exit)||exit.reason!=PROCESS_EXIT_FAULT||
+      exit.vector!=6||exit.process_id!=rescue.process_id||!exit.thread_id||
+      managed_service_process_id(&rescue.service)||result.reads!=6||result.polls||result.complete)goto fail;
+   if(!line_matches(phys_to_virt(storage),"VERTICAL OVERRIDE READBACK VERIFIED - TARGET 1133",88,0x103018U))goto fail;
+  }
+  before=r.writes;if(polaris_driver_vtotal(&rescue,&io,0,&again)||r.writes!=before||
+   polaris_driver_rescue_vtotal_fault(&rescue,&io,1,&again)||r.writes!=before)goto fail;
   if(n<4){
    if(r.reg[0]||r.reg[1]||r.reg[2]||!result.complete||!plane(&rescue,200+n)||
     !program_borrowed_set_writable(&rescue.service.program,rescue.process_id,true)||!polaris_driver_draw(&rescue)||
@@ -91,12 +111,14 @@ bool polaris_vtotal_runtime_test(void){
  terminal_writeln("  ACTUAL RING3 VERTICAL PRIMARY / THREE STORES / READBACK AND FRAMES (RAM): PASS");
  terminal_writeln("  ACTUAL PRIMARY EXCEPTION AFTER EACH VERTICAL STORE / FRESH RESCUE / ZERO RESTORATION (RAM): PASS");
  terminal_writeln("  ACTUAL RESCUE PARTIAL STORE FAILURE / NO REPLAY / RO FRAMEBUFFER RETAINED: PASS");
+ terminal_writeln("  ACTUAL RESCUE UD2 AFTER EACH RESTORATION STORE ACK / NO COMPLETION OR REPLAY (RAM): PASS");
+ terminal_writeln("  RESCUE DIAGNOSTIC INVALID ROLE/PREFIX/RESERVED REFUSED / RO PIXELS PRESERVED: PASS");
  storage=pmm_alloc_pages(768);if(!storage)goto fail;
  ProgramBorrowedMappingSpec map;map.physical_base=storage;map.size=0x300000;map.virtual_base=POLARIS_NATIVE_FB_VA;map.flags=0;
  if(!polaris_driver_reserve(&primary,1,&map))goto fail;
- IpcMessage q,r;k_memset(&q,0,sizeof(q));q.word_count=4;q.words[0]=(3ULL<<32)|POLARIS_NATIVE_PING;
+ IpcMessage q,r;k_memset(&q,0,sizeof(q));q.word_count=4;q.words[0]=(4ULL<<32)|POLARIS_NATIVE_PING;
  if(managed_service_call(&primary.service,&primary.connection,&q,&r)||!stop())goto fail;
  if(pages!=pmm_stats().free_pages||processes!=process_object_count()||spaces!=address_space_object_count()||endpoints!=endpoint_object_count()||threads!=thread_object_count()||queues!=process_exit_queue_object_count()||objects!=device_resource_object_count()||caps!=capability_table_count(process_capabilities(process_kernel())))goto fail;
- terminal_writeln("  ACTUAL VERTICAL DRIVER PROTOCOL4 / OLD VERSION REFUSED / FULL CPU BASELINE: PASS");return true;
+ terminal_writeln("  ACTUAL VERTICAL DRIVER PROTOCOL5 / OLD VERSION REFUSED / FULL CPU BASELINE: PASS");return true;
 fail:terminal_write("ACTUAL VTOTAL RAM FAILURE CASE=");terminal_write_u64(scenario);terminal_putchar('\n');(void)stop();return false;
 }

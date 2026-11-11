@@ -462,16 +462,55 @@ int main(int argc, char **argv) {
     CHECK(!polaris_mmio_prepare(&b, &boot, &assignment, &owner, 17U) && empty() && !map_calls);
     CHECK(reset()); assignment.dma_gate_active = true;
     CHECK(!polaris_mmio_prepare(&b, &boot, &assignment, &owner, 17U) && empty() && !config_reads);
+    for(u32 n=0;n<3;++n){
+        CHECK(reset());owner.kernel=true;
+        CHECK(polaris_mmio_prepare_supervised(&b,&boot,&assignment,17U) && polaris_mmio_prepare_links(&b,&boot,&owner,b.identity));
+        const PolarisHardwareProfile *p=b.plan.profile;PolarisHardwareProfile copy=*p;
+        b.plan.profile=n==0?0:n==1?(const PolarisHardwareProfile*)1:&copy;
+        u32 unmaps=unmap_calls;CHECK(!polaris_mmio_cleanup(&b) && unmaps==unmap_calls && b.child_pinned && b.access_pinned && b.closing);
+        b.plan.profile=p;CHECK(polaris_mmio_cleanup(&b)&&empty());
+    }
     CHECK(reset());owner.kernel=true;config[4]|=PCI_COMMAND_BUS_MASTER;
     CHECK(polaris_mmio_prepare_supervised(&b,&boot,&assignment,17U));
+    CHECK(polaris_mmio_prepare_links(&b,&boot,&owner,b.identity));
     PolarisMmioHold native_hold={0};u64 native_id=0;
     CHECK(polaris_mmio_hold_acquire(&native_hold,&b,b.identity,&owner,&native_id));
+    const PolarisHardwareProfile *saved_profile=b.plan.profile;
+    CHECK(saved_profile==polaris_profile_qualified());PolarisHardwareProfile copied_profile=*saved_profile;
+    const PolarisHardwareProfile *bad_profile[3]={0,(const PolarisHardwareProfile*)1,&copied_profile};
+    for(u32 n=0;n<3;++n){
+        b.plan.profile=bad_profile[n];u32 value=~0U,loads=load_calls,stores=store_calls,maps=map_calls,unmaps=unmap_calls;
+        CHECK(!polaris_mmio_binding_prepared(&b) && !polaris_mmio_read_stream_held(&native_hold,native_id,&owner,0,&value) && !value);
+        CHECK(!polaris_mmio_enable_rebind(&native_hold,native_id) && !polaris_mmio_rebind_write(&native_hold,native_id,POLARIS_REG_PRIMARY_HIGH,0xF4));
+        CHECK(!polaris_mmio_hold_release(&native_hold,native_id) );
+        CHECK(loads==load_calls && stores==store_calls && maps==map_calls && unmaps==unmap_calls && b.active_holds==1 && b.child_pinned && b.access_pinned);
+        b.plan.profile=saved_profile;CHECK(polaris_mmio_binding_prepared(&b));
+    }
+    puts("PASS: forged/null/unmapped MMIO profile refused before IO; ambiguous holds/mappings/pins retained; canonical profile restored.");
+    const u32 stream_offsets[5]={0x6290,0x6294,0x6000,0xEF4,0xEF8};
+    for(u32 f=0;f<5;++f){u32 v=0;CHECK(polaris_mmio_read_stream_held(&native_hold,native_id,&owner,f,&v)&&v==0x12345678&&load_address==b.virtual_base+stream_offsets[f]);}
+    u32 stream_leaf=0;while(stream_leaf<16 && leaves[stream_leaf].address!=b.virtual_base+0x6000)++stream_leaf;CHECK(stream_leaf<16);
+    for(u32 bad=0;bad<7;++bad){
+        u32 before=load_calls,v=~0U;
+        if(bad==1)wrong_context=true;
+        if(bad==2)leaves[stream_leaf].flags|=VM_WRITE;
+        if(bad==3)++leaves[stream_leaf].frame;
+        if(bad==4)load_interrupts=false;
+        if(bad==5)assignment.state=PCI_ASSIGNMENT_QUARANTINED;
+        CHECK(!polaris_mmio_read_stream_held(&native_hold,native_id+(bad==0),&owner,bad==6?5:0,&v)&&!v&&load_calls==before);
+        if(bad==1)wrong_context=false;
+        if(bad==2)leaves[stream_leaf].flags=VM_DEVICE;
+        if(bad==3)--leaves[stream_leaf].frame;
+        if(bad==4)load_interrupts=true;
+        if(bad==5)assignment.state=PCI_ASSIGNMENT_ASSIGNED;
+    }
     CHECK(!polaris_mmio_enable_rebind(&native_hold,native_id) && !store_calls);
     native_scanout=FRAMEBUFFER_SCANOUT_RETIRED;native_lease=DISPLAY_LEASE_USER;
     CHECK(!polaris_mmio_enable_rebind(&native_hold,native_id));
     native_lease=DISPLAY_LEASE_KERNEL;
     CHECK(polaris_mmio_enable_rebind(&native_hold,native_id));
     CHECK(!polaris_mmio_enable_rebind(&native_hold,native_id));
+    u32 stream_denied=~0U;CHECK(!polaris_mmio_read_stream_held(&native_hold,native_id,&owner,0,&stream_denied)&&!stream_denied);
     CHECK(!polaris_mmio_rebind_write(&native_hold,native_id,POLARIS_REG_PRIMARY_LOW,0));
     CHECK(!polaris_mmio_rebind_write(&native_hold,native_id,POLARIS_REG_PRIMARY_HIGH,0xF5));
     CHECK(polaris_mmio_rebind_write(&native_hold,native_id,POLARIS_REG_PRIMARY_HIGH,0xF4) &&

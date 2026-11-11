@@ -814,3 +814,98 @@ is readable and power ready; COM7 is free. The matched 536-file software record
 is unchanged. Effective total/rate, resolution switching, HDMI and GPU reset/
 DMA isolation remain unqualified. See [the physical write and restoration
 record](AMD_POLARIS_DISPLAY.md#physical-fixed-vertical-writes-and-fresh-rescue-qualification).
+
+
+## Interrupted rescue restoration and serial-only containment
+
+V40 adds `polaris-vtotal rescue-fault1|rescue-fault2|rescue-fault3`: arm one
+rescue exception before takeover, then use the existing primary-failure path.
+A distinct protocol5/op13 entry shares the one vertical attempt and independently
+caps rescue IO at six reads/N stores, refusing every subsequent operation and
+successful completion. The existing headless failure/cleanup path keeps original
+GOP retired, retains quarantine and serial control; partial cleanup cannot rearm
+GPU access. Stale pixels do not mean rescue succeeded.
+
+Host/controller/transport/worker/audit, actual Ring3 exceptions/RO mappings and
+four QEMU boots pass (normal88/88,deep88/88/611). Physical partial-rescue failure,
+post-failure Ring3 shell/serial progress and controlled reboot need separate
+qualification on the new matched image. See [the interrupted-rescue
+contract](AMD_POLARIS_DISPLAY.md#interrupted-rescue-restoration-and-serial-only-containment).
+
+
+## Physical rescue-driver failure and serial containment qualification
+
+Physical v40 passed three fresh-boot rescue UD2 cases after restoration store
+ACK 1, 2 and 3. Each rescue performed six reads and exactly its selected store
+prefix, then faulted without readback, plane rebind or output publication.
+CPU cleanup retained GPU quarantine and original GOP access stayed retired.
+Independent Ring3 shell/COM7 control and three unassisted controlled reboots
+passed. Total: 498 reads/21 stores/six polls, no replay; 16 sessions/78 commands,
+RX116611/TX1007 plus 1694 attributed passive boot bytes. Initial actual Ring3
+RAM/display-probe suites passed once. The 498-file software record is unchanged.
+The final firmware prompt is readable and power ready; COM7 is available.
+This qualifies containment when the rescue process itself fails under the
+inherited DP profile. Full modesetting, effective refresh, HDMI and GPU reset/
+isolation remain open. See [the physical rescue-failure record](AMD_POLARIS_DISPLAY.md#physical-rescue-driver-failure-and-serial-containment-qualification).
+
+
+## DP stream and update-control observation
+
+The matched v41 candidate adds `polaris-stream`:96 read-only dword loads at most,
+including two samples of five fixed DP2/FIFO/DIG2/CRTC0 update controls within
+existing RO pages. Fresh Ring3 copied decoding,raw unknown-bit diagnostics,
+malformed-protocol containment and full CPU baselines pass;all four QEMU runs
+pass. No new write,blank/unblank or restoration operation is granted. Physical
+new-register capture is pending;v40 failure containment remains sealed separately.
+See [the stream observation record](AMD_POLARIS_DISPLAY.md#dp-stream-and-update-control-observation).
+
+
+## Physical DP stream and update-control qualification
+
+Physical v41 passed one 96-load read-only capture and the copied Ring3 14-word
+report. Both stream/FIFO/frontend/update samples matched: stream0x10201,
+FIFO0, frontend0x01000000, update lock0 and update mode2; diagnostic flags0.
+No GPU stores, polls or retries occurred. CPU cleanup, quarantined-parent
+retention, repeat refusal, readable firmware output, COM7 control and one
+unassisted controlled reboot passed. Five sessions/21 commands retained
+RX35742/TX245; initial boot was not captured while the adapter was unplugged.
+The 493-file software record is unchanged. No blank/unblank or changed-mode
+write is qualified by this pass. See [the physical stream record](AMD_POLARIS_DISPLAY.md#physical-dp-stream-and-update-control-qualification).
+
+
+## Validated profile and runtime extraction
+
+The native controller, driver reservations and MMIO admission now share the
+sole compiled RX 570 profile, with separate checked runtime observations and
+kernel-retained rescue state. Physical support and operation budgets remain
+unchanged. Host checks, pinned stream/vertical audits and all four QEMU boots
+pass (normal 88/88, deep 88/88 with 611 iterations); all 27 rootfs files,
+including 21 ELFs, match the accepted
+build. Matched-image hardware regression passed on the original physical target; see below.
+See [the profile architecture](AMD_DISPLAY_ARCHITECTURE.md) for trust boundaries,
+extension contracts and the distinction between configuration extraction and
+implemented mode, memory or lifecycle support.
+
+
+## Physical profile/runtime regression qualification
+
+The matched profile refactor passed on the original Z390 / RX 570
+1002:67DF EF / 1458:2310 / Philips Momentum272M8 DisplayPort target.
+All 47 active serial sessions passed. The 96-load read-only capture,
+normal GUI launch and healthy CPU driver replacement, active-GUI hang recovery,
+visible fresh rescue/reconnection and terminal serial-only cleanup matched the
+existing contracts. Fixed vertical override/restoration and all three primary
+and all three rescue interruption prefixes also passed. The operator confirmed
+readable output and nine unassisted controlled reboots.
+
+Independent trace checks counted 1596 GPU loads,
+62 stores and 21 bounded polls, with no replay or
+retry. All 27 rootfs files / 21 ELFs remain identical to the accepted parent;
+software and physical evidence are sealed separately. Raw serial journals,
+command offsets and operator observations are retained; inter-session gaps
+and USB byte readback are excluded.
+
+This confirms behavior preservation on the sole original inherited DP profile.
+Dynamic memory/layout/mode/pipeline support, independent output initialization,
+DP blank/unblank/training, HDMI, GPU reset/isolation and safe device reuse remain
+unimplemented. Other AMD generations remain outside the supported scope.

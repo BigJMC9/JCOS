@@ -63,7 +63,7 @@ def main():
     policy=args.policy_source_dir.resolve() if args.policy_source_dir else None
     sources=[root/"tools/tests/polaris_plane_replay_test.c",root/"user/drivers/amd_polaris_display.c",
         policy/"amd_polaris_plane.c" if policy else root/"user/drivers/amd_polaris_plane.c",
-        policy/"polaris_plane.c" if policy else root/"kernel/polaris_plane.c",root/"kernel/polaris_vram.c",root/"kernel/polaris_observation.c",root/"kernel/lib.c"]
+        policy/"polaris_plane.c" if policy else root/"kernel/polaris_plane.c",root/"kernel/polaris_vram.c",root/"kernel/polaris_profile.c",root/"kernel/polaris_observation.c",root/"kernel/lib.c"]
     exe=out/("polaris-replay.exe" if os.name=="nt" else "polaris-replay")
     subprocess.run([args.cc,"-std=c11","-O2","-Wall","-Wextra","-Werror","-Ikernel","-Iinclude","-Iuser/drivers","-I"+str(out),
         *map(str,sources),"-o",str(exe)],cwd=root,check=True)
