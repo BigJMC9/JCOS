@@ -1,0 +1,228 @@
+{
+  "schema_version": 2,
+  "upstream_commit": "adc218676eef25575469234709c2d87185ca223a",
+  "sources": [
+    {
+      "path": "drivers/gpu/drm/amd/display/dc/dce/dce_link_encoder.c",
+      "file": "dce_link_encoder.c",
+      "url": "https://raw.githubusercontent.com/torvalds/linux/adc218676eef25575469234709c2d87185ca223a/drivers/gpu/drm/amd/display/dc/dce/dce_link_encoder.c",
+      "sha256": "00850980541655910f3c97d68af789e5fa4a1b7d2cf301bcdbdcd7c8c801e360",
+      "bytes": 51785
+    },
+    {
+      "path": "drivers/gpu/drm/amd/display/dc/dce/dce_link_encoder.h",
+      "file": "dce_link_encoder.h",
+      "url": "https://raw.githubusercontent.com/torvalds/linux/adc218676eef25575469234709c2d87185ca223a/drivers/gpu/drm/amd/display/dc/dce/dce_link_encoder.h",
+      "sha256": "8f242dd953109146e5d86ca5b980182a92c99590381c25629326ed4731080f22",
+      "bytes": 10001
+    },
+    {
+      "path": "drivers/gpu/drm/amd/display/dc/dce/dce_stream_encoder.c",
+      "file": "dce_stream_encoder.c",
+      "url": "https://raw.githubusercontent.com/torvalds/linux/adc218676eef25575469234709c2d87185ca223a/drivers/gpu/drm/amd/display/dc/dce/dce_stream_encoder.c",
+      "sha256": "111399cf9ece04d7d4d349d27014eefba520566a8d41df3d4b1d5637b11c1b40",
+      "bytes": 46262
+    },
+    {
+      "path": "drivers/gpu/drm/amd/display/dc/resource/dce112/dce112_resource.c",
+      "file": "dce112_resource.c",
+      "url": "https://raw.githubusercontent.com/torvalds/linux/adc218676eef25575469234709c2d87185ca223a/drivers/gpu/drm/amd/display/dc/resource/dce112/dce112_resource.c",
+      "sha256": "38d0357ba68540159df93ca29dee2b26b201d8bf6940dfed3854f8270146a413",
+      "bytes": 38572
+    },
+    {
+      "path": "drivers/gpu/drm/amd/include/asic_reg/dce/dce_11_2_d.h",
+      "file": "dce_11_2_d.h",
+      "url": "https://raw.githubusercontent.com/torvalds/linux/adc218676eef25575469234709c2d87185ca223a/drivers/gpu/drm/amd/include/asic_reg/dce/dce_11_2_d.h",
+      "sha256": "7f865912129ac67966827035d5a34b4362f8a3156a56e298cb995386ce77a644",
+      "bytes": 874647
+    },
+    {
+      "path": "drivers/gpu/drm/amd/include/asic_reg/dce/dce_11_2_sh_mask.h",
+      "file": "dce_11_2_sh_mask.h",
+      "url": "https://raw.githubusercontent.com/torvalds/linux/adc218676eef25575469234709c2d87185ca223a/drivers/gpu/drm/amd/include/asic_reg/dce/dce_11_2_sh_mask.h",
+      "sha256": "cd5dde10fcdf14c5355f54dc34c84b7fef30d8864045ae4f5172d7e66beab737",
+      "bytes": 1285290
+    },
+    {
+      "path": "drivers/gpu/drm/amd/amdgpu/amdgpu_atombios.c",
+      "file": "amdgpu_atombios.c",
+      "url": "https://raw.githubusercontent.com/torvalds/linux/adc218676eef25575469234709c2d87185ca223a/drivers/gpu/drm/amd/amdgpu/amdgpu_atombios.c",
+      "sha256": "ae8a41ffd9baafeeedd213b589389eca8be6cf68fe8c33f837b7d5ec63d64113",
+      "bytes": 58764
+    },
+    {
+      "file": "dce110_timing_generator.c",
+      "path": "drivers/gpu/drm/amd/display/dc/dce110/dce110_timing_generator.c",
+      "url": "https://raw.githubusercontent.com/torvalds/linux/adc218676eef25575469234709c2d87185ca223a/drivers/gpu/drm/amd/display/dc/dce110/dce110_timing_generator.c",
+      "sha256": "aa7451a5d9b7d57a3005312ccf680e17204644a9cb5a88f17b9045ace5d1ca84"
+    }
+  ],
+  "fields": [
+    {
+      "selector": 0,
+      "register": "mmDP2_DP_VID_STREAM_CNTL"
+    },
+    {
+      "selector": 1,
+      "register": "mmCRTC0_CRTC_H_TOTAL"
+    },
+    {
+      "selector": 2,
+      "register": "mmCRTC0_CRTC_H_BLANK_START_END"
+    },
+    {
+      "selector": 3,
+      "register": "mmCRTC0_CRTC_H_SYNC_A"
+    },
+    {
+      "selector": 4,
+      "register": "mmCRTC0_CRTC_H_SYNC_A_CNTL"
+    },
+    {
+      "selector": 5,
+      "register": "mmCRTC0_CRTC_V_TOTAL"
+    },
+    {
+      "selector": 6,
+      "register": "mmCRTC0_CRTC_V_BLANK_START_END"
+    },
+    {
+      "selector": 7,
+      "register": "mmCRTC0_CRTC_V_SYNC_A"
+    },
+    {
+      "selector": 8,
+      "register": "mmCRTC0_CRTC_V_SYNC_A_CNTL"
+    },
+    {
+      "selector": 9,
+      "register": "mmCRTC0_CRTC_INTERLACE_CONTROL"
+    },
+    {
+      "selector": 10,
+      "register": "mmDP2_DP_PIXEL_FORMAT"
+    },
+    {
+      "selector": 11,
+      "register": "mmDP2_DP_VID_TIMING"
+    },
+    {
+      "selector": 12,
+      "register": "mmDP2_DP_VID_N"
+    },
+    {
+      "selector": 13,
+      "register": "mmDP2_DP_VID_M"
+    }
+  ],
+  "field_facts": [
+    {
+      "compiled": "POLARIS_TIMING_COORD_MASK",
+      "upstream": "CRTC_H_TOTAL__CRTC_H_TOTAL_MASK"
+    },
+    {
+      "compiled": "POLARIS_TIMING_COORD_MASK",
+      "upstream": "CRTC_H_BLANK_START_END__CRTC_H_BLANK_START_MASK"
+    },
+    {
+      "compiled": "POLARIS_TIMING_COORD_MASK",
+      "upstream": "CRTC_H_SYNC_A__CRTC_H_SYNC_A_START_MASK"
+    },
+    {
+      "compiled": "POLARIS_TIMING_HIGH_COORD_MASK",
+      "upstream": "CRTC_H_BLANK_START_END__CRTC_H_BLANK_END_MASK"
+    },
+    {
+      "compiled": "POLARIS_TIMING_HIGH_COORD_SHIFT",
+      "upstream": "CRTC_H_BLANK_START_END__CRTC_H_BLANK_END__SHIFT"
+    },
+    {
+      "compiled": "POLARIS_TIMING_HIGH_COORD_MASK",
+      "upstream": "CRTC_H_SYNC_A__CRTC_H_SYNC_A_END_MASK"
+    },
+    {
+      "compiled": "POLARIS_TIMING_HIGH_COORD_SHIFT",
+      "upstream": "CRTC_H_SYNC_A__CRTC_H_SYNC_A_END__SHIFT"
+    },
+    {
+      "compiled": "POLARIS_TIMING_POL_MASK",
+      "upstream": "CRTC_H_SYNC_A_CNTL__CRTC_H_SYNC_A_POL_MASK"
+    },
+    {
+      "compiled": "POLARIS_TIMING_COORD_MASK",
+      "upstream": "CRTC_V_TOTAL__CRTC_V_TOTAL_MASK"
+    },
+    {
+      "compiled": "POLARIS_TIMING_COORD_MASK",
+      "upstream": "CRTC_V_BLANK_START_END__CRTC_V_BLANK_START_MASK"
+    },
+    {
+      "compiled": "POLARIS_TIMING_COORD_MASK",
+      "upstream": "CRTC_V_SYNC_A__CRTC_V_SYNC_A_START_MASK"
+    },
+    {
+      "compiled": "POLARIS_TIMING_HIGH_COORD_MASK",
+      "upstream": "CRTC_V_BLANK_START_END__CRTC_V_BLANK_END_MASK"
+    },
+    {
+      "compiled": "POLARIS_TIMING_HIGH_COORD_SHIFT",
+      "upstream": "CRTC_V_BLANK_START_END__CRTC_V_BLANK_END__SHIFT"
+    },
+    {
+      "compiled": "POLARIS_TIMING_HIGH_COORD_MASK",
+      "upstream": "CRTC_V_SYNC_A__CRTC_V_SYNC_A_END_MASK"
+    },
+    {
+      "compiled": "POLARIS_TIMING_HIGH_COORD_SHIFT",
+      "upstream": "CRTC_V_SYNC_A__CRTC_V_SYNC_A_END__SHIFT"
+    },
+    {
+      "compiled": "POLARIS_TIMING_POL_MASK",
+      "upstream": "CRTC_V_SYNC_A_CNTL__CRTC_V_SYNC_A_POL_MASK"
+    },
+    {
+      "compiled": "POLARIS_TIMING_INTERLACE_MASK",
+      "upstream": "CRTC_INTERLACE_CONTROL__CRTC_INTERLACE_ENABLE_MASK"
+    },
+    {
+      "compiled": "POLARIS_TIMING_STREAM_MASK",
+      "upstream": "DP_VID_STREAM_CNTL__DP_VID_STREAM_ENABLE_MASK"
+    },
+    {
+      "compiled": "POLARIS_TIMING_AUTO_MN_MASK",
+      "upstream": "DP_VID_TIMING__DP_VID_M_N_GEN_EN_MASK"
+    },
+    {
+      "compiled": "POLARIS_TIMING_M_MASK",
+      "upstream": "DP_VID_M__DP_VID_M_MASK"
+    }
+  ],
+  "pages": [
+    24576,
+    77824
+  ],
+  "capture": {
+    "dwords": 80,
+    "fields": 14,
+    "report_words": 9,
+    "order": "6CRTCbefore,20DIGfirst,14timingfirst,20DIGsecond,14timingsecond,6CRTCafter",
+    "admission": "Exactexistingboard/GOP/BAR5/D0/CPU/COM1/kernellease and fixed1024x768BGRX;beforeextra fields first26readsmustshowexactCRTC0-FE2-BE2,rawDIGmode0,FEclock1;DPstreamenable readfirst beforeother13fields;first/second controls andCRTCbrackets equal;only documentedautomaticM bits may differ andbothsamples retained",
+    "budget": "One shared link/timing attempt per boot including preparation failure,80journaled DWORDloadattempts atmost,two-second softwareadmission,no bus timeout,no stores/polls/retry",
+    "pages": "No newpages;14fields lie in existing CRTC0 page6000/selectedFE2 page13000;all seven retained leaves remain RO/NX/UC",
+    "lifetime": "Existingclose/unmap/hold+capremoval/quarantine beforefreshRing3decode;partialcleanupretainsledger/no reopening;not DMAisolation"
+  },
+  "decoder": {
+    "scope": "Progressive observed raster including borders;total register is N-1 and blankstart-blankend gives raster active extent. Do not equate raster size with separately qualified1024x768GOPsurface. Reject malformed/noncanonical geometry/interlace/disabledstream/unmatchedroute/stability;no pixelclock/refresh/lane-rate/training/activephysicalport or new mode authority inferred.",
+    "raw_DP": "STREAM_CNTL,PIXEL_FORMAT,VID_TIMING,VID_N,VID_M;retain fullraw fields and first/secondM pair;no clock/refresh/rate inference or programmingauthority",
+    "protocol": "Private copied timing version2 ops13-15,80orderedvalues,9wordreport,max90RPC;freshv1BEGIN rejected. FoursecondCPUadmission and separate startup/RPC/stop bounds unchanged.",
+    "stability": "All CRTC/DIG/N/VID_TIMING/other control samples remain exactly equal. Only differing low24 M bits may be observed when the stable GEN_EN bit is enabled;manualM or changedreservedM bits refuse. Retain first+second fullrawMs in word8;no averaged/chosen pixelclock or programming authority."
+  },
+  "read_review": {
+    "primary": "DCE110 program_blanking uses read-modify-write of totals/blank controls;V_SYNC_A_CNTL read in reset-trigger setup;DP blank reads STREAM_ENABLE,stream attribute/DPunblank updates pixel format/timing/N/M. DCE11.2 definitions identify fixed control/configuration offsets and masks.",
+    "inference": "These are control/configuration reads in operational DCE domains;header facts and consumer read/RMW usage support this bounded experiment,not an AMD clear-on-read/poweroff/reset/hung-device safety guarantee. H/V sync/interlace field access is inferred from configuration-register usage and definitions,not an independently observed physical pass.",
+    "assumptions": "OperationalDCE/unchangedfirmwarescanout/nohotplug-power-reset;PCI D0 alone insufficient;independentCOM7 already physically demonstrated",
+    "exclusions": "No GPIO/AUX/I2C/HPD,PHY/power/clockwrite,DP lane/rate request,linktraining,ATOMcommandexecution,PCIbusmasterchange,DMA/IRQ/IOMMUauthority;no native changedmode/reset/reinitialization qualification"
+  },
+  "physical_status": "PASS physical v37 copied timing V2 report: 80 loads, stable CRTC/DIG/13 static timing fields, auto M 0000758D->0000758F retained, all nine independently packed words match. Checked close/unmap/hold/cap removal, inherited quarantine, shared repeat refusals, serial/readable output and unassisted controlled reboot passed. No stores/polls/retries/new native programming. V36 strict V1 failed acceptance remains sealed separately. See build/rx570-auto-m-v37/hardware/validation.json."
+}

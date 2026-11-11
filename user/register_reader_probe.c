@@ -2,6 +2,9 @@
 #include "lib/syscall.h"
 #include "drivers/amd_polaris_display.h"
 #include "drivers/amd_polaris_plane.h"
+#include "drivers/amd_polaris_link.h"
+#include "drivers/amd_polaris_timing.h"
+#include "drivers/amd_polaris_vertical.h"
 #include "../include/program_startup.h"
 #include "../include/register_probe_protocol.h"
 
@@ -44,6 +47,15 @@ void jcos_main(const JcosProgramStartup *startup) {
         startup->flags || startup->environment_count || startup->capability_count != 2U ||
         startup->argument_count != 1U || !startup->arguments[0] ||
         !startup->capabilities[0] || !startup->capabilities[1]) jcos_thread_exit();
+    static JcosU32 link_values[POLARIS_LINK_VALUES];
+    static JcosU64 link_report[POLARIS_LINK_WORDS];
+    JcosU32 link_next=0;int link_started=0,link_sealed=0;
+    static JcosU32 timing_values[POLARIS_TIMING_VALUES];
+    static JcosU64 timing_report[POLARIS_TIMING_WORDS];
+    JcosU32 timing_next=0;int timing_started=0,timing_sealed=0;
+    static JcosU32 vertical_values[POLARIS_VERTICAL_VALUES];
+    static JcosU64 vertical_report[POLARIS_VERTICAL_WORDS];
+    JcosU32 vertical_next=0,vertical_query=0;int vertical_started=0,vertical_sealed=0;
     PolarisDisplayObservation retained_observation;
     JcosU64 retained_identity = 0;
     PolarisPlaneWitness retained_witness;
@@ -57,7 +69,48 @@ void jcos_main(const JcosProgramStartup *startup) {
         reply.word_count = 4U;
         reply.words[0] = REGISTER_PROBE_REPLY;
         reply.words[1] = startup->arguments[0];
-        if (request.word_count == 4U && request.words[0] == REGISTER_PROBE_CHECK) {
+        if(link_started && request.words[0]!=REGISTER_PROBE_LINK_BEGIN && request.words[0]!=REGISTER_PROBE_LINK_DATA &&
+            request.words[0]!=REGISTER_PROBE_LINK_QUERY && request.words[0]!=REGISTER_PROBE_SHUTDOWN)jcos_thread_exit();
+
+        if(timing_started && request.words[0]!=REGISTER_PROBE_TIMING_BEGIN && request.words[0]!=REGISTER_PROBE_TIMING_DATA &&
+            request.words[0]!=REGISTER_PROBE_TIMING_QUERY && request.words[0]!=REGISTER_PROBE_SHUTDOWN)jcos_thread_exit();
+        if(vertical_started && request.words[0]!=REGISTER_PROBE_VERTICAL_BEGIN && request.words[0]!=REGISTER_PROBE_VERTICAL_DATA &&
+            request.words[0]!=REGISTER_PROBE_VERTICAL_QUERY && request.words[0]!=REGISTER_PROBE_SHUTDOWN)jcos_thread_exit();
+        if(request.words[0]==REGISTER_PROBE_VERTICAL_BEGIN){
+            if(request.word_count!=4 || request.words[1]!=POLARIS_VERTICAL_VERSION || request.words[2] || request.words[3] || vertical_started || timing_started || link_started)jcos_thread_exit();
+            vertical_started=1;reply.words[2]=1;reply.words[3]=POLARIS_VERTICAL_VALUES;
+        }else if(request.words[0]==REGISTER_PROBE_VERTICAL_DATA){
+            if(request.word_count!=4 || !vertical_started || vertical_sealed || request.words[1]!=vertical_next || vertical_next>=POLARIS_VERTICAL_VALUES ||
+                request.words[2]>0xFFFFFFFFULL || request.words[3])jcos_thread_exit();
+            vertical_values[vertical_next++]=(JcosU32)request.words[2];reply.words[2]=vertical_next;reply.words[3]=request.words[2];
+            if(vertical_next==POLARIS_VERTICAL_VALUES){(void)polaris_vertical_plan(vertical_values,POLARIS_VERTICAL_VALUES,vertical_report);vertical_sealed=1;}
+        }else if(request.words[0]==REGISTER_PROBE_VERTICAL_QUERY){
+            if(request.word_count!=4 || !vertical_sealed || request.words[1]!=vertical_query || vertical_query>=POLARIS_VERTICAL_WORDS || request.words[2]!=POLARIS_VERTICAL_VERSION || request.words[3])jcos_thread_exit();
+            reply.words[2]=request.words[1]+1;reply.words[3]=vertical_report[vertical_query++];
+        }else if(request.words[0]==REGISTER_PROBE_TIMING_BEGIN){
+            if(request.word_count!=4 || request.words[1]!=POLARIS_TIMING_VERSION || request.words[2] || request.words[3] || timing_started || link_started)jcos_thread_exit();
+            timing_started=1;reply.words[2]=1;reply.words[3]=POLARIS_TIMING_VALUES;
+        }else if(request.words[0]==REGISTER_PROBE_TIMING_DATA){
+            if(request.word_count!=4 || !timing_started || timing_sealed || request.words[1]!=timing_next || timing_next>=POLARIS_TIMING_VALUES ||
+                request.words[2]>0xFFFFFFFFULL || request.words[3])jcos_thread_exit();
+            timing_values[timing_next++]=(JcosU32)request.words[2];reply.words[2]=timing_next;reply.words[3]=request.words[2];
+            if(timing_next==POLARIS_TIMING_VALUES){(void)polaris_timing_observe(timing_values,POLARIS_TIMING_VALUES,timing_report);timing_sealed=1;}
+        }else if(request.words[0]==REGISTER_PROBE_TIMING_QUERY){
+            if(request.word_count!=4 || !timing_sealed || request.words[1]>=POLARIS_TIMING_WORDS || request.words[2]!=POLARIS_TIMING_VERSION || request.words[3])jcos_thread_exit();
+            reply.words[2]=request.words[1]+1;reply.words[3]=timing_report[request.words[1]];
+        }else if(request.words[0]==REGISTER_PROBE_LINK_BEGIN){
+
+            if(request.word_count!=4 || request.words[1]!=POLARIS_LINK_VERSION || request.words[2] || request.words[3] || link_started)jcos_thread_exit();
+            link_started=1;reply.words[2]=1;reply.words[3]=POLARIS_LINK_VALUES;
+        }else if(request.words[0]==REGISTER_PROBE_LINK_DATA){
+            if(request.word_count!=4 || !link_started || link_sealed || request.words[1]!=link_next || link_next>=POLARIS_LINK_VALUES ||
+                request.words[2]>0xFFFFFFFFULL || request.words[3])jcos_thread_exit();
+            link_values[link_next++]=(JcosU32)request.words[2];reply.words[2]=link_next;reply.words[3]=request.words[2];
+            if(link_next==POLARIS_LINK_VALUES){(void)polaris_link_observe(link_values,POLARIS_LINK_VALUES,link_report);link_sealed=1;}
+        }else if(request.words[0]==REGISTER_PROBE_LINK_QUERY){
+            if(request.word_count!=4 || !link_sealed || request.words[1]>=POLARIS_LINK_WORDS || request.words[2]!=POLARIS_LINK_VERSION || request.words[3])jcos_thread_exit();
+            reply.words[2]=request.words[1]+1;reply.words[3]=link_report[request.words[1]];
+        }else if (request.word_count == 4U && request.words[0] == REGISTER_PROBE_CHECK) {
             reply.words[2] = check_reader(request.words[1], request.words[2],
                 request.words[3], startup->capabilities[0]);
         } else if (request.word_count == 4U && request.words[0] == REGISTER_PROBE_CAPTURE) {

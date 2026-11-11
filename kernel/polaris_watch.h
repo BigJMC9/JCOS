@@ -3,6 +3,7 @@
 #include "types.h"
 void polaris_watch_arm(u32 role,bool spin);
 void polaris_watch_begin(const BootInfo *boot);
+void polaris_watch_begin_vtotal(const BootInfo *boot,u32 diagnostic_fault_prefix);
 bool polaris_watch_launch(const BootInfo *boot);
 bool polaris_watch_restart(void);
 void polaris_watch_rescue(void);

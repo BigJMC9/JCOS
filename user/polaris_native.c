@@ -1,6 +1,7 @@
 #include "lib/syscall.h"
 #include "drivers/amd_polaris_plane.h"
 #include "drivers/amd_polaris_program.h"
+#include "drivers/amd_polaris_vtotal.h"
 #include "../include/program_startup.h"
 #include "../include/polaris_native_protocol.h"
 #include "../kernel/font8x8.h"
@@ -17,13 +18,16 @@ static void text(volatile JcosU32 *fb,JcosU32 y,const char *s,JcosU32 color) {
             if (font8x8[c][row]&(1U<<(7U-bit))) fb[(y+row)*1024U+32U+n*8U+bit]=color;
     }
 }
-static void draw(volatile JcosU32 *fb) {
+static void draw(volatile JcosU32 *fb,int vertical) {
     JcosU32 bg=POLARIS_NATIVE_ROLE==POLARIS_NATIVE_ROLE_RESCUE ? 0x00182030U : 0x00103018U;
     for (JcosU32 i=0;i<1024U*768U;++i) fb[i]=bg;
     text(fb,40,POLARIS_NATIVE_ROLE==POLARIS_NATIVE_ROLE_RESCUE ?
         "JA OS - FRESH RING3 RESCUE DISPLAY" : "JA OS - RING3 POLARIS SAME-BUFFER REBIND",0x00FFFFFFU);
     text(fb,64,"DIAGNOSTIC OUTPUT - SERIAL CONTROL REMAINS ACTIVE",0x0000FFFFU);
-    text(fb,88,"INHERITED DISPLAYPORT TIMING - NO GPU RESET",0x00FFFFFFU);
+    text(fb,88,vertical ? (POLARIS_NATIVE_ROLE==POLARIS_NATIVE_ROLE_RESCUE ?
+        "ZERO VERTICAL OVERRIDE RESTORED - BASE TOTAL 1125" :
+        "VERTICAL OVERRIDE READBACK VERIFIED - TARGET 1133") :
+        "INHERITED DISPLAYPORT TIMING - NO GPU RESET",0x00FFFFFFU);
 }
 typedef struct {JcosCapabilityHandle command,reply;JcosU64 incarnation;JcosU32 sequence;} BrokerClient;
 static int exchange(void *context,JcosU32 operation,JcosU32 field,JcosU32 payload,JcosU32 *value) {
@@ -39,6 +43,18 @@ static int exchange(void *context,JcosU32 operation,JcosU32 field,JcosU32 payloa
        (operation!=POLARIS_REBIND_READ && r.words[3]))return 0;
     *value=(JcosU32)r.words[3];return 1;
 }
+typedef struct {BrokerClient client;JcosU32 fault_prefix,writes;} VtotalClient;
+static int vtotal_exchange(void *context,JcosU32 operation,JcosU32 field,JcosU32 payload,JcosU32 *value){
+ VtotalClient *v=context;BrokerClient *c=&v->client;*value=0;
+ if(c->sequence>=POLARIS_VTOTAL_MESSAGES)return 0;
+ JcosU64 tag=POLARIS_VTOTAL_TAG(++c->sequence,operation,field);JcosIpcMessage q,r;message_clear(&q);message_clear(&r);
+ q.words[0]=POLARIS_VTOTAL_REQUEST;q.words[1]=c->incarnation;q.words[2]=tag;q.words[3]=payload;
+ if(!jcos_ipc_send_blocking(c->reply,&q) || !jcos_ipc_receive_blocking(c->command,&r) ||
+  r.word_count!=4 || r.words[0]!=POLARIS_VTOTAL_RESPONSE || r.words[1]!=c->incarnation || r.words[2]!=tag ||
+  r.words[3]>0xFFFFFFFFULL || (operation!=POLARIS_VTOTAL_READ && r.words[3]))return 0;
+ if(operation==POLARIS_VTOTAL_WRITE && ++v->writes==v->fault_prefix){__asm__ volatile("ud2");__builtin_unreachable();}
+ *value=(JcosU32)r.words[3];return 1;
+}
 __attribute__((noreturn))
 void jcos_main(const JcosProgramStartup *s) {
     if (!s || s->magic!=JCOS_PROGRAM_STARTUP_MAGIC || s->version!=1 || s->size!=sizeof(*s) ||
@@ -49,7 +65,7 @@ void jcos_main(const JcosProgramStartup *s) {
     observation.surface_gpu_address=s->arguments[2]; observation.linear_span_bytes=0x300000;
     observation.surface_width=1024; observation.surface_height=768; observation.pitch_pixels=1024;
     observation.depth=2; observation.format=0; observation.array_mode=1; observation.restrictions=0;
-    PolarisPlaneWitness witness; JcosU64 identity=0; JcosU32 next_step=0; int drawn=0,attempted=0,programmed=0;
+    PolarisPlaneWitness witness; JcosU64 identity=0; JcosU32 next_step=0; int drawn=0,attempted=0,programmed=0,vertical_attempted=0,vertical_done=0;
     for (;;) {
         JcosIpcMessage q,r; message_clear(&q); message_clear(&r);
         if (!jcos_ipc_receive_blocking(s->capabilities[0],&q)) jcos_thread_exit();
@@ -84,8 +100,16 @@ void jcos_main(const JcosProgramStartup *s) {
             programmed=polaris_user_program(&io,witness.values[0][POLARIS_WITNESS_FLIP_CONTROL],&delta);
             if(!programmed)jcos_thread_exit();
             r.words[2]=POLARIS_NATIVE_EXECUTE;r.words[3]=delta;
+        } else if(op==POLARIS_NATIVE_VTOTAL && !vertical_attempted && !drawn &&
+                  q.words[1]==POLARIS_NATIVE_ROLE && q.words[2]<=3 && !q.words[3] &&
+                  (POLARIS_NATIVE_ROLE==1 ? identity && programmed : !identity && !attempted && !q.words[2])){
+            vertical_attempted=1;
+            VtotalClient client={{s->capabilities[0],s->capabilities[1],s->arguments[0],0},(JcosU32)q.words[2],0};
+            PolarisUserVtotalIo io={&client,vtotal_exchange};JcosU32 delta=0;
+            vertical_done=polaris_user_vtotal(&io,POLARIS_NATIVE_ROLE==2,&delta);
+            if(!vertical_done)jcos_thread_exit();r.words[2]=POLARIS_NATIVE_VTOTAL;r.words[3]=delta;
         } else if (op==POLARIS_NATIVE_DRAW && identity && programmed && !drawn && q.words[1]==POLARIS_NATIVE_ROLE && !q.words[2] && !q.words[3]) {
-            draw((volatile JcosU32 *)s->arguments[1]); drawn=1; r.words[2]=POLARIS_NATIVE_ROLE;
+            draw((volatile JcosU32 *)s->arguments[1],vertical_done); drawn=1; r.words[2]=POLARIS_NATIVE_ROLE;
         } else if ((op==POLARIS_NATIVE_TEST_FAULT || op==POLARIS_NATIVE_TEST_SPIN) &&
                    q.words[1]==POLARIS_NATIVE_ROLE && !q.words[2] && !q.words[3]) {
             /* Acknowledge this exact branch before leaving the command loop.

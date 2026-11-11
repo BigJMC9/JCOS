@@ -22,6 +22,24 @@
  * Exactly samples0 then1, once per retained capture; reply tag=sample+1.
  * STEP request: op,observation ID,index,reserved0.
  * Reply header,incarnation,versioned semantic tag,value. Data only: no GPU grant. */
+/* Copied-link diagnostic,one BEGIN/DATA stream per fresh probe;no device cap.
+ * BEGIN:op,version1,0,0 ->tag1,count52. DATA:op,nextindex,uint32value,0
+ * ->tagindex+1,value. QUERY:op,index0..3,version1,0 ->tagindex+1,word.
+ * Invalid order/shape closes the process;no reset/replay within an instance. */
+#define REGISTER_PROBE_LINK_BEGIN REGISTER_PROBE_HEADER(10ULL)
+#define REGISTER_PROBE_LINK_DATA REGISTER_PROBE_HEADER(11ULL)
+#define REGISTER_PROBE_LINK_QUERY REGISTER_PROBE_HEADER(12ULL)
+/* Copied timing diagnostic:BEGIN version2/count80;DATA ordered0..79;QUERY0..8.
+ * Word8 retains first/second rawM;version1 eightword role is rejected.
+ * One role per fresh process;no device access/reset/replay. */
+#define REGISTER_PROBE_TIMING_BEGIN REGISTER_PROBE_HEADER(13ULL)
+#define REGISTER_PROBE_TIMING_DATA REGISTER_PROBE_HEADER(14ULL)
+#define REGISTER_PROBE_TIMING_QUERY REGISTER_PROBE_HEADER(15ULL)
+/* Copied vertical preparation: fresh role, BEGIN version1/count86,
+ * ordered DATA0..85 and QUERY0..17. No GPU write permission. */
+#define REGISTER_PROBE_VERTICAL_BEGIN REGISTER_PROBE_HEADER(16ULL)
+#define REGISTER_PROBE_VERTICAL_DATA REGISTER_PROBE_HEADER(17ULL)
+#define REGISTER_PROBE_VERTICAL_QUERY REGISTER_PROBE_HEADER(18ULL)
 #define REGISTER_PROBE_REPLY    0x52454750524F4245ULL
 #define REGISTER_PROBE_STOPPED  0x52454753544F5050ULL
 #define REGISTER_PROBE_EXPECTED 0xFFULL

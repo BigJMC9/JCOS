@@ -612,3 +612,205 @@ bytes stay saved/excluded. No actual ROM blob export or new rescue/restart case.
 See [physical ROM inventory](AMD_POLARIS_DISPLAY.md#observed-firmware-rom-connector-inventory)
 for offsets, provenance, byte scopes and limitations. Native modes/link programming
 and hardware reset/isolation remain open.
+
+
+ROM routing coverage adds 27 malformed/boundary cases and 513 protected routing
+prefixes alongside the 513 base-prefix/26-vector tests. Actual Ring3 tests in
+`test display-probe` compare twelve golden route words and verify that one bad
+route is cleared while its directory and peer survive. The four final-image
+QEMU boots pass focused/multi-GPU, normal 88/88 and deep 88/88/611. An initial
+stack-guard failure is retained with its image; final runs use the corrected
+process-private report storage. Hardware route acceptance remains pending.
+See [firmware routing inventory](AMD_POLARIS_DISPLAY.md#firmware-connector-routing-inventory)
+for field encoding, refusal statuses and evidence limits.
+
+
+Physical v30 kept all four refused ROM routes at status 3 with zero partial
+fields across four stable reports; directory reporting and the normal native GUI
+remained usable. Actual Ring3 RAM tests, four GUI sessions/three full baselines,
+presenter/compositor exception cleanup, serial/power readiness and readable
+unassisted reboot passed. Record decoding on the board remains unresolved.
+See [physical record refusals](AMD_POLARIS_DISPLAY.md#observed-connector-record-refusals)
+for capture scopes and the next bounded RAM-byte diagnostic. No new GPU operation
+or successful physical routing/HDMI/reset/isolation claim is made.
+
+
+`test display-probe` now exercises bounded reserved-ROM RAM windows, final-byte
+access, short-copy zero tail and zero/oversize/cross-end/overflow/source-change
+refusals with cleared output. Four final-image QEMU boots pass focused/multi,
+normal88/88 and deep88/88/611; focused command checks cover invalid decimal
+arguments and unqualified-source refusal. Physical raw-window capture is pending.
+See [the bounded RAM diagnostic](AMD_POLARIS_DISPLAY.md#bounded-firmware-ram-byte-diagnostic).
+
+
+Physical v31's first ROM byte-window read caused a kernel page fault on an
+unmapped reserved-RAM direct alias; no bytes were exported. The PMM-backed
+synthetic window tests did not cover that mapping condition. Serial captured
+the halt; no retry, GPU transaction or reboot followed. A replacement image
+must move source reads into the isolated service's checked RO/NX mapping.
+See [the physical window failure](AMD_POLARIS_DISPLAY.md#physical-byte-window-kernel-fault).
+
+
+The replacement byte diagnostic uses private ROM protocol 3 and the isolated
+service's checked RO/NX mapping. The kernel receives up to eight bytes per reply
+and performs no ROM-source dereference. A 256-byte window needs at most 32 calls;
+failed calls/cleanup clear output and retain cleanup ownership when necessary.
+Host protected-page checks and four QEMU runs pass, including actual Ring3 reads
+and full CPU baselines. Physical reserved-source capture remains pending after
+resetting the halted v31 target. Native/rescue code and GPU budgets are unchanged.
+See [the isolated byte-reader repair](AMD_POLARIS_DISPLAY.md#isolated-firmware-byte-reader-repair).
+
+
+Physical v32 exported the complete firmware RAM copy through the isolated service;
+CRC/overlap checks and unassisted controlled reboot pass. Actual-copy host replay
+identifies a single-byte terminator refusal;successful routing remains pending.
+See [the byte-capture record](AMD_POLARIS_DISPLAY.md#complete-isolated-firmware-byte-capture).
+
+
+Single-byte record regressions cover a peer starting immediately after FF,
+exact ObjectInfo end, missing ordinary headers, the64-record budget and a
+protected page immediately after the token. The actual Ring3 fixture prints
+`ACTUAL SINGLE-BYTE ROM TERMINATOR / NEXT SECTION PRESERVED: PASS` and retains
+full CPU baseline checks. All four final-image QEMU boots pass;actual-copy host
+replay checks all48 packed route words. Fresh physicalv33 reports are pending.
+
+
+Physical v33 routing qualification passes:four reports/all48 golden fields,
+actualRing3 single-byteFF/peer preservation/fullCPUbaselines and unassisted
+controlledreboot. No new GPU or GPIO/AUX/I2C/HPD transaction ran.
+See [the physical routing record](AMD_POLARIS_DISPLAY.md#physical-terminator-and-routing-qualification).
+
+
+The direct firmware topology decoder passes 33 malformed-input and boundary
+cases, 513 protected prefixes, 568 byte mutations, and final-byte terminator and
+truncated-header checks. The actual Ring3 fixtures report:
+
+- `ACTUAL RING3 DIRECT PATH / ENCODER / LINK AND CAPABILITY CORRELATION: PASS`
+- `ACTUAL TOPOLOGY REFUSAL / CLEARED TAIL / CONNECTOR AND PEER PRESERVED: PASS`
+
+Host replay of the captured ROM preserves all 48 route words and matches all
+16 new topology words. All four final-image QEMU runs pass. Fresh physical v34
+reports remain pending.
+
+The initial normal run passed 87/88 tests; its native RAM reservation failure
+and image are retained. After correcting the readiness observation race, all
+four checks were rerun on the final image.
+
+
+Physical v34 topology qualification passes: four reports match all 64 expected
+fields. Actual Ring3 parsing, refusal, peer preservation and complete CPU
+resource checks pass, followed by an unassisted controlled reboot. No GPU or
+GPIO/AUX/I2C/HPD transaction ran in this pass.
+See [the physical topology record](AMD_POLARIS_DISPLAY.md#physical-firmware-path-and-encoder-qualification).
+
+
+The copied DIG decoder is checked with `python tools/test_polaris_link.py` and
+`python tools/audit_polaris_link.py --source-dir build/rx570-link-v35/references`
+(with the pinned source files present).
+Actual Ring3 fixtures in `test display-probe` emit:
+
+- `ACTUAL RING3 COPIED LINK / UNIQUE CRTC-FE-BE / GOLDEN REPORT: PASS`
+- `ACTUAL RING3 LINK CHANGED/ALL-ONES / CLEARED REPORT: PASS`
+- `ACTUAL LINK DUPLICATE INDEX / PROCESS CLOSED / NO REPLAY: PASS`
+- `ACTUAL LINK PROBE / FULL CPU RESOURCE BASELINE / NO GPU IO: PASS`
+
+The focused/two-display/normal88/deep611 final-image runs pass. These CPU tests
+use copied fixtures and confer no physical MMIO qualification. `polaris-link`
+refuses the unqualified QEMU GPU before assignment or reads. Positive 52-load
+capture, exact mapping teardown, quarantine and continued serial/display access
+require the matched v35 image on the selected board. The current command has
+one admitted attempt per boot and no retry. See
+[the profile and limits](AMD_POLARIS_DISPLAY.md#bounded-read-only-dig-observation).
+
+
+Physical v35 completed52 ordered read-only DIG/CRTC loads with matching paired
+samples and CRTCbrackets;freshRing3 and independent host decoding agree on
+CRTC0-FE2-BE2. Checked MMIOcleanup/quarantine,duplicateattemptrefusal,continued
+serial/readabledisplay and unassisted controlledreboot pass. No GPUstores/polls
+or newnativeprogramming ran;native changedmodes/HDMI/reset/isolation stay open.
+See [the physical DIG record](AMD_POLARIS_DISPLAY.md#physical-read-only-dig-qualification).
+
+
+The inherited timing decoder is checked with `python tools/test_polaris_timing.py`
+and `python tools/audit_polaris_timing.py --source-dir build/rx570-timing-v36/references`
+(with the pinned sources present). Actual Ring3 timing golden/raster independence,
+changed/all-ones/geometry refusal, early query/cross-role/duplicate/wide-value
+process closure and full CPU baselines extend `test display-probe`. The kernel
+registry and suite totals remain unchanged: normal88 and deep611 iterations.
+All four final-image QEMU runs pass. Positive physical timing reads/cleanup still
+require the matched v36 image; CPU raster fixtures are not physical mode changes.
+See [the timing profile](AMD_POLARIS_DISPLAY.md#bounded-inherited-timing-and-dp-stream-observation).
+
+
+Physical v36 completed80reads and checkedcleanup/quarantine, but its strict
+Ring3 report refused the changing automatic M measurement (758D->758B);status3
+cleared the tail. The original failed session is retained. Serial/readableoutput
+and unassistedreboot pass;no GPUretry/stores/polls/nativeprogramming ran.
+See [the timing refusal record](AMD_POLARIS_DISPLAY.md#physical-timing-capture-and-automatic-m-refusal).
+
+
+The timing version2 tests replay all80 actualv36 register words against nine
+independent expected report words. The copied actualfixture contains register
+values only. Host and actualRing3 tests refuse manualM/reservedM/N/GEN changes
+and a fresh version1 BEGIN;CPU resources return to baseline. The extended audit
+checks eight source hashes/14offsets/20facts. All four v37 final-image QEMU runs
+pass (normal88/deep611). Positive physical version2 capture remains pending;
+the v36 failed semantic session stays failed and sealed.
+See [automatic M reporting](AMD_POLARIS_DISPLAY.md#automatic-m-sample-reporting).
+
+
+The physical v37 paired-M timing observation passed: 80 ordered loads, stable
+controls, both automatic M samples retained and all nine report words checked
+independently. Checked cleanup/quarantine, repeat refusals, serial control,
+readable output and unassisted controlled reboot passed. There were no GPU
+stores, polls or retries. Native changed-mode and reset programming remain open.
+See [the physical timing record](AMD_POLARIS_DISPLAY.md#physical-paired-m-timing-observation).
+
+
+## Vertical-total preparation and restoration plan
+
+V38 adds explicit `polaris-vertical`: the existing 80 timing reads plus two
+MIN/MAX/CONTROL samples, 86 maximum, in existing supervisor RO pages with a
+shared once-per-boot attempt. A fresh Ring3 probe emits an 18-word copied primary
+and restoration proposal only for a strict inactive-override baseline. There
+is no new write executor or hardware recovery qualification. Host, pinned-source
+audit, actual Ring3/CPU-baseline and four final-image QEMU checks pass; physical
+values and plan acceptance remain pending. See [the detailed preparation
+contract](AMD_POLARIS_DISPLAY.md#vertical-total-preparation-and-restoration-plan).
+
+
+The physical v38 read-only vertical preparation passed: 86 ordered loads,
+stable zero MIN/MAX/CONTROL samples and all 18 copied plan words independently
+checked. Cleanup/quarantine, all shared repeat refusals, serial/readable output
+and unassisted controlled reboot passed. No timing writes or restoration were
+executed. See [the physical preparation record](AMD_POLARIS_DISPLAY.md#physical-vertical-total-preparation).
+
+
+## Fixed vertical-total writes and fresh rescue restoration
+
+V39 adds explicit `polaris-vtotal [fault1|fault2|fault3]`: a fresh checked
+86-value preflight, three fixed primary vertical stores and a fresh Ring3
+rescue that disables the override and restores the retained zero baseline
+before plane rebind. It reuses the existing worker, supervisor, exclusive lease,
+quarantine and serial cleanup paths. Normal `gui native` stays address-only.
+Host boundary/transport/controller checks, actual Ring3 RAM faults/restoration
+and four QEMU boots pass (88/88 normal; 88/88/611 deep). Physical writes and
+visible restoration are pending. Use separate fresh boots for prefix faults;
+leave COM7 available. Readback/frame progress does not prove effective refresh
+rate, full modesetting or GPU reset. See [the bounded write and rescue
+contract](AMD_POLARIS_DISPLAY.md#fixed-vertical-total-writes-and-fresh-rescue-restoration).
+
+
+## Physical fixed vertical writes and fresh rescue qualification
+
+Physical v39 passed on the exact RX 570/Philips DP profile: fixed primary
+MIN1132/MAX1132/CONTROL17 writes, automatic fresh rescue after a primary hang,
+and separate fresh-boot crashes after each of the three writes. All four fresh
+rescues restored CONTROL0/MIN0/MAX0 before plane rebind and produced visibly
+readable diagnostic output without a kernel restart. Total888reads/37stores/
+13polls;no replay. Independent serial/Ring3 progress, cleanup and ownership
+refusals on all four boots, and four unassisted controlled reboots passed. Final firmware prompt
+is readable and power ready; COM7 is free. The matched 536-file software record
+is unchanged. Effective total/rate, resolution switching, HDMI and GPU reset/
+DMA isolation remain unqualified. See [the physical write and restoration
+record](AMD_POLARIS_DISPLAY.md#physical-fixed-vertical-writes-and-fresh-rescue-qualification).

@@ -1,0 +1,137 @@
+{
+  "schema_version": 1,
+  "upstream_commit": "adc218676eef25575469234709c2d87185ca223a",
+  "sources": [
+    {
+      "path": "drivers/gpu/drm/amd/display/dc/dce/dce_link_encoder.c",
+      "file": "dce_link_encoder.c",
+      "url": "https://raw.githubusercontent.com/torvalds/linux/adc218676eef25575469234709c2d87185ca223a/drivers/gpu/drm/amd/display/dc/dce/dce_link_encoder.c",
+      "sha256": "00850980541655910f3c97d68af789e5fa4a1b7d2cf301bcdbdcd7c8c801e360",
+      "bytes": 51785
+    },
+    {
+      "path": "drivers/gpu/drm/amd/display/dc/dce/dce_link_encoder.h",
+      "file": "dce_link_encoder.h",
+      "url": "https://raw.githubusercontent.com/torvalds/linux/adc218676eef25575469234709c2d87185ca223a/drivers/gpu/drm/amd/display/dc/dce/dce_link_encoder.h",
+      "sha256": "8f242dd953109146e5d86ca5b980182a92c99590381c25629326ed4731080f22",
+      "bytes": 10001
+    },
+    {
+      "path": "drivers/gpu/drm/amd/display/dc/dce/dce_stream_encoder.c",
+      "file": "dce_stream_encoder.c",
+      "url": "https://raw.githubusercontent.com/torvalds/linux/adc218676eef25575469234709c2d87185ca223a/drivers/gpu/drm/amd/display/dc/dce/dce_stream_encoder.c",
+      "sha256": "111399cf9ece04d7d4d349d27014eefba520566a8d41df3d4b1d5637b11c1b40",
+      "bytes": 46262
+    },
+    {
+      "path": "drivers/gpu/drm/amd/display/dc/resource/dce112/dce112_resource.c",
+      "file": "dce112_resource.c",
+      "url": "https://raw.githubusercontent.com/torvalds/linux/adc218676eef25575469234709c2d87185ca223a/drivers/gpu/drm/amd/display/dc/resource/dce112/dce112_resource.c",
+      "sha256": "38d0357ba68540159df93ca29dee2b26b201d8bf6940dfed3854f8270146a413",
+      "bytes": 38572
+    },
+    {
+      "path": "drivers/gpu/drm/amd/include/asic_reg/dce/dce_11_2_d.h",
+      "file": "dce_11_2_d.h",
+      "url": "https://raw.githubusercontent.com/torvalds/linux/adc218676eef25575469234709c2d87185ca223a/drivers/gpu/drm/amd/include/asic_reg/dce/dce_11_2_d.h",
+      "sha256": "7f865912129ac67966827035d5a34b4362f8a3156a56e298cb995386ce77a644",
+      "bytes": 874647
+    },
+    {
+      "path": "drivers/gpu/drm/amd/include/asic_reg/dce/dce_11_2_sh_mask.h",
+      "file": "dce_11_2_sh_mask.h",
+      "url": "https://raw.githubusercontent.com/torvalds/linux/adc218676eef25575469234709c2d87185ca223a/drivers/gpu/drm/amd/include/asic_reg/dce/dce_11_2_sh_mask.h",
+      "sha256": "cd5dde10fcdf14c5355f54dc34c84b7fef30d8864045ae4f5172d7e66beab737",
+      "bytes": 1285290
+    },
+    {
+      "path": "drivers/gpu/drm/amd/amdgpu/amdgpu_atombios.c",
+      "file": "amdgpu_atombios.c",
+      "url": "https://raw.githubusercontent.com/torvalds/linux/adc218676eef25575469234709c2d87185ca223a/drivers/gpu/drm/amd/amdgpu/amdgpu_atombios.c",
+      "sha256": "ae8a41ffd9baafeeedd213b589389eca8be6cf68fe8c33f837b7d5ec63d64113",
+      "bytes": 58764
+    }
+  ],
+  "fields": [
+    {
+      "selector": "POLARIS_LINK_ENABLE",
+      "register": "DIG_BE_EN_CNTL",
+      "units": 7
+    },
+    {
+      "selector": "POLARIS_LINK_BACKEND",
+      "register": "DIG_BE_CNTL",
+      "units": 7
+    },
+    {
+      "selector": "POLARIS_LINK_FRONTEND",
+      "register": "DIG_FE_CNTL",
+      "units": 6
+    }
+  ],
+  "field_facts": [
+    {
+      "compiled": "POLARIS_LINK_ENABLE_MASK",
+      "upstream": "DIG_BE_EN_CNTL__DIG_ENABLE_MASK"
+    },
+    {
+      "compiled": "POLARIS_LINK_FRONTEND_MASK",
+      "upstream": "DIG_BE_CNTL__DIG_FE_SOURCE_SELECT_MASK"
+    },
+    {
+      "compiled": "POLARIS_LINK_FRONTEND_SHIFT",
+      "upstream": "DIG_BE_CNTL__DIG_FE_SOURCE_SELECT__SHIFT"
+    },
+    {
+      "compiled": "POLARIS_LINK_MODE_MASK",
+      "upstream": "DIG_BE_CNTL__DIG_MODE_MASK"
+    },
+    {
+      "compiled": "POLARIS_LINK_MODE_SHIFT",
+      "upstream": "DIG_BE_CNTL__DIG_MODE__SHIFT"
+    },
+    {
+      "compiled": "POLARIS_LINK_HPD_MASK",
+      "upstream": "DIG_BE_CNTL__DIG_HPD_SELECT_MASK"
+    },
+    {
+      "compiled": "POLARIS_LINK_HPD_SHIFT",
+      "upstream": "DIG_BE_CNTL__DIG_HPD_SELECT__SHIFT"
+    },
+    {
+      "compiled": "POLARIS_LINK_CRTC_MASK",
+      "upstream": "DIG_FE_CNTL__DIG_SOURCE_SELECT_MASK"
+    },
+    {
+      "compiled": "POLARIS_LINK_FE_CLOCK_MASK",
+      "upstream": "DIG_FE_CNTL__DIG_SYMCLK_FE_ON_MASK"
+    }
+  ],
+  "pages": [
+    73728,
+    77824,
+    86016
+  ],
+  "snapshot": {
+    "version": 1,
+    "dwords": 52,
+    "order": "sixCRTCbefore;seven enable/BE pairs+sixFE controls twice;sixCRTCafter",
+    "reads": "Maximum52orderedattempts including failures,no polling/retry;unique coherent runningCRTC checked beforeDIGreads",
+    "decoder": "Allones/changed/partialCRTC/ambiguousCRTC/zeroorambiguousbackend/non-onehot-or-unsupportedFE/mismatchedCRTC refused;clear all reportfields except status",
+    "scope": "Control-register observations only;rawmode/HPD/clock bits do not prove trainedlink,activephysicalconnector,usable speed,atomiccapture or hardwarehealth"
+  },
+  "read_review": {
+    "evidence": "Pinned dce110_is_dig_enabled reads DIG_BE_EN_CNTL.DIG_ENABLE;dce110_get_dig_frontend reads DIG_BE_CNTL.DIG_FE_SOURCE_SELECT;dig_source_otg reads DIG_FE_CNTL.DIG_SOURCE_SELECT. DCE112 resources list sevenlink/sixstream instances.",
+    "inference": "These configuration/control reads follow upstream getter usage. This supports the narrow operational-device experiment;it is not an AMD transaction-timeout or powered-off/reset/hung-device safety guarantee.",
+    "conditions": "Exactselected1002:67DFrevEF/subsystem1458:2310,completeBAR5extent0x40000,D0/decode,1024x768stride1024BGRX firmware scanout,kernellease/noactivewriters,UPactivekernelCR3/RO-NX-UCpages/retainedassignmenthold,interrupts+timer+COM1 enabled. IndependentCOM7control already physically demonstrated.",
+    "operational_assumptions": "OperationalDCEdomain/inheritedunchangedscanout,nohotplug/power/reset. PCI D0alone does not prove a displaypower domain. First sixCRTCreads must show one coherent runningpipe before DIGreads.",
+    "exclusions": "No devicewrites,clock/powertransition,GPIO/AUX/I2C/HPDaccess,ROMBAR,commandtableexecution,PCI busmasterchange,DMA/IRQorIOMMUauthority;no nativechangedmode/linktraining/reset/recoveryqualification"
+  },
+  "lifetime": {
+    "pages": "Threeadditional supervisorRO/NX/UCleaves in reservedbindingwindow after fixedfourpipepages and optionalGMCslot. Frames/flags/identity checked beforeeachload;noirqoffsection spans load.",
+    "failure": "Partialprepare closesadmission;failed/unexpectedcleanupretainsledger/pins. Holds stopteardown duringCPUoperation. NohardwareDMAquiescence proof.",
+    "after": "Close/unmap anddropheldaccess/cap before freshRing3decode. Inheritedbusmasterassignment quarantined,ordinaryrelease/reuse unqualified.",
+    "cpu": "57privateRPCs maximum,once per freshprobe;BEGIN52orderedDATA/fourQUERY. Four-second CPUadmission plus existing separatestart/RPC/stopbounds;allfailedtransportoutputcleared."
+  },
+  "physical_status": "PASS physicalv35 exactZ390/F10/RX570DPprofile:52 ordered loads,pairedDIG/bracketCRTCequal,CRTC0-FE2-BE2,fourRing3words independently match,checkedclose/unmap/hold+capremoval/quarantine,duplicateattemptrefused/no reads,serial/readabledisplay/unassistedreboot. One observation only;no mode/link/reset/DMAisolation qualification. Evidence build/rx570-link-v35/hardware/validation.json"
+}

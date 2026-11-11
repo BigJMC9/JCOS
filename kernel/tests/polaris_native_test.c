@@ -1,4 +1,5 @@
 #include "polaris_native_test.h"
+#include "polaris_vtotal_runtime_test.h"
 #include "polaris_driver.h"
 #include "pmm.h"
 #include "physmap.h"
@@ -241,6 +242,7 @@ void polaris_native_test_run(void) {
     retained=polaris_driver_ping(&primary,adopted+2);
     report("ACTUAL RETAINED DRIVER REJECTS DUPLICATE CONFIG EXECUTE DRAW / HEARTBEAT SURVIVES",retained);if(!retained)goto fail;
     if (!stop_all()) goto fail;
+    if(!polaris_vtotal_runtime_test())goto fail;
     bool baseline=pages==pmm_stats().free_pages && processes==process_object_count() && spaces==address_space_object_count() &&
         objects==device_resource_object_count() && endpoints==endpoint_object_count();
     report("ALL PROCESSES/MAPPINGS/CAPS/PAGES RESTORED",baseline);if (!baseline) goto fail;

@@ -42,19 +42,22 @@ void polaris_rom_parse(const unsigned char *b,JcosU32 size,JcosU32 identity,Pola
  if(!count || count>POLARIS_ROM_CONNECTORS || !range(object_bytes,connector+4,count*8))REFUSE(POLARIS_ROM_CONNECTOR);
  PolarisRomInfo parsed;clear(&parsed);
  for(JcosU32 i=0;i<count;++i){
+  /* A record pointer may name the single-byte FF token at object end. */
   const unsigned char *p=b+object+connector+4+i*8;
   JcosU32 id=le16(p),links=le16(p+2),records=le16(p+4);
   if((id&0xF800U)!=0x3000U || !(id&0xFFU) || !(id&0x700U) || le16(p+6) ||
      (links && (links<header || !range(object_bytes,links,1))) ||
-     (records && (records<header || !range(object_bytes,records,2))))REFUSE(POLARIS_ROM_CONNECTOR);
+     (records && (records<header || !range(object_bytes,records,1))))REFUSE(POLARIS_ROM_CONNECTOR);
   for(JcosU32 j=0;j<i;++j)if((parsed.connectors[j]&0xFFFFU)==id)REFUSE(POLARIS_ROM_CONNECTOR);
-  /* Kind is only an inventory label: 1=DP,2=HDMI-A,0=other. Records are not followed. */
+  /* Kind is only an inventory label: 1=DP,2=HDMI-A,0=other. */
   JcosU64 kind=(id&0xFFU)==0x13U ? 1U : (id&0xFFU)==0xCU ? 2U : 0U;
   parsed.connectors[i]=(JcosU64)id|((JcosU64)links<<16)|((JcosU64)records<<32)|(kind<<48);
  }
  parsed.crc32=out->crc32;parsed.status=POLARIS_ROM_OK;parsed.image_bytes=image_bytes;
  parsed.rom_header=(unsigned short)rom;parsed.master_data=(unsigned short)master;parsed.object_header=(unsigned short)object;
  parsed.object_bytes=(unsigned short)object_bytes;parsed.format=1;parsed.revision=(unsigned char)rev;parsed.count=(unsigned char)count;
+ polaris_rom_routes_parse(b,image_bytes,&parsed);
+ polaris_rom_topology_parse(b,image_bytes,&parsed);
  /* Explicit volatile byte stores avoid an implicit freestanding memcpy import. */
  volatile unsigned char *destination=(volatile unsigned char *)out;
  const unsigned char *source=(const unsigned char *)&parsed;
@@ -67,5 +70,31 @@ JcosU64 polaris_rom_query(const PolarisRomInfo *o,JcosU32 i){
  if(i==1)return o->crc32;
  if(i==2)return (JcosU64)o->rom_header|((JcosU64)o->master_data<<16)|((JcosU64)o->object_header<<32)|((JcosU64)o->object_bytes<<48);
  if(i==3)return o->image_bytes;
- return i<POLARIS_ROM_QUERIES ? o->connectors[i-4] : 0;
+ if(i<POLARIS_ROM_DIRECTORY_QUERIES)return o->connectors[i-4];
+ if(i>=POLARIS_ROM_QUERIES)return 0;
+ if(i>=POLARIS_ROM_TOPOLOGY_BASE)return o->topology[(i-POLARIS_ROM_TOPOLOGY_BASE)/POLARIS_ROM_TOPOLOGY_WORDS][(i-POLARIS_ROM_TOPOLOGY_BASE)%POLARIS_ROM_TOPOLOGY_WORDS];
+ JcosU32 connector=(i-POLARIS_ROM_DIRECTORY_QUERIES)/POLARIS_ROM_ROUTE_WORDS;
+ JcosU32 field=(i-POLARIS_ROM_DIRECTORY_QUERIES)%POLARIS_ROM_ROUTE_WORDS;
+ const PolarisRomRoute *r=&o->routes[connector];
+ if(field==0)return (JcosU64)r->status|((JcosU64)r->source_count<<16)|((JcosU64)r->dest_count<<24)|
+     ((JcosU64)r->record_count<<32)|((JcosU64)r->other_count<<40)|((JcosU64)r->flags<<48);
+ JcosU64 word=0;
+ if(field>=1 && field<=4){
+  const unsigned short *ids=field<3 ? r->sources:r->destinations;
+  JcosU32 first=(field==2 || field==4) ? 4:0;
+  for(JcosU32 n=0;n<4;++n)word|=(JcosU64)ids[first+n]<<(n*16);
+ }else if(field==5)word=(JcosU64)r->i2c_id|((JcosU64)r->i2c_slave<<8)|((JcosU64)r->hpd_gpio<<16)|((JcosU64)r->hpd_state<<24);
+ else if(field==6 || field==7){for(JcosU32 n=0;n<4;++n)word|=(JcosU64)r->i2c_registers[(field-6)*4+n]<<(n*16);}
+ else if(field==8){for(JcosU32 n=0;n<8;++n)word|=(JcosU64)r->i2c_shifts[n]<<(n*8);}
+ else if(field==9)word=(JcosU64)r->hpd_register|((JcosU64)r->hpd_shift<<16)|((JcosU64)r->hpd_gpio<<24);
+ else if(field==10)word=r->record_types;
+ else if(field==11)word=r->table_info;
+ return word;
+}
+
+int polaris_rom_read_bytes(const unsigned char *b,JcosU32 size,JcosU64 offset,JcosU32 count,JcosU64 *value){
+ if(!value)return 0;*value=0;
+ if(!b || size>POLARIS_ROM_LIMIT || !count || count>8 || offset>=size || count>size-offset)return 0;
+ JcosU64 word=0;for(JcosU32 i=0;i<count;++i)word|=(JcosU64)b[offset+i]<<(i*8);
+ *value=word;return 1;
 }

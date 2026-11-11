@@ -5,6 +5,7 @@
 #endif
 #if JCOS_POLARIS_NATIVE_WRITE
 #include "polaris_driver.h"
+#include "polaris_link.h"
 #include "graphics_supervisor.h"
 #include "graphical_session.h"
 #define PRESENTER_DRAIN_SECONDS 8ULL
@@ -38,6 +39,11 @@ static struct {
     u64 recovery_started,recovery_output_id;
     bool reconnect_attempted,restart_attempted;
     PolarisDriver *writer;
+    bool vtotal,vtotal_ready;
+    u32 vtotal_fault_prefix;
+    /* Kernel-retained originals: never mapped into either driver. */
+    u32 vtotal_snapshot[POLARIS_VERTICAL_VALUES];
+    u64 vtotal_report[POLARIS_VERTICAL_WORDS];
 } g;
 static void recover_native(bool induce);
 static void resume_recovery(void);
@@ -152,6 +158,54 @@ static bool execute(PolarisDriver *driver,PolarisProgramPlan *p) {
     terminal_write(" FRAME DELTA=");terminal_write_u64(r.frame_delta);terminal_putchar('\n');
     return ok;
 }
+static bool vtotal_read(void *unused,u32 field,u32 *out){
+ (void)unused;if(!admitted(0))return false;
+ terminal_write("VTOTAL READ FIELD=");terminal_write_u64(field);terminal_putchar('\n');
+ bool ok=admitted(0) && polaris_mmio_vtotal_read(&g.hold,g.hold_id,field,out);
+ if(ok){terminal_write(" VALUE=");terminal_write_hex(*out);terminal_putchar('\n');}return ok;
+}
+static bool vtotal_write(void *unused,u32 field,u32 value){
+ (void)unused;if(!admitted(0))return false;
+ terminal_write("GPU VTOTAL WRITE FIELD=");terminal_write_u64(field);terminal_write(" VALUE=");terminal_write_hex(value);terminal_putchar('\n');
+ return admitted(0) && polaris_mmio_vtotal_write(&g.hold,g.hold_id,field,value);
+}
+static bool execute_vtotal(PolarisDriver *driver,u32 fault){
+ PolarisVtotalIo io;io.context=0;io.admitted=admitted;io.read=vtotal_read;io.write=vtotal_write;io.wait=wait_tick;PolarisVtotalResult r;
+ g.start=timer_ticks();g.frequency=timer_frequency();
+ bool ok=polaris_driver_vtotal(driver,&io,fault,&r);
+ terminal_write("VTOTAL OWNER PID=");terminal_write_u64(driver->process_id);terminal_write(" INC=");terminal_write_u64(driver->connection.incarnation);
+ terminal_write(" ROLE=");terminal_write_u64(driver->role);terminal_putchar('\n');
+ terminal_write("VTOTAL RESULT: WRITES ATTEMPTED=");terminal_write_u64(r.write_attempts);
+ terminal_write(" READ ATTEMPTS=");terminal_write_u64(r.read_attempts);terminal_write(" READS=");terminal_write_u64(r.reads);
+ terminal_write(" POLLS=");terminal_write_u64(r.polls);terminal_write(" FRAME DELTA=");terminal_write_u64(r.frame_delta);
+ terminal_writeln(ok?" COMPLETE=YES":" COMPLETE=NO; NO REPLAY");
+ return ok;
+}
+static bool observe_vtotal(void){
+ u32 *v=g.vtotal_snapshot;g.frequency=timer_frequency();g.start=timer_ticks();
+ for(u32 i=0;i<86;++i){
+  if(!admitted(0))return false;
+  if(i==6){u32 n=0;for(u32 p=0;p<6;++p){u32 e=v[p]&0x10001U;if(e && (e!=0x10001U || (v[p]&0x1000000U)))return false;if(e)++n;}if(n!=1)return false;}
+  if(i==26 && !jcos_polaris_timing_read_admitted(v,26))return false;
+  if(i==80 && !jcos_polaris_vertical_read_admitted(v,80))return false;
+  terminal_write("VTOTAL PREFLIGHT READ #");terminal_write_u64(i+1);terminal_write(" INDEX=");terminal_write_u64(i);terminal_putchar('\n');
+  if(!admitted(0))return false;bool ok;
+  if(i>=80)ok=polaris_mmio_read_vertical_held(&g.hold,g.hold_id,process_kernel(),(i-80)%3,&v[i]);
+  else if(i<6 || i>=74)ok=polaris_mmio_read_held(&g.hold,g.hold_id,process_kernel(),i<6?i:i-74,POLARIS_REG_CRTC_CONTROL,&v[i]);
+  else if((i>=26 && i<40) || (i>=60 && i<74))ok=polaris_mmio_read_timing_held(&g.hold,g.hold_id,process_kernel(),i<40?i-26:i-60,&v[i]);
+  else {u32 n=i<26?i-6:i-40;ok=polaris_mmio_read_link_held(&g.hold,g.hold_id,process_kernel(),n<14?n/2:n-14,n<14?(PolarisLinkRegister)(n%2):POLARIS_LINK_FRONTEND,&v[i]);}
+  if(!ok || v[i]==~0U)return false;
+  terminal_write(" VALUE=");terminal_write_hex(v[i]);terminal_putchar('\n');
+  if((i==26 || i==60) && !(v[i]&1U))return false;
+ }
+ if(!admitted(0) || !jcos_polaris_vtotal_snapshot_admitted(v,86) || !polaris_vertical_decode_copy(v,g.vtotal_report))return false;
+ const u64 *r=g.vtotal_report;
+ if(r[0]!=0x10000ULL || r[10] || r[11]!=0x46C00000000ULL || r[12]!=0x46C00000000ULL ||
+  r[13]!=0x46C00000001ULL || r[14]!=0x1100000002ULL || r[15]!=2 || r[16] || r[17]!=1)return false;
+ g.vtotal_ready=true;
+ terminal_writeln("VTOTAL ZERO BASELINE AND RING3 PLAN RETAINED IN KERNEL BEFORE ANY GPU WRITE.");
+ terminal_writeln("RO HOLD RETAINED FOR NATIVE OPERATION; DRIVER HAS NO MMIO MAPPING.");return true;
+}
 static bool initial_read(u32 pipe,u32 selector,u32 *v) {
     if (!admitted(0)) return false;
     terminal_write("NATIVE PREFLIGHT PIPE=");terminal_write_u64(pipe);
@@ -200,9 +254,10 @@ static bool show(PolarisDriver *d,bool rescue) {
     g.last_heartbeat=timer_ticks();
     return true;
 }
-void polaris_native_begin(const BootInfo *boot) {
+static void begin_native(const BootInfo *boot,bool vertical,u32 fault_prefix) {
     terminal_writeln("POLARIS NATIVE REBIND V1 / EXPLICIT SUPERVISED EXPERIMENT");
     if (g.attempted) {terminal_writeln("REFUSED: ONE NATIVE ATTEMPT PER BOOT; NO ASSIGNMENT REUSE.");return;}
+    if(fault_prefix>3 || (!vertical && fault_prefix))return;
     PolarisReadReport report;
     const u32 local=POLARIS_READ_BLOCK_TARGET|POLARIS_READ_BLOCK_BAR_PLAN|POLARIS_READ_BLOCK_POWER|
         POLARIS_READ_BLOCK_CPU|POLARIS_READ_BLOCK_UART|POLARIS_READ_BLOCK_SCANOUT;
@@ -220,7 +275,8 @@ void polaris_native_begin(const BootInfo *boot) {
         selected=pci_device(i);
     }
     if (!selected) return;
-    g.attempted=true;g.boot=boot;g.original_render=terminal_render_enabled();
+    g.attempted=true;g.boot=boot;g.original_render=terminal_render_enabled();g.vtotal=vertical;g.vtotal_fault_prefix=fault_prefix;
+    if(g.vtotal){terminal_write("POLARIS VERTICAL TIMING V1; PRIMARY FAULT PREFIX=");terminal_write_u64(fault_prefix);terminal_writeln("; FIXED ZERO RESTORATION BASELINE.");}
     terminal_writeln("PROFILE: OPERATIONAL GPU / UNCHANGED INHERITED DP TIMING; NO HOTPLUG/POWER/RESET.");
     terminal_writeln("RECOVERY SCOPE: SOFTWARE OWNER FAILURE; NO NEW IRQ/DMA; NO GPU-HANG GUARANTEE.");
     DisplayProbeInfo inventory;
@@ -235,22 +291,39 @@ void polaris_native_begin(const BootInfo *boot) {
         !polaris_mmio_prepare_supervised(&g.binding,boot,&g.assignment,g.cap) ||
         !polaris_mmio_prepare_location(&g.binding,boot,process_kernel(),polaris_mmio_binding_identity(&g.binding)) ||
         !polaris_mmio_hold_acquire(&g.hold,&g.binding,polaris_mmio_binding_identity(&g.binding),process_kernel(),&g.hold_id)) goto fail;
+    if(g.vtotal){
+        /* Optional location slot4 plus DIG slots5..7: same registered binding. */
+        if(!polaris_mmio_hold_release(&g.hold,g.hold_id))goto fail;g.hold_id=0;
+        if(!polaris_mmio_prepare_links(&g.binding,boot,process_kernel(),polaris_mmio_binding_identity(&g.binding)) ||
+         !polaris_mmio_hold_acquire(&g.hold,&g.binding,polaris_mmio_binding_identity(&g.binding),process_kernel(),&g.hold_id) || !observe_vtotal())goto fail;
+    }
     terminal_set_render_enabled(false);
     PolarisPlaneWitness witness;PolarisProgramPlan plan;
     if (!observe(&witness) || !polaris_driver_plan(&g.primary,1,&witness,&plan)) goto fail;
     if (!managed_service_idle(&g.rescue.service) || !display_retire_firmware_scanout()) goto fail;
-    g.mutated=true;terminal_writeln("GOP PERMANENTLY RETIRED BEFORE RW MMIO; TWO FIXED ADDRESS WRITES ONLY.");
+    g.mutated=true;terminal_writeln(g.vtotal ?
+        "GOP PERMANENTLY RETIRED BEFORE RW MMIO; TWO ADDRESS AND THREE VERTICAL WRITES MAXIMUM." :
+        "GOP PERMANENTLY RETIRED BEFORE RW MMIO; TWO FIXED ADDRESS WRITES ONLY.");
     if (!polaris_mmio_enable_rebind(&g.hold,g.hold_id) || !execute(&g.primary,&plan)) goto fail;
     g.stage=1;
     u64 action;
     if (!graphics_supervisor_request(&g.policy,GRAPHICS_POLICY_PRIMARY,0,&action) ||
         action!=GRAPHICS_POLICY_KEEP) goto fail;
+    if(g.vtotal){
+        if(!g.vtotal_ready || !polaris_mmio_enable_vtotal(&g.hold,g.hold_id,g.vtotal_snapshot))goto fail;
+        if(!execute_vtotal(&g.primary,g.vtotal_fault_prefix)){
+            terminal_writeln("PRIMARY VERTICAL OPERATION INCOMPLETE; REQUESTING FRESH RESCUE FROM RETAINED ZERO BASELINE.");request_rescue(false);return;
+        }
+        terminal_writeln("VERTICAL OVERRIDE REGISTER READBACK AND TWO-FRAME PROGRESS VERIFIED; EFFECTIVE RATE UNMEASURED.");
+    }
     if (!show(&g.primary,false)) {request_rescue(false);return;}
     terminal_writeln("PRIMARY RING3 PATTERN ACTIVE; VERIFY MONITOR. USE polaris-rescue OVER SERIAL.");
     return;
 fail:
     failed();
 }
+void polaris_native_begin(const BootInfo *boot){begin_native(boot,false,0);}
+void polaris_native_begin_vtotal(const BootInfo *boot,u32 prefix){begin_native(boot,true,prefix);}
 static bool presenter_released(void) {
     return graphical_session_drained() && display_direct_state()==DISPLAY_LEASE_KERNEL &&
         framebuffer_writers_idle();
@@ -269,6 +342,10 @@ static void resume_recovery(void) {
     g.recovery_pending=false;
     if (!polaris_mmio_arm_recovery(&g.hold,g.hold_id)) {failed();return;}
     terminal_writeln("OLD PRIMARY STOPPED/REAPED; MMIO PARENT STILL QUARANTINED; RESERVED RESCUE ENTERING.");
+    if(g.vtotal){
+        if(!g.vtotal_ready || !execute_vtotal(&g.rescue,0)){failed();return;}
+        terminal_writeln("FRESH RING3 RESCUE RESTORED ZERO VERTICAL OVERRIDE; ORIGINAL BASE TOTAL RETAINED.");
+    }
     PolarisPlaneWitness witness;PolarisProgramPlan plan;
     if (!observe(&witness) || !polaris_driver_plan(&g.rescue,2,&witness,&plan) ||
         !execute(&g.rescue,&plan) || !show(&g.rescue,true)) {failed();return;}
@@ -508,6 +585,7 @@ void polaris_native_status(void) {
     terminal_write(" HEARTBEATS=");terminal_write_u64(g.heartbeats);
     terminal_write(" DIAGNOSTIC MASK=");terminal_write_hex(g.diagnostic_mask);terminal_putchar('\n');
     terminal_writeln("ONCE-PER-BOOT GPU BUDGET; STATUS PERFORMS NO GPU IO.");
+    terminal_write("VERTICAL MODE=");terminal_write(g.vtotal?"YES":"NO");terminal_write(" RETAINED ZERO BASELINE=");terminal_writeln(g.vtotal_ready?"YES":"NO");
     terminal_write("PRIMARY CPU RESTART ATTEMPTED=");terminal_writeln(g.restart_attempted ? "YES" : "NO");
     terminal_write("SUPERVISED GUI: BACKEND RO=");terminal_write(g.presenter_parked ? "YES" : "NO");
     terminal_write(" RESCUE WAIT=");terminal_writeln(g.recovery_pending ? "YES" : "NO");
@@ -552,6 +630,7 @@ bool polaris_native_power_prepare(void) {return true;}
 void polaris_native_poll(void) {}
 void polaris_native_diagnostic(u32 role,bool spin) {(void)role;(void)spin;terminal_writeln("POLARIS NATIVE WRITES DISABLED IN THIS BUILD.");}
 void polaris_native_status(void) {terminal_writeln("POLARIS NATIVE WRITES DISABLED IN THIS BUILD.");}
+void polaris_native_begin_vtotal(const BootInfo *boot,u32 prefix){(void)boot;(void)prefix;terminal_writeln("POLARIS NATIVE WRITES DISABLED IN THIS BUILD.");}
 void polaris_native_begin(const BootInfo *boot) {(void)boot;terminal_writeln("POLARIS NATIVE WRITES DISABLED IN THIS BUILD.");}
 void polaris_native_rescue(void) {terminal_writeln("POLARIS NATIVE WRITES DISABLED IN THIS BUILD.");}
 void polaris_native_finish(void) {terminal_writeln("POLARIS NATIVE WRITES DISABLED IN THIS BUILD.");}

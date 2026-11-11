@@ -10,7 +10,7 @@
 #include "userspace_shell.h"
 #include "graphical_session.h"
 static SerialWorker worker;
-enum {BEGIN=1,RESCUE,DIAGNOSTIC,POLICY,STATUS,FINISH,POWER,ARM,PRESENT,COLLECT,RECONNECT,LAUNCH,RESTART};
+enum {BEGIN=1,RESCUE,DIAGNOSTIC,POLICY,STATUS,FINISH,POWER,ARM,PRESENT,COLLECT,RECONNECT,LAUNCH,RESTART,VTOTAL,VTOTAL_FAULT1,VTOTAL_FAULT2,VTOTAL_FAULT3};
 static u32 pending_role;
 static bool pending_spin;
 static u64 pending_since;
@@ -34,6 +34,8 @@ static u32 dispatch(void *unused,u32 op,u64 arg) {
         }
         return SERIAL_WORKER_OK;
     case SERIAL_WORKER_ABORT:pending_role=0;polaris_native_abort();return SERIAL_WORKER_STOP;
+    case VTOTAL:case VTOTAL_FAULT1:case VTOTAL_FAULT2:case VTOTAL_FAULT3:
+        polaris_native_begin_vtotal((const BootInfo*)arg,op-VTOTAL);break;
     case BEGIN:polaris_native_begin((const BootInfo*)arg);break;
     case RESCUE:polaris_native_rescue();break;
     case DIAGNOSTIC:polaris_native_diagnostic((u32)(arg>>1),(arg&1)!=0);break;
@@ -97,6 +99,12 @@ void polaris_watch_begin(const BootInfo *boot) {
     }
     (void)call(BEGIN,(u64)boot);
 }
+void polaris_watch_begin_vtotal(const BootInfo *boot,u32 prefix){
+    if(!boot || prefix>3)return;
+    if(!inactive()){terminal_writeln("REFUSED: GRAPHICS WORKER ALREADY OWNS NATIVE STATE.");return;}
+    if(!serial_worker_start(&worker,dispatch,0,timer_frequency())){terminal_writeln("REFUSED: GRAPHICS WORKER RESERVATION INCOMPLETE; NO GPU ACCESS.");return;}
+    (void)call(VTOTAL+prefix,(u64)boot);
+}
 bool polaris_watch_launch(const BootInfo *boot) {
     if (!boot || !inactive())return false;
     if (!serial_worker_start(&worker,dispatch,0,timer_frequency()))return false;
@@ -137,6 +145,7 @@ bool polaris_watch_power_prepare(void) {
     return call(POWER,0) && !serial_worker_present(&worker);
 }
 #else
+void polaris_watch_begin_vtotal(const BootInfo *b,u32 p){(void)b;(void)p;terminal_writeln("POLARIS NATIVE WRITES DISABLED IN THIS BUILD.");}
 bool polaris_watch_restart(void){return false;}
 bool polaris_watch_launch(const BootInfo *boot){(void)boot;return false;}
 bool polaris_watch_reconnect(u64 old_output){(void)old_output;return false;}

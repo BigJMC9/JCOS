@@ -113,7 +113,7 @@ bool polaris_mmio_binding_valid(const PolarisMmioBinding *b) {
 bool polaris_mmio_binding_prepared(const PolarisMmioBinding *b) {
     u64 flags = irq_save();
     bool ready = retained_identity(b) && b->prepared && !b->closing && !b->poisoned &&
-        b->mapped_pages == b->plan.page_count && b->child_pinned && b->access_pinned &&
+        b->mapped_pages == b->plan.page_count && b->link_mapped_pages<=POLARIS_LINK_PAGES && b->child_pinned && b->access_pinned &&
         pci_assignment_state(b->assignment) == PCI_ASSIGNMENT_ASSIGNED &&
         owner_live(b->owner) && b->owner->id == b->owner_id;
     irq_restore(flags);
@@ -250,10 +250,52 @@ bool polaris_mmio_read_location_held(PolarisMmioHold *hold, u64 expected_hold_id
     if (offset + 4ULL > b->plan.bar.size) return false;
     return read_leaf(b, offset & ~0xFFFU, b->plan.page_count, offset, out);
 }
+static const u32 link_pages[POLARIS_LINK_PAGES]={0x12000U,0x13000U,0x15000U};
+bool polaris_mmio_read_link_held(PolarisMmioHold *hold,u64 identity,Process *owner,
+    u32 unit,PolarisLinkRegister field,u32 *out){
+    if(!out)return false;*out=0;
+    PolarisMmioBinding *b=held_binding(hold,identity,owner);u32 offset=0;
+    if(!b || b->rebind_enabled || b->link_mapped_pages!=POLARIS_LINK_PAGES ||
+        !jcos_polaris_link_offset(unit,field,b->plan.bar.size,&offset))return false;
+    u32 page=offset&~0xFFFU,i=0;while(i<POLARIS_LINK_PAGES && link_pages[i]!=page)++i;
+    return i<POLARIS_LINK_PAGES && read_leaf(b,page,b->plan.page_count+1+i,offset,out);
+}
+
+bool polaris_mmio_read_timing_held(PolarisMmioHold *hold,u64 identity,Process *owner,u32 field,u32 *out){
+    if(!out)return false;*out=0;
+    PolarisMmioBinding *b=held_binding(hold,identity,owner);u32 offset=0;
+    if(!b || b->rebind_enabled || b->link_mapped_pages!=POLARIS_LINK_PAGES ||
+        !jcos_polaris_timing_offset(field,b->plan.bar.size,&offset))return false;
+    u32 page=offset&~0xFFFU,slot=0;
+    while(slot<b->plan.page_count && b->plan.page_offsets[slot]!=page)++slot;
+    if(slot<b->plan.page_count)return read_leaf(b,page,slot,offset,out);
+    for(u32 i=0;i<POLARIS_LINK_PAGES;++i)if(link_pages[i]==page)return read_leaf(b,page,b->plan.page_count+1+i,offset,out);
+    return false;
+}
+
+bool polaris_mmio_read_vertical_held(PolarisMmioHold *hold,u64 identity,Process *owner,u32 field,u32 *out){
+    if(!out)return false;*out=0;
+    PolarisMmioBinding *b=held_binding(hold,identity,owner);u32 offset=0;
+    if(!b || b->rebind_enabled || b->link_mapped_pages!=POLARIS_LINK_PAGES ||
+        !jcos_polaris_vertical_offset(field,b->plan.bar.size,&offset))return false;
+    u32 page=offset&~0xFFFU,slot=0;
+    while(slot<b->plan.page_count && b->plan.page_offsets[slot]!=page)++slot;
+    return slot<b->plan.page_count && read_leaf(b,page,slot,offset,out);
+}
+
 static bool cleanup_locked(PolarisMmioBinding *b) {
     if (!polaris_mmio_close(b) || !retained_identity(b) || b->poisoned || b->active_holds)
         return false;
-    if ((b->mapped_pages || b->location_mapped) && !kernel_context(b->map, b->root_frame)) return false;
+    if (b->link_mapped_pages>POLARIS_LINK_PAGES ||
+        ((b->mapped_pages || b->location_mapped || b->link_mapped_pages) && !kernel_context(b->map, b->root_frame))) return false;
+    while(b->link_mapped_pages){
+        u32 i=b->link_mapped_pages-1;u64 address=b->virtual_base+(u64)(b->plan.page_count+1+i)*VM_PAGE_SIZE;
+        frame_t expected=phys_to_frame(b->plan.bar.base+link_pages[i]),actual=FRAME_INVALID,old=FRAME_INVALID;vm_flags_t permissions=0;
+        if(!vmm_query_page(b->map,address,&actual,&permissions) || actual!=expected || permissions!=VM_DEVICE ||
+            !vmm_unmap_page(b->map,address,&old))return false;
+        --b->link_mapped_pages;
+        if(old!=expected){b->poisoned=true;return false;}
+    }
     if (b->location_mapped) {
         u64 address = b->virtual_base + (u64)b->plan.page_count * VM_PAGE_SIZE;
         frame_t expected = phys_to_frame(b->plan.bar.base + 0x2000ULL);
@@ -429,6 +471,26 @@ done:
 }
 
 
+bool polaris_mmio_prepare_links(PolarisMmioBinding *b,const BootInfo *boot,Process *owner,u64 identity){
+    if(!boot || !identity)return false;
+    u64 saved=irq_save();bool ok=false,staging=false;
+    if(!polaris_mmio_binding_prepared(b) || b->identity!=identity || b->owner!=owner || b->active_holds || b->link_mapped_pages ||
+        b->rebind_enabled || pci_assignment_dma_gate_active(b->assignment) || !kernel_context(b->map,b->root_frame) || !vmm_device_memory_supported())goto done;
+    PolarisMmioPlan before,after;
+    if(!current_plan(boot,b->assignment,b->owner_id,&before) || !same_bytes(&before,&b->plan,sizeof(before)))goto done;
+    staging=true;
+    for(u32 i=0;i<POLARIS_LINK_PAGES;++i){
+        u64 physical=b->plan.bar.base+link_pages[i],direct=0,address=b->virtual_base+(u64)(b->plan.page_count+1+i)*VM_PAGE_SIZE;
+        if(link_pages[i]+VM_PAGE_SIZE>b->plan.bar.size || !page_not_ram(boot,physical) || !physmap_virtual_address(physical,&direct) ||
+            vmm_query_page(b->map,physical,0,0) || vmm_query_page(b->map,direct,0,0) || vmm_query_page(b->map,address,0,0) ||
+            !vmm_map_page(b->map,address,phys_to_frame(physical),VM_DEVICE))goto done;
+        ++b->link_mapped_pages; /* Ledger published before another map or post-check. */
+    }
+    if(!current_plan(boot,b->assignment,b->owner_id,&after) || !same_bytes(&after,&b->plan,sizeof(after))){(void)polaris_mmio_close(b);goto done;}
+    ok=true;
+done:if(staging && !ok)(void)polaris_mmio_close(b);irq_restore(saved);return ok;
+}
+
 bool polaris_mmio_prepare(PolarisMmioBinding *b,const BootInfo *boot,PciAssignment *a,Process *o,CapabilityHandle cap) {
     return prepare(b,boot,a,o,cap,false);
 }
@@ -463,11 +525,12 @@ bool polaris_mmio_arm_recovery(PolarisMmioHold *h,u64 id) {
     if (!b || !b->rebind_enabled || b->recovery_armed ||
         display_direct_state()!=DISPLAY_LEASE_KERNEL ||
         pci_assignment_state(b->assignment)!=PCI_ASSIGNMENT_QUARANTINED) return false;
-    b->recovery_armed=true; b->rebind_next=0; return true;
+    b->recovery_armed=true; b->rebind_next=0;b->vtotal_next=0; return true;
 }
 bool polaris_mmio_rebind_write(PolarisMmioHold *h,u64 id,PolarisDisplayRegister f,u32 value) {
     PolarisMmioBinding *b=rebind_binding(h,id);
     if (!b || !b->rebind_enabled || b->rebind_next>=2 ||
+        (b->vtotal_enabled && b->recovery_armed && b->vtotal_next!=3) ||
         display_direct_state()!=DISPLAY_LEASE_KERNEL ||
         f!=(b->rebind_next ? POLARIS_REG_PRIMARY_LOW : POLARIS_REG_PRIMARY_HIGH) ||
         value!=(b->rebind_next ? 0U : 0xF4U) ||
@@ -495,4 +558,35 @@ bool polaris_mmio_rebind_read(PolarisMmioHold *h,u64 id,u32 selector,u32 *out) {
     u32 page=offset&~0xFFFU,slot=0;
     while (slot<b->plan.page_count && b->plan.page_offsets[slot]!=page) ++slot;
     return slot<b->plan.page_count && read_leaf(b,page,slot,offset,out);
+}
+
+bool polaris_mmio_enable_vtotal(PolarisMmioHold *h,u64 id,const u32 snapshot[POLARIS_VERTICAL_VALUES]){
+ PolarisMmioBinding *b=rebind_binding(h,id);
+ if(!b || !b->rebind_enabled || b->vtotal_enabled || b->recovery_armed || b->rebind_next!=2 ||
+  pci_assignment_state(b->assignment)!=PCI_ASSIGNMENT_ASSIGNED ||
+  !jcos_polaris_vtotal_snapshot_admitted(snapshot,POLARIS_VERTICAL_VALUES))return false;
+ b->vtotal_enabled=true;b->vtotal_next=0;return true;
+}
+bool polaris_mmio_vtotal_read(PolarisMmioHold *h,u64 id,u32 field,u32 *out){
+ if(!out)return false;*out=0;PolarisMmioBinding *b=rebind_binding(h,id);u32 offset=0;
+ if(!b || !b->rebind_enabled || !b->vtotal_enabled || field>=6)return false;
+ if(field==3)return polaris_mmio_rebind_read(h,id,POLARIS_REG_CRTC_CONTROL,out);
+ if(field==5)return polaris_mmio_rebind_read(h,id,15+POLARIS_WITNESS_FRAME_COUNT,out);
+ if(field<3){if(!jcos_polaris_vertical_offset(field,b->plan.bar.size,&offset))return false;}
+ else if(!jcos_polaris_timing_offset(5,b->plan.bar.size,&offset))return false;
+ return read_leaf(b,0x6000U,0,offset,out);
+}
+bool polaris_mmio_vtotal_write(PolarisMmioHold *h,u64 id,u32 field,u32 value){
+ PolarisMmioBinding *b=rebind_binding(h,id);
+ if(!b || !b->rebind_enabled || !b->vtotal_enabled || b->vtotal_next>=3 ||
+  display_direct_state()!=DISPLAY_LEASE_KERNEL ||
+  (b->recovery_armed!=(pci_assignment_state(b->assignment)==PCI_ASSIGNMENT_QUARANTINED)) ||
+  b->rebind_next!=(b->recovery_armed?0U:2U))return false;
+ u32 expected=b->recovery_armed?(b->vtotal_next+2)%3:b->vtotal_next;
+ u32 allowed=b->recovery_armed?0:(b->vtotal_next<2?1132:0x11),offset=0;
+ frame_t frame;vm_flags_t flags;
+ if(field!=expected || value!=allowed || !jcos_polaris_vertical_offset(field,b->plan.bar.size,&offset) ||
+  !vmm_query_page(b->map,b->virtual_base,&frame,&flags) || frame!=phys_to_frame(b->plan.bar.base+0x6000ULL) || flags!=(VM_DEVICE|VM_WRITE))return false;
+ ++b->vtotal_next; /* Consume before store; quarantine/retention on ambiguity. */
+ device_mmio_store32(b->virtual_base+(offset&0xFFFU),value);return true;
 }

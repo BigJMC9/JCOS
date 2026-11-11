@@ -10,7 +10,7 @@ static SerialWorkerDispatch callback;
 static void *context;
 static unsigned phase,begins,polls,immediate,background,bg_policy,presents,gui_witness,reconnects;
 static u64 ticks;
-static unsigned launches,starts,restarts;
+static unsigned launches,starts,restarts,vtotal_begins,last_prefix;
 static bool restart_accept;
 static bool launch_accept=true,reserve_refused,transport_refused;
 static bool shell,spin_seen,power_refused,gui,terminal_pending;
@@ -33,6 +33,7 @@ bool serial_worker_call(SerialWorker *w,u32 op,u64 arg,bool *ok){
  CHECK(w==live&&w->active);if(transport_refused){*ok=false;return false;}u32 r=callback(context,op,arg);*ok=(r&1)!=0;if(r&2)memset(w,0,sizeof(*w));return true;
 }
 void polaris_native_begin(const BootInfo *b){(void)b;++begins;phase=1;}
+void polaris_native_begin_vtotal(const BootInfo *b,u32 prefix){CHECK(b&&prefix<=3);++vtotal_begins;last_prefix=prefix;phase=1;}
 bool polaris_native_launch(const BootInfo *b){CHECK(b);++launches;phase=launch_accept?1:0;return launch_accept;}
 bool polaris_native_restart(void){++restarts;return restart_accept;}
 void polaris_native_rescue(void){phase=2;}
@@ -88,6 +89,9 @@ int main(void){
  CHECK(polaris_watch_power_prepare()&&!live->active);
  transport_refused=true;CHECK(!polaris_watch_launch(&boot)&&launches==2&&live->active);transport_refused=false;
  CHECK(polaris_watch_power_prepare()&&!live->active);
+ for(u32 prefix=0;prefix<=3;++prefix){phase=0;polaris_watch_begin_vtotal(&boot,prefix);CHECK(live->active&&vtotal_begins==prefix+1&&last_prefix==prefix);polaris_watch_begin_vtotal(&boot,0);CHECK(vtotal_begins==prefix+1);CHECK(polaris_watch_power_prepare()&&!live->active);}
+ prior_starts=starts;polaris_watch_begin_vtotal(0,0);polaris_watch_begin_vtotal(&boot,4);CHECK(starts==prior_starts&&vtotal_begins==4);
+ puts("PASS: vertical-mode worker normal/three fault prefixes,active/null/invalid guards and CPU-only stop;serialized callbacks.");
  puts("PASS: retained restart worker,inactive/refused/accepted/armed guards,no replay or GPU operation;core doubles.");
  puts("PASS: normal native launch adapter,null/active/reservation/refusal/success/ambiguous-transport paths;one serialized callback,no replay,retained transport failure;no hardware.");
  puts("PASS: production watch adapter serialized ownership,delayed minimum/shell/role guards,cancel/no replay,no background console-probe path,active-begin refusal and stop/power cleanup,read-only collection preserves active/pending backend and reaps terminal worker without core polling;core/IPC doubles,no hardware.");

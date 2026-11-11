@@ -8,6 +8,7 @@
 #include "display_probe.h"
 #include "polaris_read_profile.h"
 #include "polaris_live_capture.h"
+#include "polaris_link.h"
 #include "polaris_watch.h"
 #include "polaris_rom.h"
 #include "pmm.h"
@@ -5699,6 +5700,16 @@ static void command_polaris_test(const char *args) {
     else if (k_streq(args,"policy spin-later")) polaris_watch_arm(3,true);
     else terminal_writeln("USAGE: polaris-test primary|rescue|policy fault|spin|spin-later|fault-later");
 }
+static void command_polaris_vtotal(const char *args){
+    if(!args || !*args)polaris_watch_begin_vtotal(g_boot,0);
+    else if(k_streq(args,"fault1"))polaris_watch_begin_vtotal(g_boot,1);
+    else if(k_streq(args,"fault2"))polaris_watch_begin_vtotal(g_boot,2);
+    else if(k_streq(args,"fault3"))polaris_watch_begin_vtotal(g_boot,3);
+    else terminal_writeln("USAGE: polaris-vtotal [fault1|fault2|fault3]");
+}
+static void command_polaris_vertical(void) { polaris_vertical_capture_run(g_boot); }
+static void command_polaris_timing(void) { polaris_timing_capture_run(g_boot); }
+static void command_polaris_link(void) { polaris_link_capture_run(g_boot); }
 static void command_polaris_capture(void) { polaris_live_capture_run(g_boot); }
 
 static void command_display_readiness(void) {
@@ -5706,6 +5717,16 @@ static void command_display_readiness(void) {
 }
 
 static void command_display_rom(void) {polaris_rom_print(g_boot);}
+static void command_display_rom_bytes(const char *arguments) {
+    char offset_text[32],count_text[32];const char *cursor=arguments;u64 offset=0,count=0;
+    if (!next_argument(&cursor,offset_text,sizeof(offset_text)) || !next_argument(&cursor,count_text,sizeof(count_text)) ||
+        !parse_u64(offset_text,&offset) || !parse_u64(count_text,&count) || !count || count>POLARIS_ROM_BYTE_WINDOW) {
+        terminal_writeln("USAGE: displayrom-bytes OFFSET COUNT (DECIMAL; COUNT 1..256)");return;
+    }
+    while (*cursor && k_ascii_space(*cursor))++cursor;
+    if (*cursor) {terminal_writeln("USAGE: displayrom-bytes OFFSET COUNT (DECIMAL; COUNT 1..256)");return;}
+    polaris_rom_print_bytes(g_boot,offset,(u32)count);
+}
 
 static void command_display_probe(void) {
     display_probe_print(g_boot);
@@ -6648,12 +6669,21 @@ static void shell_registry_init(void) {
     shell_add_command("polaris-finish","polaris-finish","reclaim validated native diagnostic console",SHELL_GROUP_HARDWARE,command_polaris_finish,0,true);
     shell_add_command("polaris-test","polaris-test primary|rescue|policy fault|spin|spin-later|fault-later","explicit driver fault/spin; watchdog observes outcome",SHELL_GROUP_HARDWARE,0,command_polaris_test,true);
     shell_add_command("polaris-status","polaris-status","CPU-only graphics liveness and stage counters",SHELL_GROUP_HARDWARE,command_polaris_status,0,true);
+    shell_add_command("polaris-vtotal","polaris-vtotal [fault1|fault2|fault3]","explicit fixed vertical-total writes and fresh rescue restoration",SHELL_GROUP_HARDWARE,0,command_polaris_vtotal,true);
+    shell_add_command("polaris-vertical", "polaris-vertical", "read-only vertical-total preflight and Ring3 restoration plan",
+        SHELL_GROUP_HARDWARE, command_polaris_vertical, 0, true);
+    shell_add_command("polaris-timing", "polaris-timing", "explicit inherited CRTC0/FE2 timing capture; shared one-attempt budget",
+        SHELL_GROUP_HARDWARE, command_polaris_timing, 0, true);
+    shell_add_command("polaris-link", "polaris-link", "explicit read-only inherited DIG/CRTC capture; one attempt per boot",
+        SHELL_GROUP_HARDWARE, command_polaris_link, 0, true);
     shell_add_command("polaris-capture", "polaris-capture", "explicit RX 570 read experiment; separate build profile",
         SHELL_GROUP_HARDWARE, command_polaris_capture, 0, true);
     shell_add_command("display-readiness", "display-readiness", "RX 570 read qualification blockers; no GPU access",
         SHELL_GROUP_HARDWARE, command_display_readiness, 0, true);
     shell_add_command("displayrom", "displayrom", "Ring3 inventory of selected firmware ROM RAM copy; no GPU access",
         SHELL_GROUP_HARDWARE, command_display_rom, 0, true);
+    shell_add_command("displayrom-bytes", "displayrom-bytes OFFSET COUNT", "bounded selected firmware RAM bytes; decimal offset/count up to 256",
+        SHELL_GROUP_HARDWARE, 0, command_display_rom_bytes, true);
     shell_add_command("displayprobe", "displayprobe", "read-only display PCI/GOP inventory; no native takeover",
         SHELL_GROUP_HARDWARE, command_display_probe, 0, true);
     shell_add_command("serialinfo", "serialinfo", "show COM1 settings and bounded transmit/drop counters",

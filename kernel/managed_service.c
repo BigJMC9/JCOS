@@ -26,13 +26,6 @@ static void service_irq_restore(u64 flags) {
     if (flags & MANAGED_SERVICE_RFLAGS_IF) interrupts_enable();
 }
 
-static bool service_schedule_once(void) {
-    u64 flags = service_irq_save();
-    bool result = scheduler_yield();
-    service_irq_restore(flags);
-    return result;
-}
-
 static u64 service_timeout_ticks(void) {
     if (!timer_initialized()) return 0ULL;
     u32 frequency = timer_frequency();
@@ -104,20 +97,28 @@ static bool service_wait_ready(ManagedService *service) {
     u32 turns = 0U;
 
     for (;;) {
+        /* A READY service can run and block between separate observations.
+         * Match wait_thread_dead: inspect and schedule atomically on UP. */
+        u64 flags = service_irq_save();
         service_refresh_terminal(service);
-        if (service->state == MANAGED_SERVICE_FAILED) return false;
-        if (service_ready(service)) return true;
-
-        Thread *thread = service_thread(service);
-        if (!thread || thread->state != THREAD_STATE_READY || !thread->on_run_queue) return false;
-
-        if (timeout) {
-            if ((u64)(timer_ticks() - started) >= timeout) return false;
-        } else if (turns >= MANAGED_SERVICE_START_MAX_TURNS) {
+        if (service->state == MANAGED_SERVICE_FAILED) {
+            service_irq_restore(flags);
             return false;
         }
+        if (service_ready(service)) {
+            service_irq_restore(flags);
+            return true;
+        }
 
-        if (!service_schedule_once()) return false;
+        Thread *thread = service_thread(service);
+        if (!thread || thread->state != THREAD_STATE_READY || !thread->on_run_queue ||
+            (timeout ? (u64)(timer_ticks() - started) >= timeout : turns >= MANAGED_SERVICE_START_MAX_TURNS)) {
+            service_irq_restore(flags);
+            return false;
+        }
+        bool scheduled = scheduler_yield();
+        service_irq_restore(flags);
+        if (!scheduled) return false;
         ++turns;
     }
 }

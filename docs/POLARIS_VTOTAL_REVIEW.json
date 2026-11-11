@@ -1,0 +1,220 @@
+{
+  "upstream_commit": "adc218676eef25575469234709c2d87185ca223a",
+  "sources": [
+    {
+      "path": "drivers/gpu/drm/amd/display/dc/dce/dce_link_encoder.c",
+      "file": "dce_link_encoder.c",
+      "url": "https://raw.githubusercontent.com/torvalds/linux/adc218676eef25575469234709c2d87185ca223a/drivers/gpu/drm/amd/display/dc/dce/dce_link_encoder.c",
+      "sha256": "00850980541655910f3c97d68af789e5fa4a1b7d2cf301bcdbdcd7c8c801e360",
+      "bytes": 51785
+    },
+    {
+      "path": "drivers/gpu/drm/amd/display/dc/dce/dce_link_encoder.h",
+      "file": "dce_link_encoder.h",
+      "url": "https://raw.githubusercontent.com/torvalds/linux/adc218676eef25575469234709c2d87185ca223a/drivers/gpu/drm/amd/display/dc/dce/dce_link_encoder.h",
+      "sha256": "8f242dd953109146e5d86ca5b980182a92c99590381c25629326ed4731080f22",
+      "bytes": 10001
+    },
+    {
+      "path": "drivers/gpu/drm/amd/display/dc/dce/dce_stream_encoder.c",
+      "file": "dce_stream_encoder.c",
+      "url": "https://raw.githubusercontent.com/torvalds/linux/adc218676eef25575469234709c2d87185ca223a/drivers/gpu/drm/amd/display/dc/dce/dce_stream_encoder.c",
+      "sha256": "111399cf9ece04d7d4d349d27014eefba520566a8d41df3d4b1d5637b11c1b40",
+      "bytes": 46262
+    },
+    {
+      "path": "drivers/gpu/drm/amd/display/dc/resource/dce112/dce112_resource.c",
+      "file": "dce112_resource.c",
+      "url": "https://raw.githubusercontent.com/torvalds/linux/adc218676eef25575469234709c2d87185ca223a/drivers/gpu/drm/amd/display/dc/resource/dce112/dce112_resource.c",
+      "sha256": "38d0357ba68540159df93ca29dee2b26b201d8bf6940dfed3854f8270146a413",
+      "bytes": 38572
+    },
+    {
+      "path": "drivers/gpu/drm/amd/include/asic_reg/dce/dce_11_2_d.h",
+      "file": "dce_11_2_d.h",
+      "url": "https://raw.githubusercontent.com/torvalds/linux/adc218676eef25575469234709c2d87185ca223a/drivers/gpu/drm/amd/include/asic_reg/dce/dce_11_2_d.h",
+      "sha256": "7f865912129ac67966827035d5a34b4362f8a3156a56e298cb995386ce77a644",
+      "bytes": 874647
+    },
+    {
+      "path": "drivers/gpu/drm/amd/include/asic_reg/dce/dce_11_2_sh_mask.h",
+      "file": "dce_11_2_sh_mask.h",
+      "url": "https://raw.githubusercontent.com/torvalds/linux/adc218676eef25575469234709c2d87185ca223a/drivers/gpu/drm/amd/include/asic_reg/dce/dce_11_2_sh_mask.h",
+      "sha256": "cd5dde10fcdf14c5355f54dc34c84b7fef30d8864045ae4f5172d7e66beab737",
+      "bytes": 1285290
+    },
+    {
+      "path": "drivers/gpu/drm/amd/amdgpu/amdgpu_atombios.c",
+      "file": "amdgpu_atombios.c",
+      "url": "https://raw.githubusercontent.com/torvalds/linux/adc218676eef25575469234709c2d87185ca223a/drivers/gpu/drm/amd/amdgpu/amdgpu_atombios.c",
+      "sha256": "ae8a41ffd9baafeeedd213b589389eca8be6cf68fe8c33f837b7d5ec63d64113",
+      "bytes": 58764
+    },
+    {
+      "file": "dce110_timing_generator.c",
+      "path": "drivers/gpu/drm/amd/display/dc/dce110/dce110_timing_generator.c",
+      "url": "https://raw.githubusercontent.com/torvalds/linux/adc218676eef25575469234709c2d87185ca223a/drivers/gpu/drm/amd/display/dc/dce110/dce110_timing_generator.c",
+      "sha256": "aa7451a5d9b7d57a3005312ccf680e17204644a9cb5a88f17b9045ace5d1ca84"
+    }
+  ],
+  "fields": [
+    {
+      "selector": 0,
+      "register": "mmCRTC0_CRTC_V_TOTAL_MIN",
+      "byte_offset": 28192
+    },
+    {
+      "selector": 1,
+      "register": "mmCRTC0_CRTC_V_TOTAL_MAX",
+      "byte_offset": 28196
+    },
+    {
+      "selector": 2,
+      "register": "mmCRTC0_CRTC_V_TOTAL_CONTROL",
+      "byte_offset": 28200
+    }
+  ],
+  "field_facts": [
+    {
+      "compiled": "POLARIS_VERTICAL_COORD_MASK",
+      "upstream": "CRTC_V_TOTAL_MIN__CRTC_V_TOTAL_MIN_MASK"
+    },
+    {
+      "compiled": "POLARIS_VERTICAL_COORD_MASK",
+      "upstream": "CRTC_V_TOTAL_MAX__CRTC_V_TOTAL_MAX_MASK"
+    },
+    {
+      "compiled": "POLARIS_VERTICAL_MIN_SEL_MASK",
+      "upstream": "CRTC_V_TOTAL_CONTROL__CRTC_V_TOTAL_MIN_SEL_MASK"
+    },
+    {
+      "compiled": "POLARIS_VERTICAL_MAX_SEL_MASK",
+      "upstream": "CRTC_V_TOTAL_CONTROL__CRTC_V_TOTAL_MAX_SEL_MASK"
+    },
+    {
+      "compiled": "POLARIS_CRTC_FRAME_COUNT_MASK",
+      "upstream": "CRTC_STATUS_FRAME_COUNT__CRTC_FRAME_COUNT_MASK"
+    }
+  ],
+  "profile": "Exact RX570 1002:67DF EF/1458:2310 selected GOP, inherited CRTC0-FE2-BE2 DP, stable v38 timing and zero MIN/MAX/CONTROL; explicit polaris-vtotal only",
+  "snapshot": "Fresh86orderedROvalues, exact fixed context and original0/0/0 independently checked and retained in kernel before any register write; fresh Ring3 copied18word plan checked, no failed-driver snapshot",
+  "mappings": "Four pipe leaves plus location slot4 and three DIG leaves slots5..7, all supervisor RO/NX/UC initially; existing page6000 alone RW after firmware retirement; no user MMIO mapping",
+  "register_writes": {
+    "primary": [
+      "MIN=0x46C",
+      "MAX=0x46C",
+      "CONTROL=0x11"
+    ],
+    "rescue": [
+      "CONTROL=0",
+      "MIN=0",
+      "MAX=0"
+    ],
+    "scope": "Exactly three consumed-before-store attempts per round, independent binding ledger; one assigned primary round and one quarantined fresh-rescue round",
+    "plane_order": "Primary completes existing HIGH/LOW address rebind before enabling vertical authority; rescue restores all three vertical fields before any address rebind store",
+    "authority": "Fixed semantic IDs0..2 and fixed values only; no raw offset/width/window/clock/DP training/DMA/IRQ/IOMMU grant"
+  },
+  "round": {
+    "read_fields": [
+      "MIN",
+      "MAX",
+      "CONTROL",
+      "CRTC0_CONTROL",
+      "base_V_TOTAL",
+      "CRTC_STATUS_FRAME_COUNT"
+    ],
+    "before": "Primaryzero controls; rescue only four authorized primary prefixes; CRTC80410311/baseVtotal1124/frame24bits",
+    "completion": "Exact target or original control readbacks, posted CONTROL load, baseline frame then2..512 modulo24bit frame progress; no effective vertical-total or refresh-rate claim",
+    "max_polls": 64,
+    "max_waits": 63,
+    "max_read_attempts": 392,
+    "max_store_attempts": 3,
+    "max_requests": 458,
+    "software_admission_seconds": 2,
+    "bus_timeout": false
+  },
+  "whole_operation_bounds": {
+    "primary": {
+      "max_reads": 916,
+      "max_stores": 5,
+      "max_polls": 128,
+      "preflight_reads": 132,
+      "includes": "86verticalsnapshot+46planeobservation+392planeprogram+392verticalprogram"
+    },
+    "rescue": {
+      "max_reads": 824,
+      "max_stores": 5,
+      "max_polls": 128,
+      "preflight_reads": 40,
+      "includes": "392verticalrestore+40planeobservation+392planeprogram"
+    },
+    "normal_success": {
+      "primary_reads": 160,
+      "primary_stores": 5,
+      "rescue_reads": 68,
+      "rescue_stores": 5
+    },
+    "time": "Each GPU phase has its own existing2second software admission; fresh copied decode4seconds plus separate service startup/RPC/stop bounds. No global bus or wall-clock completion guarantee."
+  },
+  "private_protocol": {
+    "native_version": 4,
+    "operation": 12,
+    "request": "header,role1or2,primaryfaultprefix0..3,reserved0; no snapshot transfer",
+    "broker": "Distinct VTOTAL request/response magic; exact incarnation/sequence/field/value; final completion must match independent kernel gate and idle driver",
+    "old_version": "NativeV3 request closes process; deploy matched full image",
+    "boot_abi": "11/1632 unchanged",
+    "fault_injection": "Primary executes UD2 after each of the first1/2/3 store ACKs; rescue accepts no deliberate prefix fault parameter"
+  },
+  "rescue": "Pre-reserved fresh Ring3 process/ELF/font/IPC/RO framebuffer; failed primary stopped/reaped and output revoked; assignment stays quarantined. Existing Ring3 supervisor policy and independent serialized worker choose recovery/headless. No extra rescue rearm or IO during GUI drain.",
+  "source_vs_design": "Pinned set_drr confirms three named registers, minus-one values and min/max selector masks. Target1133, exact zero baseline, disable-first restoration, finite gate and fault-prefix workflow are JA OS design choices requiring physical qualification.",
+  "physical_status": "PASS fixed writes/readback/frame progress, primary hang and all3 interrupted store prefixes with fresh visible rescue; effective vertical total/rate remains unmeasured.",
+  "limits": [
+    "Operational DCE/no hotplug-power-reset/unchanged surface and clock/link assumptions remain; MMIO bus stall cannot be cancelled by software deadline",
+    "Register readback and frame progress do not prove effective vertical total, refresh rate, monitor output or native resolution switching",
+    "No new GPU translation/address authority beyond existing fixed plane address rebind; inherited bus mastering is unisolated, quarantine not DMA safety/reuse",
+    "Normal gui native retains existing address-only entry; vertical writes require explicit polaris-vtotal and qualified board/profile",
+    "DP training, HDMI, full GPU reset/reinitialization, arbitrary hardware hang recovery, DMA/IRQ/IOMMU isolation, acceleration and Intel HD620 remain open"
+  ],
+  "physical_evidence": {
+    "image_sha256": "9ef8015f68416efb1b9c50cf9105e8d32eec4684c9479e75f9bcb5a81c8f2a28",
+    "platform": "Z390 Gaming X/F10/i7-9700K/RX5701002:67DF EF/1458:2310/Philips272M8DP",
+    "boots": 4,
+    "primary": "MIN1132/MAX1132/CONTROL17 readback;14reads/3stores/1poll/frameDelta4;visiblegreen",
+    "rescue_before_values": [
+      [
+        1132,
+        1132,
+        17
+      ],
+      [
+        1132,
+        0,
+        0
+      ],
+      [
+        1132,
+        1132,
+        0
+      ],
+      [
+        1132,
+        1132,
+        17
+      ]
+    ],
+    "rescue_frame_deltas": [
+      6,
+      4,
+      3,
+      3
+    ],
+    "rescue": "Freshprocess CONTROL0/MIN0/MAX0 beforeplane;14reads/3stores/1polleach;visibleblue",
+    "total_reads": 888,
+    "total_stores": 37,
+    "total_polls": 13,
+    "replays": 0,
+    "serial": "18sessions/96commands,RX139545/TX1222;independentRing3consoleprogress",
+    "cleanup": "4nativeconsole_reclamations+4unassistedreboots,noGPU IOduringcleanup",
+    "limits": "One run per named case;not effective total/rate,GUI,physicalrescuepartialfailure,HDMI,fullreset orDMAisolation"
+  }
+}

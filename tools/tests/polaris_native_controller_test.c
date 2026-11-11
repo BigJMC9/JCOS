@@ -13,8 +13,15 @@
 #include "../../kernel/framebuffer.h"
 #include "../../kernel/device_mmio.h"
 #include "../../user/drivers/amd_polaris_plane.h"
+#include "../../user/drivers/amd_polaris_vertical.h"
+#include "../../user/drivers/amd_polaris_vtotal.h"
+#include "../../kernel/tests/polaris_vtotal_actual_fixture.h"
 #define CHECK(x) do{if(!(x)){fprintf(stderr,"native controller case%d line%d %s\n",fault,__LINE__,#x);exit(1);}}while(0)
 static int fault;
+static bool vt_observing,vt_enabled;
+static u32 vt_values[86],vt_regs[3],vt_timing_reads,vt_control_reads,vt_writes[3];
+static unsigned vt_case(void){return fault>=165?(unsigned)(fault-165):~0U;}
+
 static PciDevice device;
 static Process supervisor;
 static FramebufferInfo info;
@@ -145,15 +152,63 @@ static bool scalar(u32 pipe,u32 selector,u32 *v){
  if(fault==17&&enabled&&!armed&&writes[0]==2&&selector==0)*v=0;
  return true;
 }
-bool polaris_mmio_read_held(PolarisMmioHold *h,u64 id,Process *o,u32 p,PolarisDisplayRegister f,u32 *v){(void)h;CHECK(held&&id==23&&o==&supervisor);return scalar(p,f,v);}
+bool polaris_mmio_read_held(PolarisMmioHold *h,u64 id,Process *o,u32 p,PolarisDisplayRegister f,u32 *v){(void)h;CHECK(held&&id==23&&o==&supervisor);if(vt_observing){CHECK(f==POLARIS_REG_CRTC_CONTROL&&p<6);*v=vt_values[p];++loads;return true;}return scalar(p,f,v);}
 bool polaris_mmio_read_witness_held(PolarisMmioHold *h,u64 id,Process *o,u32 p,PolarisPlaneWitnessRegister f,u32 *v){(void)h;CHECK(held&&id==23&&o==&supervisor);return scalar(p,15+f,v);}
 bool polaris_mmio_read_location_held(PolarisMmioHold *h,u64 id,Process *o,PolarisLocationRegister f,u32 *v){(void)h;CHECK(held&&id==23&&o==&supervisor);return scalar(0,18+f,v);}
 bool polaris_mmio_enable_rebind(PolarisMmioHold *h,u64 id){(void)h;CHECK(retired&&held&&id==23&&reserved[2]);if(fault==13)return false;enabled=true;return true;}
 bool polaris_mmio_arm_recovery(PolarisMmioHold *h,u64 id){(void)h;CHECK(id==23&&held&&quarantined&&!reserved[1]&&!armed&&lease==DISPLAY_LEASE_KERNEL);if(fault==24)return false;armed=true;return true;}
 bool polaris_mmio_rebind_read(PolarisMmioHold *h,u64 id,u32 f,u32 *v){(void)h;CHECK(enabled&&held&&id==23&&retired);return scalar(0,f,v);}
+bool polaris_mmio_prepare_links(PolarisMmioBinding *b,const BootInfo *boot,Process *owner,u64 id){
+ (void)b;(void)boot;CHECK(binding&&!held&&owner==&supervisor&&id==19);if(vt_case()==6)return false;
+ polaris_vtotal_actual_fixture(vt_values);if(vt_case()==4)vt_values[80]=vt_values[83]=1;
+ vt_observing=true;vt_timing_reads=vt_control_reads=0;return true;
+}
+bool polaris_mmio_read_link_held(PolarisMmioHold *h,u64 id,Process *o,u32 unit,PolarisLinkRegister field,u32 *out){
+ (void)h;CHECK(held&&vt_observing&&id==23&&o==&supervisor);++loads;*out=vt_values[field==POLARIS_LINK_FRONTEND?20+unit:6+2*unit+(u32)field];return true;
+}
+bool polaris_mmio_read_timing_held(PolarisMmioHold *h,u64 id,Process *o,u32 field,u32 *out){
+ (void)h;CHECK(held&&vt_observing&&id==23&&o==&supervisor&&field<14);++loads;*out=vt_values[(vt_timing_reads++<14?26:60)+field];return true;
+}
+bool polaris_mmio_read_vertical_held(PolarisMmioHold *h,u64 id,Process *o,u32 field,u32 *out){
+ (void)h;CHECK(held&&vt_observing&&id==23&&o==&supervisor&&field==vt_control_reads%3);++loads;*out=vt_values[80+vt_control_reads++];return true;
+}
+bool polaris_vertical_decode_copy(const u32 *v,u64 *out){
+ CHECK(vt_observing&&held&&!retired);vt_observing=false;(void)polaris_vertical_plan(v,86,out);if(vt_case()==5)out[17]^=1;return true;
+}
+bool polaris_mmio_enable_vtotal(PolarisMmioHold *h,u64 id,const u32 *v){
+ (void)h;CHECK(held&&retired&&enabled&&id==23&&writes[0]==2&&!armed&&jcos_polaris_vtotal_snapshot_admitted(v,86));
+ if(vt_case()==7)return false;vt_enabled=true;return true;
+}
+bool polaris_mmio_vtotal_read(PolarisMmioHold *h,u64 id,u32 f,u32 *out){
+ (void)h;CHECK(held&&retired&&vt_enabled&&id==23&&f<6);++loads;
+ if(vt_case()==14&&!armed&&f==0){*out=~0U;return true;}
+ if(f<3)*out=vt_regs[f];else if(f==3)*out=0x80410311;else if(f==4)*out=1124;
+ else {if(!((vt_case()==17&&!armed)||(vt_case()==18&&armed)))frame_counter+=3;*out=frame_counter;}
+ if(vt_case()==15&&!armed&&vt_writes[1]==3&&f==2)*out^=1;return true;
+}
+bool polaris_mmio_vtotal_write(PolarisMmioHold *h,u64 id,u32 f,u32 v){
+ (void)h;u32 role=armed?2:1,n=vt_writes[role];CHECK(retired&&held&&enabled&&vt_enabled&&id==23&&lease==DISPLAY_LEASE_KERNEL&&n<3);
+ CHECK(f==(armed?(n+2)%3:n)&&v==(armed?0:n<2?1132:0x11));vt_regs[f]=v;++vt_writes[role];
+ if(vt_case()>=8&&vt_case()<=10&&!armed&&vt_writes[1]==vt_case()-7)return false;
+ if(vt_case()>=11&&vt_case()<=13&&armed&&vt_writes[2]==vt_case()-10)return false;
+ return true;
+}
+typedef struct {PolarisVtotalGate gate;const PolarisVtotalIo *io;u32 sequence,prefix,writes;} VtConversation;
+static int vt_exchange(void *context,JcosU32 op,JcosU32 f,JcosU32 payload,JcosU32 *out){
+ VtConversation *c=context;
+ bool ok=polaris_vtotal_gate_step(&c->gate,c->io,POLARIS_VTOTAL_TAG(++c->sequence,op,f),payload,out);
+ if(ok&&op==POLARIS_VTOTAL_WRITE&&++c->writes==c->prefix)return 0;return ok;
+}
+bool polaris_driver_vtotal(PolarisDriver *d,const PolarisVtotalIo *io,u32 prefix,PolarisVtotalResult *out){
+ CHECK(!d->vtotal_attempted&&reserved[d->role]&&!drawing[1]&&!drawing[2]&&lease==DISPLAY_LEASE_KERNEL);
+ d->vtotal_attempted=true;VtConversation c;memset(&c,0,sizeof(c));c.io=io;c.prefix=prefix;polaris_vtotal_gate_init(&c.gate,d->role==2);
+ PolarisUserVtotalIo user={&c,vt_exchange};u32 delta;bool ok=polaris_user_vtotal(&user,d->role==2,&delta)!=0;*out=c.gate.result;
+ if(!ok)d->service.state=MANAGED_SERVICE_FAILED;return ok;
+}
 bool polaris_mmio_rebind_write(PolarisMmioHold *h,u64 id,PolarisDisplayRegister f,u32 v){
  (void)h;CHECK(retired&&enabled&&held&&id==23&&lease==DISPLAY_LEASE_KERNEL&&writes[armed]<2);
  CHECK(f==(writes[armed] ? POLARIS_REG_PRIMARY_LOW : POLARIS_REG_PRIMARY_HIGH));
+ if(vt_enabled&&armed)CHECK(vt_writes[2]==3&&!vt_regs[0]&&!vt_regs[1]&&!vt_regs[2]);
  CHECK(v==(writes[armed] ? 0U : 0xF4U));++writes[armed];
  return (unsigned)fault!=(armed ? 26+writes[1] : 13+writes[0]);
 }
@@ -422,10 +477,44 @@ static void restart_case(const BootInfo *boot){
  CHECK(!polaris_native_restart()&&before==loads+writes[0]+writes[1]);
  puts("PASS: retained primary restart,RO/drain/liveness/policy/fresh-identity/transport/partial-cleanup gates,no GPU operation/rearm,independent rescue after replacement;no hardware.");
 }
+static void vtotal_case(const BootInfo *boot){
+ unsigned n=vt_case(),prefix=n>=1&&n<=3?n:0;
+ if(n==22){polaris_native_begin_vtotal(boot,4);CHECK(!creates&&!loads);return;}
+ polaris_native_begin_vtotal(boot,prefix);
+ if(n>=4&&n<=6){CHECK(!retired&&!writes[0]&&!vt_writes[1]);}
+ else if(n==7){CHECK(retired&&writes[0]==2&&!vt_writes[1]&&!vt_writes[2]&&!drawing[1]&&!drawing[2]);}
+ else {
+  if((n>=1&&n<=3)||(n>=8&&n<=10)||n==14||n==15||n==17){
+   CHECK(!reserved[1]&&drawing[2]&&vt_writes[2]==3&&!vt_regs[0]&&!vt_regs[1]&&!vt_regs[2]);
+   if(prefix)CHECK(vt_writes[1]==prefix);
+  }else{
+   CHECK(drawing[1]&&vt_writes[1]==3&&vt_regs[0]==1132&&vt_regs[1]==1132&&vt_regs[2]==0x11);
+   if(n==23){unsigned old=loads+vt_writes[1]+vt_writes[2];polaris_native_begin_vtotal(boot,0);CHECK(old==loads+vt_writes[1]+vt_writes[2]);}
+   if(n==16){vt_regs[0]=0;polaris_native_rescue();CHECK(!drawing[2]&&!vt_writes[2]);}
+   else if(n==21){++policy_pid;ticks+=1000;unsigned old=loads+vt_writes[2];polaris_native_poll();CHECK(!drawing[1]&&!vt_writes[2]&&old==loads);}
+   else if(n==19){
+    polaris_native_present();gui_retained=true;lease=DISPLAY_LEASE_USER;writer=900;
+    polaris_native_background_diagnostic(1,true);ticks+=1000;polaris_native_poll();CHECK(!vt_writes[2]);gui_release();polaris_native_poll();CHECK(drawing[2]&&vt_writes[2]==3);
+   }else{
+    polaris_native_rescue();
+    if(n>=11&&n<=13)CHECK(!drawing[2]&&vt_writes[2]==n-10);
+    else if(n==18)CHECK(!drawing[2]&&vt_writes[2]==3);
+    else CHECK(drawing[2]&&vt_writes[2]==3&&!vt_regs[0]&&!vt_regs[1]&&!vt_regs[2]);
+   }
+  }
+ }
+ if(n==20&&drawing[2]){polaris_native_background_diagnostic(2,false);ticks+=1000;polaris_native_poll();CHECK(!drawing[2]);}
+ gui_retained=kernel_writer_pin=false;
+ unsigned old=loads+vt_writes[1]+vt_writes[2]+writes[0]+writes[1];
+ CHECK(polaris_native_power_prepare());CHECK(old==loads+vt_writes[1]+vt_writes[2]+writes[0]+writes[1]);
+ CHECK(!held&&!binding&&!reserved[1]&&!reserved[2]&&vt_writes[1]<=3&&vt_writes[2]<=3);
+ puts("PASS: production vertical controller admission,immutable zero baseline,fault prefixes,rescue order,GUI drain,partial stores/readbacks/polls,headless policy/rescue failures and CPU-only power cleanup;RAM only.");
+}
 int main(int argc,char **argv){
  fault=argc>1 ? atoi(argv[1]) : 0;supervisor.id=1;supervisor.kernel=true;supervisor.initialized=true;
  memset(&info,0,sizeof(info));info.physical_base=0x50000000;info.size=0x300000;info.direct_map_safe=true;info.width=info.pixels_per_scanline=1024;info.height=768;info.pixel_format=1;
  BootInfo boot;memset(&boot,0,sizeof(boot));boot.framebuffer_base=info.physical_base;boot.framebuffer_size=info.size;boot.framebuffer_width=boot.framebuffer_pixels_per_scanline=1024;boot.framebuffer_height=768;boot.framebuffer_pixel_format=1;
+ if(fault>=165){vtotal_case(&boot);return 0;}
  if(fault>=136){restart_case(&boot);return 0;}
  if(fault>=122){launch_case(&boot);return 0;}
  polaris_native_begin(&boot);

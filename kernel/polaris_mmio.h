@@ -4,6 +4,10 @@
 #include "pci_assignment.h"
 #include "vmm.h"
 #include "amd_polaris_registers.h"
+#include "polaris_link_protocol.h"
+#include "polaris_timing_protocol.h"
+#include "polaris_vertical_protocol.h"
+#include "polaris_vtotal_protocol.h"
 
 #define POLARIS_MMIO_PAGE_COUNT 4U
 #define POLARIS_MMIO_BINDING_CAPACITY 4U
@@ -32,6 +36,7 @@ typedef struct {
     u64 virtual_base;
     PolarisMmioPlan plan;
     u32 mapped_pages;
+    u32 link_mapped_pages;
     u32 active_holds;
     bool location_mapped;
     bool child_pinned;
@@ -40,7 +45,8 @@ typedef struct {
     bool closing;
     bool poisoned;
     bool supervised, rebind_enabled, recovery_armed;
-    u32 rebind_next;
+    u32 rebind_next,vtotal_next;
+    bool vtotal_enabled;
     bool initialized;
 } PolarisMmioBinding;
 
@@ -82,6 +88,19 @@ bool polaris_mmio_prepare_location(PolarisMmioBinding *binding, const BootInfo *
 bool polaris_mmio_read_location_held(PolarisMmioHold *hold, u64 expected_hold_identity,
     Process *owner, PolarisLocationRegister field, u32 *out);
 
+/* Three optional RO/NX/UC pages for fixed seven-backend/six-frontend DIG fields.
+ * No hold during preparation. No device read until an exact retained hold. */
+bool polaris_mmio_prepare_links(PolarisMmioBinding *binding,const BootInfo *boot,
+    Process *owner,u64 expected_binding_identity);
+bool polaris_mmio_read_link_held(PolarisMmioHold *hold,u64 identity,Process *owner,
+    u32 unit,PolarisLinkRegister field,u32 *out);
+
+/* Fixed CRTC0/FE2 fields in the same seven existing RO pages. */
+bool polaris_mmio_read_timing_held(PolarisMmioHold *hold,u64 identity,Process *owner,u32 field,u32 *out);
+
+/* Three fixed CRTC0 vertical-total fields, existing RO page only. */
+bool polaris_mmio_read_vertical_held(PolarisMmioHold *hold,u64 identity,Process *owner,u32 field,u32 *out);
+
 /* Permanent admission closure; safe without active kernel CR3. Cleanup also
  * closes admission before attempting teardown and refuses while holds remain. */
 bool polaris_mmio_close(PolarisMmioBinding *binding);
@@ -107,6 +126,9 @@ bool polaris_mmio_prepare_supervised(PolarisMmioBinding *binding,const BootInfo 
     PciAssignment *assignment,CapabilityHandle assignment_handle);
 bool polaris_mmio_enable_rebind(PolarisMmioHold *hold,u64 identity);
 bool polaris_mmio_arm_recovery(PolarisMmioHold *hold,u64 identity);
+bool polaris_mmio_enable_vtotal(PolarisMmioHold *hold,u64 identity,const u32 snapshot[POLARIS_VERTICAL_VALUES]);
+bool polaris_mmio_vtotal_read(PolarisMmioHold *hold,u64 identity,u32 field,u32 *out);
+bool polaris_mmio_vtotal_write(PolarisMmioHold *hold,u64 identity,u32 field,u32 value);
 bool polaris_mmio_rebind_write(PolarisMmioHold *hold,u64 identity,PolarisDisplayRegister field,u32 value);
 /* Named display0..14,witness15..17,location18..19; fixed pipe0 only. */
 bool polaris_mmio_rebind_read(PolarisMmioHold *hold,u64 identity,u32 selector,u32 *out);

@@ -1,7 +1,7 @@
 #ifndef JCOS_POLARIS_NATIVE_PROTOCOL_H
 #define JCOS_POLARIS_NATIVE_PROTOCOL_H
 #include "polaris_plane_protocol.h"
-#define POLARIS_NATIVE_VERSION 3ULL
+#define POLARIS_NATIVE_VERSION 4ULL
 #define POLARIS_NATIVE_HEADER(op) ((POLARIS_NATIVE_VERSION<<32)|(op))
 #define POLARIS_NATIVE_PING 1ULL
 #define POLARIS_NATIVE_CONFIG 2ULL
@@ -15,6 +15,10 @@
 #define POLARIS_NATIVE_EXECUTE 10ULL
 /* Fresh primary adopts validated retained scanout with RO framebuffer only. */
 #define POLARIS_NATIVE_RETAINED 11ULL
+/* Fixed vertical-total round. role, fault-after-write-prefix0..3, reserved0.
+ * Rescue permits prefix0 only and runs before its plane CONFIG/EXECUTE.
+ * Primary requires completed plane execution. No mutable restore snapshot. */
+#define POLARIS_NATIVE_VTOTAL 12ULL
 #define POLARIS_NATIVE_REPLY 0x504E4154ULL
 #define POLARIS_NATIVE_ROLE_PRIMARY 1U
 #define POLARIS_NATIVE_ROLE_RESCUE 2U

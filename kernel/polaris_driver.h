@@ -2,6 +2,7 @@
 #define JA_OS_POLARIS_DRIVER_H
 #include "managed_service.h"
 #include "polaris_program.h"
+#include "polaris_vtotal_gate.h"
 #include "polaris_native_protocol.h"
 typedef struct {
     ManagedService service;
@@ -12,6 +13,7 @@ typedef struct {
     u64 process_id;
     bool program_attempted;
     bool retained_only;
+    bool vtotal_attempted;
 } PolarisDriver;
 /* Zero-initialized retained storage. Preload independent ELF/font/IPC/pages,
  * with a RO borrowed framebuffer; no allocation is needed to enable drawing. */
@@ -24,6 +26,8 @@ bool polaris_driver_plan(PolarisDriver *driver,u64 observation_id,const PolarisP
  * Ambiguous delivery/completion consumes the attempt; never reconnect/replay. */
 bool polaris_driver_program(PolarisDriver *driver,PolarisProgramPlan *plan,
     const PolarisProgramIo *io,PolarisProgramResult *out);
+bool polaris_driver_vtotal(PolarisDriver *driver,const PolarisVtotalIo *io,
+    u32 diagnostic_fault_prefix,PolarisVtotalResult *out);
 bool polaris_driver_draw(PolarisDriver *driver);
 bool polaris_driver_ping(PolarisDriver *driver,u64 challenge);
 /* Private diagnostics: consume exactly one acknowledged fault/spin branch;

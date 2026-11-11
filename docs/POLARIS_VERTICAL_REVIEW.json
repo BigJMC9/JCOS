@@ -1,0 +1,149 @@
+{
+  "upstream_commit": "adc218676eef25575469234709c2d87185ca223a",
+  "sources": [
+    {
+      "path": "drivers/gpu/drm/amd/display/dc/dce/dce_link_encoder.c",
+      "file": "dce_link_encoder.c",
+      "url": "https://raw.githubusercontent.com/torvalds/linux/adc218676eef25575469234709c2d87185ca223a/drivers/gpu/drm/amd/display/dc/dce/dce_link_encoder.c",
+      "sha256": "00850980541655910f3c97d68af789e5fa4a1b7d2cf301bcdbdcd7c8c801e360",
+      "bytes": 51785
+    },
+    {
+      "path": "drivers/gpu/drm/amd/display/dc/dce/dce_link_encoder.h",
+      "file": "dce_link_encoder.h",
+      "url": "https://raw.githubusercontent.com/torvalds/linux/adc218676eef25575469234709c2d87185ca223a/drivers/gpu/drm/amd/display/dc/dce/dce_link_encoder.h",
+      "sha256": "8f242dd953109146e5d86ca5b980182a92c99590381c25629326ed4731080f22",
+      "bytes": 10001
+    },
+    {
+      "path": "drivers/gpu/drm/amd/display/dc/dce/dce_stream_encoder.c",
+      "file": "dce_stream_encoder.c",
+      "url": "https://raw.githubusercontent.com/torvalds/linux/adc218676eef25575469234709c2d87185ca223a/drivers/gpu/drm/amd/display/dc/dce/dce_stream_encoder.c",
+      "sha256": "111399cf9ece04d7d4d349d27014eefba520566a8d41df3d4b1d5637b11c1b40",
+      "bytes": 46262
+    },
+    {
+      "path": "drivers/gpu/drm/amd/display/dc/resource/dce112/dce112_resource.c",
+      "file": "dce112_resource.c",
+      "url": "https://raw.githubusercontent.com/torvalds/linux/adc218676eef25575469234709c2d87185ca223a/drivers/gpu/drm/amd/display/dc/resource/dce112/dce112_resource.c",
+      "sha256": "38d0357ba68540159df93ca29dee2b26b201d8bf6940dfed3854f8270146a413",
+      "bytes": 38572
+    },
+    {
+      "path": "drivers/gpu/drm/amd/include/asic_reg/dce/dce_11_2_d.h",
+      "file": "dce_11_2_d.h",
+      "url": "https://raw.githubusercontent.com/torvalds/linux/adc218676eef25575469234709c2d87185ca223a/drivers/gpu/drm/amd/include/asic_reg/dce/dce_11_2_d.h",
+      "sha256": "7f865912129ac67966827035d5a34b4362f8a3156a56e298cb995386ce77a644",
+      "bytes": 874647
+    },
+    {
+      "path": "drivers/gpu/drm/amd/include/asic_reg/dce/dce_11_2_sh_mask.h",
+      "file": "dce_11_2_sh_mask.h",
+      "url": "https://raw.githubusercontent.com/torvalds/linux/adc218676eef25575469234709c2d87185ca223a/drivers/gpu/drm/amd/include/asic_reg/dce/dce_11_2_sh_mask.h",
+      "sha256": "cd5dde10fcdf14c5355f54dc34c84b7fef30d8864045ae4f5172d7e66beab737",
+      "bytes": 1285290
+    },
+    {
+      "path": "drivers/gpu/drm/amd/amdgpu/amdgpu_atombios.c",
+      "file": "amdgpu_atombios.c",
+      "url": "https://raw.githubusercontent.com/torvalds/linux/adc218676eef25575469234709c2d87185ca223a/drivers/gpu/drm/amd/amdgpu/amdgpu_atombios.c",
+      "sha256": "ae8a41ffd9baafeeedd213b589389eca8be6cf68fe8c33f837b7d5ec63d64113",
+      "bytes": 58764
+    },
+    {
+      "file": "dce110_timing_generator.c",
+      "path": "drivers/gpu/drm/amd/display/dc/dce110/dce110_timing_generator.c",
+      "url": "https://raw.githubusercontent.com/torvalds/linux/adc218676eef25575469234709c2d87185ca223a/drivers/gpu/drm/amd/display/dc/dce110/dce110_timing_generator.c",
+      "sha256": "aa7451a5d9b7d57a3005312ccf680e17204644a9cb5a88f17b9045ace5d1ca84"
+    }
+  ],
+  "profile": "Read-only vertical-total preparation for exact RX570 1002:67DF EF/1458:2310, inherited CRTC0-FE2-BE2 DP and prior timing profile",
+  "fields": [
+    {
+      "selector": 0,
+      "register": "mmCRTC0_CRTC_V_TOTAL_MIN",
+      "byte_offset": 28192
+    },
+    {
+      "selector": 1,
+      "register": "mmCRTC0_CRTC_V_TOTAL_MAX",
+      "byte_offset": 28196
+    },
+    {
+      "selector": 2,
+      "register": "mmCRTC0_CRTC_V_TOTAL_CONTROL",
+      "byte_offset": 28200
+    }
+  ],
+  "field_facts": [
+    {
+      "compiled": "POLARIS_VERTICAL_COORD_MASK",
+      "upstream": "CRTC_V_TOTAL_MIN__CRTC_V_TOTAL_MIN_MASK"
+    },
+    {
+      "compiled": "POLARIS_VERTICAL_COORD_MASK",
+      "upstream": "CRTC_V_TOTAL_MAX__CRTC_V_TOTAL_MAX_MASK"
+    },
+    {
+      "compiled": "POLARIS_VERTICAL_MIN_SEL_MASK",
+      "upstream": "CRTC_V_TOTAL_CONTROL__CRTC_V_TOTAL_MIN_SEL_MASK"
+    },
+    {
+      "compiled": "POLARIS_VERTICAL_MAX_SEL_MASK",
+      "upstream": "CRTC_V_TOTAL_CONTROL__CRTC_V_TOTAL_MAX_SEL_MASK"
+    }
+  ],
+  "pages": [
+    24576
+  ],
+  "capture": {
+    "values": 86,
+    "existing_timing_values": 80,
+    "new_values": "Two ordered MIN/MAX/CONTROL samples at indices80..85, after stable existing CRTC/DIG/stream admission",
+    "shared_attempt": "One total LINK/TIMING/VERTICAL attempt per boot; failures consume attempt; no retry",
+    "maximum_load_attempts": 86,
+    "software_admission_seconds": 2,
+    "bus_timeout": false,
+    "mappings": "Same seven supervisor RO/NX/UC leaves, no new page and no writable promotion",
+    "cleanup": "Checked close/unmap and hold/capability removal, inherited assignment quarantine before fresh Ring3 interpretation"
+  },
+  "protocol": {
+    "operations": [
+      16,
+      17,
+      18
+    ],
+    "version": 1,
+    "values": 86,
+    "report_words": 18,
+    "max_rpcs": 105,
+    "cpu_admission_seconds": 4,
+    "query_order": "Exactly0..17 once, fresh process, no cross-role or replay"
+  },
+  "plan": {
+    "baseline_total": 1125,
+    "target_total": 1133,
+    "admission": "Exact inherited raster/timing/route/DP controls, original overrideCONTROL zero, originalMIN/MAX either0 or1124; allother/reserved/MCtrainingbits refused",
+    "primary": [
+      "MIN=1132",
+      "MAX=1132",
+      "CONTROL=0x11"
+    ],
+    "restoration": [
+      "CONTROL=original0",
+      "MIN=originalMIN",
+      "MAX=originalMAX"
+    ],
+    "status": "Copied data only; no executor, mutable driver snapshot or programming authority",
+    "rationale": "Use native vertical-total controls as the first future timing adjustment, retaining resolution/pixelclock/trained link; full resolution switching and DP training qualify separately",
+    "source_vs_design": "Pinned set_drr confirms MIN/MAX/control reads, minus-one writes and selector masks. Target1133, strict baseline, disable-first restoration and interruption model are JA OS design choices, not upstream hardware recovery proof."
+  },
+  "physical_status": "PASS physical v38 read-only preparation: all86loads complete, both MIN/MAX/CONTROL samples0/0/0, all18independent copied report/proposal words match. Checkedclose/unmap/hold/capremoval, inheritedquarantine, vertical/timing/link repeat refusal, serial/readable display and unassisted controlled reboot passed. Zero MMIOstores/polls/retries; no timing mutation or executed restoration. CPU fixture controls remain synthetic; journal establishes physical zero baseline. See build/rx570-vertical-v38/hardware/validation.json.",
+  "limits": [
+    "No GPU stores, polls or retries in this candidate; existing native/rebind/rescue budgets unchanged",
+    "Operational DCE/no hotplug-power-reset/unchanged firmware scanout assumed; software deadline cannot cancel stalled bus transaction",
+    "Read completion and copied plan do not prove effective vertical total, clock/rate, native mode change or rescue restoration",
+    "Future trusted retention, semantic write gate, fresh rescue execution, bounded completion and fault-prefix qualification remain necessary before timing mutation",
+    "Native resolution changes, DP training, HDMI, full reset/reinitialization and DMA/IRQ/IOMMU isolation remain open"
+  ]
+}

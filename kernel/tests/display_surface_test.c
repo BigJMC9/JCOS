@@ -462,14 +462,27 @@ static bool wait_input_app_blocked(u32 index) {
     u64 started = timer_ticks();
     Thread *thread = &g_input_apps[index].thread;
 
-    while (!input_app_blocked(index)) {
-        if ((u64)(timer_ticks() - started) >= timeout) return false;
-        if (thread->state != THREAD_STATE_READY || !thread->on_run_queue ||
-            !thread->interrupt_context_ready || !thread->interrupt_rsp ||
-            thread_wait_active(thread)) return false;
-        if (!scheduler_yield()) return false;
+    for (;;) {
+        /* A timer switch can turn READY into BLOCKED between separate reads.
+         * Match the terminal wait below: observe and yield under the UP IRQ
+         * discipline, then restore the caller's interrupt state. */
+        u64 flags = input_wait_irq_save();
+        if (input_app_blocked(index)) {
+            input_wait_irq_restore(flags);
+            return true;
+        }
+        bool valid = (u64)(timer_ticks() - started) < timeout &&
+            thread->state == THREAD_STATE_READY && thread->on_run_queue &&
+            thread->interrupt_context_ready && thread->interrupt_rsp &&
+            !thread_wait_active(thread);
+        if (!valid) {
+            input_wait_irq_restore(flags);
+            return false;
+        }
+        bool scheduled = scheduler_yield();
+        input_wait_irq_restore(flags);
+        if (!scheduled) return false;
     }
-    return true;
 }
 
 static bool input_app_terminal(u32 index) {

@@ -18,7 +18,7 @@ bool polaris_driver_reserve(PolarisDriver *d,u32 role,const ProgramBorrowedMappi
     ManagedServiceLaunchExtras e; k_memset(&e,0,sizeof(e));
     e.borrowed_mapping=*m; e.startup_argument_count=2;e.startup_arguments[0]=POLARIS_NATIVE_FB_VA;
     e.startup_arguments[1]=0xF400000000ULL;e.shutdown_request_word_count=4;e.shutdown_request_words[0]=s.shutdown_message;
-    d->role=role;d->process_id=0;d->program_attempted=false;d->retained_only=false;
+    d->role=role;d->process_id=0;d->program_attempted=false;d->retained_only=false;d->vtotal_attempted=false;
     if (!managed_service_start_ex(&d->service,&s,&e)) return false;
     d->process_id=managed_service_process_id(&d->service);
     return d->process_id && managed_service_connect_kernel(&d->service,&d->connection) &&

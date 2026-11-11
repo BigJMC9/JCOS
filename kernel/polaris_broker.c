@@ -65,3 +65,29 @@ bool polaris_driver_program(PolarisDriver *d,PolarisProgramPlan *p,
     *out=gate.result;
     return complete;
 }
+
+bool polaris_driver_vtotal(PolarisDriver *d,const PolarisVtotalIo *io,u32 fault,PolarisVtotalResult *out){
+ if(!out)return false;k_memset(out,0,sizeof(*out));
+ if(!d || !io || d->retained_only || d->vtotal_attempted || (d->role!=1 && d->role!=2) ||
+  (d->role==1?!d->program_attempted:d->program_attempted) || fault>3 || (d->role==2 && fault) ||
+  !d->process_id || !timer_initialized() || !timer_frequency() || !device_mmio_interrupts_enabled() || !scheduler_preemption_enabled())return false;
+ d->vtotal_attempted=true;
+ PolarisVtotalGate gate;polaris_vtotal_gate_init(&gate,d->role==2);
+ Conversation c={d,timer_ticks(),timer_frequency()};IpcMessage q,r;k_memset(&q,0,sizeof(q));
+ q.word_count=4;q.words[0]=POLARIS_NATIVE_HEADER(POLARIS_NATIVE_VTOTAL);q.words[1]=d->role;q.words[2]=fault;
+ if(!current(&c) || !managed_service_send_oneway(&d->service,&d->connection,&q))return false;
+ bool complete=false;
+ for(u32 n=0;n<=POLARIS_VTOTAL_MESSAGES;++n){
+  k_memset(&q,0,sizeof(q));u64 timeout=remaining(&c);
+  if(!timeout || !ipc_receive_blocking_for(process_kernel(),d->connection.receive_handle,&q,timeout) ||
+   !current(&c) || q.word_count!=4 || q.words[1]!=d->connection.incarnation)break;
+  if(q.words[0]==POLARIS_NATIVE_REPLY){
+   complete=gate.result.complete && !gate.poisoned && q.words[2]==POLARIS_NATIVE_VTOTAL && q.words[3]==gate.result.frame_delta && ready(&c);break;
+  }
+  u32 value=0;
+  if(q.words[0]!=POLARIS_VTOTAL_REQUEST || !polaris_vtotal_gate_step(&gate,io,q.words[2],q.words[3],&value) || !current(&c))break;
+  k_memset(&r,0,sizeof(r));r.word_count=4;r.words[0]=POLARIS_VTOTAL_RESPONSE;r.words[1]=d->connection.incarnation;r.words[2]=q.words[2];r.words[3]=value;
+  timeout=remaining(&c);if(!timeout || !ipc_send_blocking_for(process_kernel(),d->connection.send_handle,&r,timeout))break;
+ }
+ *out=gate.result;return complete;
+}

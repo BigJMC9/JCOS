@@ -208,21 +208,34 @@ $(BUILD)/user_amd_polaris_reader.o: user/drivers/amd_polaris_reader.c user/drive
 $(BUILD)/user_amd_polaris_plane.o: user/drivers/amd_polaris_plane.c user/drivers/amd_polaris_plane.h user/drivers/amd_polaris_display.h include/polaris_plane_protocol.h include/amd_polaris_registers.h include/user_abi.h | $(BUILD)
 	$(CLANG) $(USER_CFLAGS) -c $< -o $@
 
-$(BUILD)/user_register_probe.o: user/register_reader_probe.c user/drivers/amd_polaris_plane.h include/polaris_plane_protocol.h user/lib/syscall.h user/drivers/amd_polaris_display.h include/amd_polaris_registers.h include/device_register_abi.h include/register_probe_protocol.h include/program_startup.h include/user_abi.h | $(BUILD)
+$(BUILD)/user_amd_polaris_link.o: user/drivers/amd_polaris_link.c user/drivers/amd_polaris_link.h include/polaris_link_protocol.h include/amd_polaris_registers.h | $(BUILD)
 	$(CLANG) $(USER_CFLAGS) -c $< -o $@
 
-$(USER_REGISTER_PROBE): $(BUILD)/user_crt0_startup.o $(BUILD)/user_syscall.o $(BUILD)/user_register_probe.o $(BUILD)/user_amd_polaris_reader.o $(BUILD)/user_amd_polaris_display.o $(BUILD)/user_amd_polaris_plane.o user/display_service.ld Makefile.msys2
+$(BUILD)/user_amd_polaris_timing.o: user/drivers/amd_polaris_timing.c user/drivers/amd_polaris_timing.h user/drivers/amd_polaris_link.h include/polaris_timing_protocol.h include/polaris_link_protocol.h include/amd_polaris_registers.h include/user_abi.h | $(BUILD)
+	$(CLANG) $(USER_CFLAGS) -c $< -o $@
+
+$(BUILD)/user_amd_polaris_vertical.o: user/drivers/amd_polaris_vertical.c user/drivers/amd_polaris_vertical.h user/drivers/amd_polaris_timing.h include/polaris_vertical_protocol.h include/polaris_timing_protocol.h | $(BUILD)
+	$(CLANG) $(USER_CFLAGS) -c $< -o $@
+
+$(BUILD)/user_register_probe.o: user/register_reader_probe.c user/drivers/amd_polaris_vertical.h include/polaris_vertical_protocol.h user/drivers/amd_polaris_timing.h include/polaris_timing_protocol.h user/drivers/amd_polaris_link.h include/polaris_link_protocol.h user/drivers/amd_polaris_plane.h include/polaris_plane_protocol.h user/lib/syscall.h user/drivers/amd_polaris_display.h include/amd_polaris_registers.h include/device_register_abi.h include/register_probe_protocol.h include/program_startup.h include/user_abi.h | $(BUILD)
+	$(CLANG) $(USER_CFLAGS) -c $< -o $@
+
+$(USER_REGISTER_PROBE): $(BUILD)/user_crt0_startup.o $(BUILD)/user_syscall.o $(BUILD)/user_register_probe.o $(BUILD)/user_amd_polaris_reader.o $(BUILD)/user_amd_polaris_display.o $(BUILD)/user_amd_polaris_plane.o $(BUILD)/user_amd_polaris_link.o $(BUILD)/user_amd_polaris_timing.o $(BUILD)/user_amd_polaris_vertical.o user/display_service.ld Makefile.msys2
 	mkdir -p $(dir $@)
-	$(LD) -m elf_x86_64 -nostdlib -static -T user/display_service.ld -o $@ $(BUILD)/user_crt0_startup.o $(BUILD)/user_syscall.o $(BUILD)/user_register_probe.o $(BUILD)/user_amd_polaris_reader.o $(BUILD)/user_amd_polaris_display.o $(BUILD)/user_amd_polaris_plane.o
+	$(LD) -m elf_x86_64 -nostdlib -static -T user/display_service.ld -o $@ $(BUILD)/user_crt0_startup.o $(BUILD)/user_syscall.o $(BUILD)/user_register_probe.o $(BUILD)/user_amd_polaris_reader.o $(BUILD)/user_amd_polaris_display.o $(BUILD)/user_amd_polaris_plane.o $(BUILD)/user_amd_polaris_link.o $(BUILD)/user_amd_polaris_timing.o $(BUILD)/user_amd_polaris_vertical.o
 	$(CHECK_ELF_RELOCATIONS)
 
 $(BUILD)/user_amd_polaris_rom.o: user/drivers/amd_polaris_rom.c user/drivers/amd_polaris_rom.h include/polaris_rom_protocol.h | $(BUILD)
 	$(CLANG) $(USER_CFLAGS) -c $< -o $@
+$(BUILD)/user_amd_polaris_rom_routes.o: user/drivers/amd_polaris_rom_routes.c user/drivers/amd_polaris_rom.h include/polaris_rom_protocol.h | $(BUILD)
+	$(CLANG) $(USER_CFLAGS) -c $< -o $@
+$(BUILD)/user_amd_polaris_rom_topology.o: user/drivers/amd_polaris_rom_topology.c user/drivers/amd_polaris_rom.h include/polaris_rom_protocol.h | $(BUILD)
+	$(CLANG) $(USER_CFLAGS) -c $< -o $@
 $(BUILD)/user_polaris_rom.o: user/polaris_rom.c user/drivers/amd_polaris_rom.h include/polaris_rom_protocol.h include/program_startup.h user/lib/syscall.h | $(BUILD)
 	$(CLANG) $(USER_CFLAGS) -c $< -o $@
-$(USER_POLARIS_ROM): $(BUILD)/user_crt0_startup.o $(BUILD)/user_syscall.o $(BUILD)/user_polaris_rom.o $(BUILD)/user_amd_polaris_rom.o user/display_service.ld Makefile.msys2
+$(USER_POLARIS_ROM): $(BUILD)/user_crt0_startup.o $(BUILD)/user_syscall.o $(BUILD)/user_polaris_rom.o $(BUILD)/user_amd_polaris_rom.o $(BUILD)/user_amd_polaris_rom_routes.o $(BUILD)/user_amd_polaris_rom_topology.o user/display_service.ld Makefile.msys2
 	mkdir -p $(dir $@)
-	$(LD) -m elf_x86_64 -nostdlib -static -T user/display_service.ld -o $@ $(BUILD)/user_crt0_startup.o $(BUILD)/user_syscall.o $(BUILD)/user_polaris_rom.o $(BUILD)/user_amd_polaris_rom.o
+	$(LD) -m elf_x86_64 -nostdlib -static -T user/display_service.ld -o $@ $(BUILD)/user_crt0_startup.o $(BUILD)/user_syscall.o $(BUILD)/user_polaris_rom.o $(BUILD)/user_amd_polaris_rom.o $(BUILD)/user_amd_polaris_rom_routes.o $(BUILD)/user_amd_polaris_rom_topology.o
 	$(CHECK_ELF_RELOCATIONS)
 
 $(BUILD)/user_polaris_font.o: kernel/font8x8.c kernel/font8x8.h kernel/types.h | $(BUILD)
@@ -230,15 +243,18 @@ $(BUILD)/user_polaris_font.o: kernel/font8x8.c kernel/font8x8.h kernel/types.h |
 $(BUILD)/user_amd_polaris_program.o: user/drivers/amd_polaris_program.c user/drivers/amd_polaris_program.h include/polaris_rebind_protocol.h include/amd_polaris_registers.h | $(BUILD)
 	$(CLANG) $(USER_CFLAGS) -c $< -o $@
 
-$(BUILD)/user_polaris_native.o: user/polaris_native.c user/drivers/amd_polaris_plane.h include/polaris_native_protocol.h include/polaris_plane_protocol.h include/amd_polaris_registers.h include/program_startup.h kernel/font8x8.h user/drivers/amd_polaris_program.h include/polaris_rebind_protocol.h | $(BUILD)
+$(BUILD)/user_amd_polaris_vtotal.o: user/drivers/amd_polaris_vtotal.c user/drivers/amd_polaris_vtotal.h include/polaris_vtotal_protocol.h include/polaris_vertical_protocol.h | $(BUILD)
+	$(CLANG) $(USER_CFLAGS) -c $< -o $@
+
+$(BUILD)/user_polaris_native.o: user/polaris_native.c user/drivers/amd_polaris_plane.h include/polaris_native_protocol.h include/polaris_plane_protocol.h include/amd_polaris_registers.h include/program_startup.h kernel/font8x8.h user/drivers/amd_polaris_program.h include/polaris_rebind_protocol.h user/drivers/amd_polaris_vtotal.h include/polaris_vtotal_protocol.h | $(BUILD)
 	$(CLANG) $(USER_CFLAGS) -DPOLARIS_NATIVE_ROLE=1 -c $< -o $@
-$(BUILD)/user_polaris_rescue.o: user/polaris_native.c user/drivers/amd_polaris_plane.h include/polaris_native_protocol.h include/polaris_plane_protocol.h include/amd_polaris_registers.h include/program_startup.h kernel/font8x8.h user/drivers/amd_polaris_program.h include/polaris_rebind_protocol.h | $(BUILD)
+$(BUILD)/user_polaris_rescue.o: user/polaris_native.c user/drivers/amd_polaris_plane.h include/polaris_native_protocol.h include/polaris_plane_protocol.h include/amd_polaris_registers.h include/program_startup.h kernel/font8x8.h user/drivers/amd_polaris_program.h include/polaris_rebind_protocol.h user/drivers/amd_polaris_vtotal.h include/polaris_vtotal_protocol.h | $(BUILD)
 	$(CLANG) $(USER_CFLAGS) -DPOLARIS_NATIVE_ROLE=2 -c $< -o $@
-$(USER_POLARIS_NATIVE): $(BUILD)/user_polaris_native.o $(BUILD)/user_polaris_font.o $(BUILD)/user_amd_polaris_plane.o $(BUILD)/user_amd_polaris_program.o $(BUILD)/user_crt0_startup.o $(BUILD)/user_syscall.o user/display_service.ld Makefile.msys2
+$(USER_POLARIS_NATIVE): $(BUILD)/user_polaris_native.o $(BUILD)/user_polaris_font.o $(BUILD)/user_amd_polaris_plane.o $(BUILD)/user_amd_polaris_program.o $(BUILD)/user_amd_polaris_vtotal.o $(BUILD)/user_crt0_startup.o $(BUILD)/user_syscall.o user/display_service.ld Makefile.msys2
 	mkdir -p $(dir $@)
 	$(LD) -m elf_x86_64 -nostdlib -static -T user/display_service.ld -o $@ $(filter %.o,$^)
 	$(CHECK_ELF_RELOCATIONS)
-$(USER_POLARIS_RESCUE): $(BUILD)/user_polaris_rescue.o $(BUILD)/user_polaris_font.o $(BUILD)/user_amd_polaris_plane.o $(BUILD)/user_amd_polaris_program.o $(BUILD)/user_crt0_startup.o $(BUILD)/user_syscall.o user/display_service.ld Makefile.msys2
+$(USER_POLARIS_RESCUE): $(BUILD)/user_polaris_rescue.o $(BUILD)/user_polaris_font.o $(BUILD)/user_amd_polaris_plane.o $(BUILD)/user_amd_polaris_program.o $(BUILD)/user_amd_polaris_vtotal.o $(BUILD)/user_crt0_startup.o $(BUILD)/user_syscall.o user/display_service.ld Makefile.msys2
 	mkdir -p $(dir $@)
 	$(LD) -m elf_x86_64 -nostdlib -static -T user/display_service.ld -o $@ $(filter %.o,$^)
 	$(CHECK_ELF_RELOCATIONS)
@@ -632,8 +648,10 @@ $(BUILD)/polaris-native-config: polaris-native-config-force | $(BUILD)
 	@printf '%s\n' "$(POLARIS_NATIVE_WRITE)" > "$@.tmp"
 	@cmp -s "$@.tmp" "$@" || cp "$@.tmp" "$@"
 	@rm -f "$@.tmp"
-$(BUILD)/kernel/polaris_native.o $(BUILD)/kernel/polaris_watch.o: $(BUILD)/polaris-native-config
-$(BUILD)/kernel/polaris_native.o $(BUILD)/kernel/polaris_watch.o: KERNEL_CPPFLAGS += -DJCOS_POLARIS_NATIVE_WRITE=$(POLARIS_NATIVE_WRITE)
+$(BUILD)/kernel/polaris_native.o $(BUILD)/kernel/polaris_watch.o $(BUILD)/kernel/polaris_link_capture.o: $(BUILD)/polaris-native-config
+$(BUILD)/kernel/polaris_native.o $(BUILD)/kernel/polaris_watch.o $(BUILD)/kernel/polaris_link_capture.o: KERNEL_CPPFLAGS += -DJCOS_POLARIS_NATIVE_WRITE=$(POLARIS_NATIVE_WRITE)
+
+$(BUILD)/kernel/polaris_link_capture.o: Makefile.msys2 include/polaris_link_protocol.h include/polaris_timing_protocol.h include/polaris_vertical_protocol.h kernel/polaris_link.h
 
 $(KERNEL): $(BUILD)/arch.o $(KERNEL_C_OBJECTS) kernel/linker.ld Makefile.msys2
 	$(LD) -m elf_x86_64 -pie -Bsymbolic --no-dynamic-linker --no-undefined -nostdlib \
@@ -740,3 +758,11 @@ test-polaris-broker:
 .PHONY: test-polaris-rom
 test-polaris-rom:
 	$(PYTHON) tools/test_polaris_rom.py --cc $(CLANG) --build-dir $(BUILD)/host-tests
+
+.PHONY: test-polaris-vertical
+test-polaris-vertical:
+	$(PYTHON) tools/test_polaris_vertical.py --cc $(CLANG) --build-dir $(BUILD)/host-tests
+
+.PHONY: test-polaris-vtotal
+test-polaris-vtotal:
+	$(PYTHON) tools/test_polaris_vtotal.py --cc $(CLANG) --build-dir $(BUILD)/host-tests
